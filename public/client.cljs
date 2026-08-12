@@ -1,43 +1,46 @@
-;; The runtime. Loaded last on purpose: the namespace this file ends in is the
-;; one the server's component gets evaluated in, which is how it sees `rpc!`
-;; without a require.
+;; The runtime. Squint compiles this on the server and serves the result as an
+;; ES module, so nothing here is interpreted in the browser.
 
-(ns user
-  (:require [clojure.edn :as edn]
-            [reagami.core :as reagami]))
+(ns client
+  (:require ["https://esm.sh/reagami@0.2.40" :as reagami]
+            ["squint-cljs/core.js" :as SQ]))
 
-(defonce instances (atom {}))    ; id -> atom of the current slot values
-(defonce session (atom nil))     ; names our stream when we POST to /rpc
+(def instances (js/Map.))    ; id -> {:vals ... :draw ...}
+(def state #js {:session nil})
 
 (defn rpc!
   "Stands in for a `(server ...)` form the server kept. Fire and forget: the
   answer comes back on the event stream as a :patch, not in this response."
   [id args]
-  (js/fetch "/rpc" #js {:method "POST" :body (pr-str [@session id args])})
+  (js/fetch "/rpc" #js {:method "POST"
+                        :body (js/JSON.stringify #js [(.-session state) id args])})
   nil)
 
-;; What the last render did. On the first one these should be adopted nodes
-;; rather than created ones: the server already rendered this tree with
-;; reagami.ssr, and Reagami takes the existing DOM over instead of rebuilding.
-(defonce last-render (atom nil))
+(defn- component
+  "The server sends a JavaScript expression with `SQ` and `rpc_BANG_` free.
+  Supplying them as arguments keeps both out of the global scope."
+  [js]
+  ((js/Function. "SQ" "rpc_BANG_" (str "return " js)) SQ rpc!))
 
-(defn- mount! [id el src vals]
-  (let [f    (js/scittle.core.eval_string src)
-        a    (atom vals)
+(defn- mount! [id el js vals]
+  (let [f (component js)
         node (js/document.getElementById el)
-        draw #(reset! last-render (reagami/render node (into [f] @a)))]
-    (add-watch a ::draw (fn [_ _ _ _] (draw)))
-    (swap! instances assoc id a)
+        entry #js {:vals vals}
+        draw (fn [] (reagami/render node (.concat #js [f] (.-vals entry))))]
+    (set! (.-draw entry) draw)
+    (.set instances id entry)
     (draw)))
 
 (defn- handle [[op a b c d]]
   (case op
-    :session (reset! session a)
-    :mount   (mount! a b c d)
-    :patch   (reset! (@instances a) b)))
+    "session" (set! (.-session state) a)
+    "mount"   (mount! a b c d)
+    "patch"   (let [entry (.get instances a)]
+                (set! (.-vals entry) b)
+                ((.-draw entry)))
+    nil))
 
-;; No reconnect loop: EventSource does that itself. A reconnect gets a fresh
-;; session and :mount, so the page rebuilds without a reload.
-(defonce stream
+;; No reconnect loop: EventSource does that itself.
+(def stream
   (doto (js/EventSource. "/events")
-    (.addEventListener "message" #(handle (edn/read-string (.-data %))))))
+    (.addEventListener "message" (fn [e] (handle (js/JSON.parse (.-data e)))))))

@@ -1,10 +1,11 @@
 (ns split.server
   (:require [babashka.fs :as fs]
-            [clojure.edn :as edn]
+            [cheshire.core :as json]
             [clojure.string :as str]
             [org.httpkit.server :as http]
             [reagami.ssr :as ssr]
-            [split.app :as app]))
+            [split.app :as app]
+            [squint.compiler :as squint]))
 
 (def ^:private public (fs/canonicalize "public"))
 
@@ -19,10 +20,10 @@
 (defonce conns (atom {}))
 
 (defn- event!
-  "One SSE frame. `pr-str` escapes newlines inside strings, so a value can never
+  "One SSE frame. JSON escapes newlines inside strings, so a value can never
   break out of its own `data:` line."
   [ch msg]
-  (http/send! ch (str "data: " (pr-str msg) "\n\n") false))
+  (http/send! ch (str "data: " (json/generate-string msg) "\n\n") false))
 
 (defn- open-stream [session ch]
   (http/send! ch {:status 200
@@ -30,10 +31,10 @@
                             "Cache-Control" "no-cache"
                             "X-Accel-Buffering" "no"}}
               false)
-  (event! ch [:session session])
+  (event! ch ["session" session])
   (let [inst (app/todo-app)]
     (swap! conns assoc session {:ch ch :instances {(:id inst) inst}})
-    (event! ch [:mount (:id inst) "app" (:src inst) ((:slots inst))])))
+    (event! ch ["mount" (:id inst) "app" (:js inst) ((:slots inst))])))
 
 (defn- events [req]
   (let [session (str (random-uuid))]
@@ -41,7 +42,7 @@
                           :on-close (fn [_ _] (swap! conns dissoc session))})))
 
 (defn- rpc [req]
-  (let [[session handler-id args] (edn/read-string (slurp (:body req)))]
+  (let [[session handler-id args] (json/parse-string (slurp (:body req)))]
     (if-let [f (some #(get (:handlers %) handler-id)
                      (vals (:instances (get @conns session))))]
       (do (apply f args)
@@ -53,7 +54,7 @@
 (defn- broadcast-patch! [_ _ _ _]
   (doseq [{:keys [ch instances]} (vals @conns)
           inst (vals instances)]
-    (event! ch [:patch (:id inst) ((:slots inst))])))
+    (event! ch ["patch" (:id inst) ((:slots inst))])))
 
 (add-watch app/db ::render broadcast-patch!)
 (add-watch app/clicks ::render broadcast-patch!)
@@ -67,6 +68,13 @@
       (doseq [{:keys [ch]} (vals @conns)]
         (http/send! ch ": ping\n\n" false))
       (recur))))
+
+;; The runtime is written in Clojure and compiled here. Nothing interprets
+;; Clojure in the browser, so the page loads no interpreter at all.
+(defn- client-module []
+  {:status 200
+   :headers {"Content-Type" "text/javascript"}
+   :body (squint/compile-string (slurp (fs/file public "client.cljs")))})
 
 (def ^:private content-types
   {"html" "text/html" "cljs" "text/plain; charset=utf-8" "css" "text/css"})
@@ -94,9 +102,10 @@
 
 (defn handler [req]
   (case (:uri req)
-    "/"       (index)
-    "/events" (events req)
-    "/rpc"    (rpc req)
+    "/"           (index)
+    "/client.mjs" (client-module)
+    "/events"     (events req)
+    "/rpc"        (rpc req)
     (serve-file (:uri req))))
 
 (defn -main [& _]

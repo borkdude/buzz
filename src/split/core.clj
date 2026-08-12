@@ -12,9 +12,10 @@
                      an `rpc!` call in its place, carrying the local bindings
                      the expression needs
 
-  What is left is printed once and evaluated by Scittle. Renders after the first
-  one send only the values."
-  (:require [clojure.string :as str]))
+  What is left is compiled to JavaScript by Squint, here, once. Renders after
+  the first one send only the values."
+  (:require [clojure.string :as str]
+            [squint.compiler :as squint]))
 
 (defmacro server
   "Marker. Only has meaning inside `defsplit`."
@@ -140,13 +141,22 @@
                      (apply list (mapv ssr-form form)))
     :else form))
 
+(defn- to-js
+  "Compiles the browser form to a self-contained JavaScript expression. `SQ` and
+  `rpc_BANG_` are left free, so the browser supplies both as arguments rather
+  than through globals. Squint runs here, at macro expansion, so the result is a
+  string constant like any other."
+  [form]
+  (squint/compile-string (pr-str form)
+                         {:context :expr :core-alias "SQ" :elide-imports true}))
+
 (defn split-body
-  "Returns {:src :ssr-forms :slot-exprs :handlers} for a component body."
+  "Returns {:js :ssr-forms :slot-exprs :handlers} for a component body."
   [body comp-id]
   (let [acc   (atom {:slots [] :handlers []})
         forms (mapv #(conv % #{} false comp-id acc) body)
         {:keys [slots handlers]} @acc]
-    {:src        (pr-str (apply list 'fn (mapv :sym slots) forms))
+    {:js         (to-js (apply list 'fn (mapv :sym slots) forms))
      :ssr-forms  (mapv ssr-form forms)
      :slot-exprs (mapv :expr slots)
      :handlers   handlers
@@ -156,15 +166,16 @@
   "Defines a component. Calling it returns an instance:
 
     {:id       stable name, used as the key on the wire
-     :src      the browser function, printed once
+     :js       the browser function as JavaScript, compiled once
+     :ssr      the same function, compiled here, for the first paint
      :slots    thunk returning the current values for that function
      :handlers id -> fn, called when the browser sends an :rpc}"
   [nm argv & body]
   (let [comp-id (str nm)
-        {:keys [src ssr-forms slot-exprs slot-syms handlers]} (split-body body comp-id)]
+        {:keys [js ssr-forms slot-exprs slot-syms handlers]} (split-body body comp-id)]
     `(defn ~nm ~argv
        {:id       ~comp-id
-        :src      ~src
+        :js       ~js
         :ssr      (fn ~slot-syms ~@ssr-forms)
         :slots    (fn [] ~(vec slot-exprs))
         :handlers ~(into {} (map (fn [[id h]] [id `(fn ~(:params h) ~(:expr h))])) handlers)})))

@@ -23,11 +23,11 @@
     <script>window.ssrProbe = {root: document.querySelector('#app > div'),
                                li: document.querySelector('#app li')};</script>
 
-    <script src="https://cdn.jsdelivr.net/npm/scittle@0.8.32/dist/scittle.js"></script>
-    <!-- Reagami has no dependencies and no macros, so Scittle can evaluate the
-         source straight from the repo. No React, no build, no bundle. -->
-    <script type="application/x-scittle"
-            src="https://raw.githubusercontent.com/borkdude/reagami/v0.2.40/src/reagami/core.cljc"></script>
-    <script type="application/x-scittle" src="/client.cljs"></script>
+    <!-- Squint emits a bare specifier for its own core. Reagami is imported by
+         URL, so only this one needs mapping. -->
+    <script type="importmap">
+      {"imports": {"squint-cljs/core.js": "https://esm.sh/squint-cljs@0.14.208/core.js"}}
+    </script>
+    <script type="module" src="/client.mjs"></script>
   </body>
 </html>
