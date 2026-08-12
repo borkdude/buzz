@@ -1,0 +1,13 @@
+{:paths ["src"]
+ :deps {io.github.borkdude/reagami {:git/tag "v0.2.40"
+                                    :git/sha "d283b55d4a0864cf39303f25f6ff79100937a8aa"}}
+ :tasks {serve {:doc "Start the server on http://localhost:1341"
+                :requires ([split.server :as server])
+                :task (server/-main)}
+         split {:doc "Print what the splitter makes of the demo component"
+                :requires ([split.app :as app])
+                :task (let [inst (app/todo-app)]
+                        (println "id      " (:id inst))
+                        (println "src     " (:src inst))
+                        (println "slots   " ((:slots inst)))
+                        (println "handlers" (sort (keys (:handlers inst)))))}}}
