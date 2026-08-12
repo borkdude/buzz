@@ -8,7 +8,7 @@
 (defonce db (atom (sorted-map)))
 (defonce next-id (atom 0))
 (defonce clicks (atom 0))
-
+#_(swap! clicks inc)
 (defn add! [title]
   (let [title (some-> title str/trim not-empty)]
     (when title
@@ -37,7 +37,8 @@
         n     (server @clicks)]
     [:div
      [:h1 "todos"]
-     [:input.new {:placeholder "what needs doing?"
+     [:input.new {:placeholder (str "what needs doing, " (server (System/getProperty "user.name"))
+                                    "?")
                   :autofocus true
                   :on-key-down (fn [e]
                                  (when (= "Enter" (.-key e))
