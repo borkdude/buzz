@@ -6,6 +6,9 @@
  :tasks {serve {:doc "Start the server on http://localhost:1341"
                 :requires ([split.server :as server])
                 :task (server/-main)}
+         dev   {:doc "Start the server plus an nrepl on 1667. Re-evaluate a defsplit and the page updates."
+                :requires ([split.server :as server])
+                :task (server/-main "--nrepl")}
          split {:doc "Print what the splitter makes of the demo component"
                 :requires ([split.app :as app])
                 :task (let [inst (app/todo-app)]

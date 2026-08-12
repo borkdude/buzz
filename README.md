@@ -77,12 +77,14 @@ Two endpoints, neither of them bidirectional:
 
 ```js
 data: ["session","2fbe6cf7-…"]
-data: ["mount","todo-app","app","(function (slot__1, slot__2) { … })",[[{"id":1,"title":"…","done":false}],1,0]]
+data: ["mount","todo-app","app",[[{"id":1,"title":"…","done":false}],1,0]]
 data: ["patch","todo-app",[[{"id":1,"title":"…","done":true}],0,0]]
+data: ["reload",3,"todo-app",[[{"id":1,"title":"…","done":true}],0,0]]
 ```
 
-The compiled function crosses once per connection, on the `:mount`. Everything
-after it is values.
+Only values cross this stream. The components are a module the browser imports
+from `/components.mjs`, so no code travels in a message and the page never
+evaluates a string.
 
 The wire is JSON rather than EDN. Squint has no EDN reader, and it does not need
 one: keyword keys are already strings on the other side, so `{:id 1}` arrives as
@@ -100,8 +102,26 @@ EventSource reconnects on its own, so the client has no retry loop. On reconnect
 the server sends a fresh `:session` and `:mount`, and the page rebuilds without a
 reload — kill the server and restart it with the page open to watch it come back.
 
-There is no separate op for shipping source. One component covers the page, so
-source and first values always travel together and `:mount` carries both.
+## Development
+
+    bb dev     # server plus an nrepl on 1667
+
+Re-evaluate a `defsplit` in the repl and the open page updates. No file watcher
+and no reload:
+
+```clojure
+(defsplit todo-app []
+  [:div [:h1 "todos, redefined from the repl"] …])
+```
+
+Expanding a `defsplit` bumps a revision counter, so evaluating the form is the
+whole trigger. The server rebuilds each connection's instance, so its handler
+ids match the new code, and sends `["reload" rev id vals]`. The browser imports
+`/components.mjs?v=rev` and redraws. The query string is what makes the browser
+fetch the module again rather than hand back the one it already has.
+
+Handlers keep working across the swap, since the instance behind them was
+rebuilt in the same step.
 
 ## First paint
 
@@ -172,21 +192,22 @@ window and it moves in the other, the same way the todos do.
 What the browser downloads before anything renders:
 
     scittle branch                          squint branch
-    scittle.js       967 KB  (193 KB gz)    client.mjs      1.6 KB
-    reagami core.cljc 28 KB, interpreted    reagami.mjs     9.5 KB (3.8 KB gz)
-    client.cljs, interpreted                squint core      59 KB  (18 KB gz)
+    scittle.js       967 KB  (193 KB gz)    client.mjs, rpc.mjs,
+    reagami core.cljc 28 KB, interpreted      components.mjs   ~4 KB
+    client.cljs, interpreted                reagami.mjs      9.5 KB (3.8 KB gz)
+                                            squint core       59 KB  (18 KB gz)
 
 Both branches keep the same `defsplit`, the same splitter and the same SSR path.
-They differ in what `:mount` carries and who reads it.
+They differ in what reaches the browser and who reads it.
 
-Scittle ships Clojure and keeps a reader and an interpreter in the browser, so a
+Scittle ships Clojure and keeps a reader and an interpreter in the page, so a
 value keeps its type across the wire and `curl` shows EDN. Squint ships
-JavaScript, so the browser starts faster and stays smaller, but the wire is JSON
-and loses keywords and integer keys on the way.
+JavaScript, so the browser starts faster, stays smaller and needs no
+`unsafe-eval`, but the wire is JSON and loses keywords and integer keys.
 
-Squint also compiles once, at namespace load, where Scittle re-reads on every
-`:mount`. Against that, Scittle can send a form it built a moment ago, which this
-branch cannot without running the compiler per request.
+The interpreter buys one thing this branch gives up: the browser can evaluate
+code it is handed directly, without that code having an address. Everything else
+survives the trade.
 
 ## How it differs from Electric
 
@@ -233,8 +254,9 @@ its own core, which is the one thing `index.html` has to map:
   name the browser scope has bound, so a `let` binding also called `clicks` would
   ship the rendered number as an argument instead of using the server's atom. The
   demo binds it as `n` for that reason.
-- A reconnect re-sends and re-evaluates the compiled function. The client could
-  tell the server what it already holds; it doesn't.
+- Live reload re-imports the whole component module, so every open page pays for
+  any change. Each revision is also a new module the browser keeps for the life
+  of the tab, which is fine for development and a leak anywhere else.
 - Squint compiles at macro expansion, so a component that fails to compile fails
   at namespace load rather than at request time. That is the good direction, but
   the error arrives without a request to blame it on.
@@ -253,10 +275,23 @@ its own core, which is the one thing `index.html` has to map:
 
 ## Note on trust
 
-The browser runs whatever the server sends, so the stream carries the same
-authority as a `<script>` tag. That is fine when both ends are yours, as here.
-It is not a sandbox, and `js/Function` needs `unsafe-eval` if you set a CSP.
-Compiling instead of interpreting does not change that: the output is still code
-the browser is asked to run sight unseen.
+The page serves a strict policy and holds itself to it:
+
+    default-src 'none';
+    script-src 'self' https://esm.sh 'nonce-…';
+    style-src 'nonce-…';
+    connect-src 'self';
+    base-uri 'none'
+
+No `unsafe-eval`. Code reaches the browser only as a module it imports from a
+URL, never as a string in a message, so a stray `eval` or `new Function` fails
+loudly rather than quietly working.
+
+That is a real difference from the `scittle` branch, which needs `unsafe-eval`
+to do its job at all. It is not a difference in what the two can express: a
+component compiled at request time can still be imported at a fresh URL, and
+`import()` is governed by `script-src` rather than `unsafe-eval`. What the strict
+policy rules out is handing the browser code inline, not generating code at
+runtime.
 
 The server only ever receives a handler id and JSON arguments, never code.

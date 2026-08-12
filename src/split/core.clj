@@ -141,6 +141,10 @@
                      (apply list (mapv ssr-form form)))
     :else form))
 
+;; Bumped every time a defsplit is evaluated, so re-evaluating one in a REPL is
+;; enough to tell the browsers something changed.
+(defonce revision (atom 0))
+
 (defn- to-js
   "Compiles the browser form to a self-contained JavaScript expression. `SQ` and
   `rpc_BANG_` are left free, so the browser supplies both as arguments rather
@@ -173,9 +177,12 @@
   [nm argv & body]
   (let [comp-id (str nm)
         {:keys [js ssr-forms slot-exprs slot-syms handlers]} (split-body body comp-id)]
-    `(defn ~nm ~argv
-       {:id       ~comp-id
-        :js       ~js
-        :ssr      (fn ~slot-syms ~@ssr-forms)
-        :slots    (fn [] ~(vec slot-exprs))
-        :handlers ~(into {} (map (fn [[id h]] [id `(fn ~(:params h) ~(:expr h))])) handlers)})))
+    `(do
+       (defn ~nm ~argv
+         {:id       ~comp-id
+          :js       ~js
+          :ssr      (fn ~slot-syms ~@ssr-forms)
+          :slots    (fn [] ~(vec slot-exprs))
+          :handlers ~(into {} (map (fn [[id h]] [id `(fn ~(:params h) ~(:expr h))])) handlers)})
+       (swap! revision inc)
+       (var ~nm))))

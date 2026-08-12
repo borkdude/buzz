@@ -1,43 +1,42 @@
 ;; The runtime. Squint compiles this on the server and serves the result as an
-;; ES module, so nothing here is interpreted in the browser.
+;; ES module. The components arrive the same way, as a module the browser
+;; imports, so the page never evaluates anything it was handed at runtime.
 
 (ns client
   (:require ["https://esm.sh/reagami@0.2.40" :as reagami]
-            ["squint-cljs/core.js" :as SQ]))
+            ["/components.mjs" :as components]
+            ["/rpc.mjs" :as rpc]))
 
-(def instances (js/Map.))    ; id -> {:vals ... :draw ...}
-(def state #js {:session nil})
+(def instances (js/Map.))                            ; id -> {:vals ... :draw ...}
+(def registry #js {:v (.-registry components)})      ; replaced on reload
 
-(defn rpc!
-  "Stands in for a `(server ...)` form the server kept. Fire and forget: the
-  answer comes back on the event stream as a :patch, not in this response."
-  [id args]
-  (js/fetch "/rpc" #js {:method "POST"
-                        :body (js/JSON.stringify #js [(.-session state) id args])})
-  nil)
+(defn- draw! [id]
+  (let [entry (.get instances id)
+        node (.-node entry)]
+    (reagami/render node (.concat #js [(aget (.-v registry) id)] (.-vals entry)))))
 
-(defn- component
-  "The server sends a JavaScript expression with `SQ` and `rpc_BANG_` free.
-  Supplying them as arguments keeps both out of the global scope."
-  [js]
-  ((js/Function. "SQ" "rpc_BANG_" (str "return " js)) SQ rpc!))
+(defn- mount! [id el vals]
+  (.set instances id #js {:vals vals :node (js/document.getElementById el)})
+  (draw! id))
 
-(defn- mount! [id el js vals]
-  (let [f (component js)
-        node (js/document.getElementById el)
-        entry #js {:vals vals}
-        draw (fn [] (reagami/render node (.concat #js [f] (.-vals entry))))]
-    (set! (.-draw entry) draw)
-    (.set instances id entry)
-    (draw)))
+(defn- patch! [id vals]
+  (set! (.-vals (.get instances id)) vals)
+  (draw! id))
 
-(defn- handle [[op a b c d]]
+;; Live reload. The query string is what makes the browser fetch the module
+;; again instead of handing back the one it already has.
+(defn- reload! [rev id vals]
+  (-> (js/import (str "/components.mjs?v=" rev))
+      (.then (fn [m]
+               (set! (.-v registry) (.-registry m))
+               (patch! id vals)))))
+
+(defn- handle [[op a b c]]
   (case op
-    "session" (set! (.-session state) a)
-    "mount"   (mount! a b c d)
-    "patch"   (let [entry (.get instances a)]
-                (set! (.-vals entry) b)
-                ((.-draw entry)))
+    "session" (rpc/set-session! a)
+    "mount"   (mount! a b c)
+    "patch"   (patch! a b)
+    "reload"  (reload! a b c)
     nil))
 
 ;; No reconnect loop: EventSource does that itself.

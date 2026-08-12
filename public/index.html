@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <title>scittle-split</title>
-    <style>
+    <style nonce="NONCE">
       body { font: 16px/1.5 system-ui, sans-serif; max-width: 32rem; margin: 3rem auto; padding: 0 1rem; }
       h1 { font-size: 1.4rem; }
       ul { list-style: none; padding: 0; }
@@ -18,14 +18,14 @@
   </head>
   <body>
     <div id="app"><!--ssr--></div>
-    <!-- Grabs the server-rendered nodes before Scittle runs. If Reagami adopts
-         them, these are the same objects afterwards. -->
-    <script>window.ssrProbe = {root: document.querySelector('#app > div'),
+    <!-- Grabs the server-rendered nodes before the module runs. If Reagami
+         adopts them, these are the same objects afterwards. -->
+    <script nonce="NONCE">window.ssrProbe = {root: document.querySelector('#app > div'),
                                li: document.querySelector('#app li')};</script>
 
     <!-- Squint emits a bare specifier for its own core. Reagami is imported by
          URL, so only this one needs mapping. -->
-    <script type="importmap">
+    <script type="importmap" nonce="NONCE">
       {"imports": {"squint-cljs/core.js": "https://esm.sh/squint-cljs@0.14.208/core.js"}}
     </script>
     <script type="module" src="/client.mjs"></script>
