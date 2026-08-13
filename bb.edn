@@ -3,7 +3,13 @@
                                     :git/sha "d283b55d4a0864cf39303f25f6ff79100937a8aa"}
         io.github.squint-cljs/squint {:git/tag "v0.14.208"
                                       :git/sha "e83befd03153b842d45cd25a77fefb915f120eb7"}}
- :tasks {serve {:doc "Start the demo on http://localhost:1341"
+ :tasks {
+         test  {:doc "Run the tests"
+                :extra-paths ["test"]
+                :requires ([clojure.test :as t] [buzz.core-test])
+                :task (let [{:keys [fail error]} (t/run-tests 'buzz.core-test)]
+                        (when (pos? (+ fail error)) (System/exit 1)))}
+         serve {:doc "Start the demo on http://localhost:1341"
                 :requires ([buzz.app :as app])
                 :task (app/-main)}
          dev   {:doc "Start the demo plus an nrepl on 1667. Re-evaluate a defui and the page updates."
