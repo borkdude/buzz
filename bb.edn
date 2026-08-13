@@ -9,6 +9,9 @@
          dev   {:doc "Start the demo plus an nrepl on 1667. Re-evaluate a defui and the page updates."
                 :requires ([buzz.app :as app])
                 :task (app/-main "--nrepl")}
+         bench {:doc "A table of N rows on http://localhost:1342, for measuring"
+                :requires ([buzz.bench :as bench])
+                :task (bench/-main "--nrepl")}
          split {:doc "Print what the splitter makes of the demo component"
                 :requires ([buzz.app :as app])
                 :task (let [inst (app/todo-app (atom ""))]
