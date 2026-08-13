@@ -59,6 +59,23 @@
   [& _]
   (throw (ex-info "(local-state ...) used outside defui" {})))
 
+(def ^:private bare-marks
+  '{server :server, server! :server!, reply :reply,
+    client :client, local-state :local-state})
+
+(def ^:private marks
+  {#'server :server, #'server! :server!, #'reply :reply,
+   #'client :client, #'local-state :local-state})
+
+(defn- mark
+  "Which mark a head symbol names, if any. A bare name matches by name, so a
+  part keeps its marks wherever it is spliced. Anything else resolves, so an
+  alias or a rename means what it names rather than nothing at all."
+  [head]
+  (when (symbol? head)
+    (or (bare-marks head)
+        (marks (try (resolve head) (catch Exception _ nil))))))
+
 (defmacro defpart
   "A hiccup helper. Unlike a function, this is spliced into whichever component
   uses it, before the body is walked, so `(server ...)` inside one is seen and
@@ -109,7 +126,7 @@
   client function. Nothing crosses from the browser here: a slot is evaluated
   before the browser renders, so there is nothing of its to read yet."
   [expr _scope acc]
-  (when (some #(and (seq? %) (= 'client (first %))) (tree-seq coll? seq expr))
+  (when (some #(and (seq? %) (= :client (mark (first %)))) (tree-seq coll? seq expr))
     (throw (ex-info "(client ...) only works inside a handler, not in value position"
                     {:expr expr})))
   (let [sym (gensym "slot__")]
@@ -123,7 +140,7 @@
   (let [found (atom [])
         server-expr (walk/postwalk
                      (fn [x]
-                       (if (and (seq? x) (= 'client (first x)))
+                       (if (and (seq? x) (= :client (mark (first x))))
                          (do (when-not (= 2 (count x))
                                (throw (ex-info "(client ...) takes one expression" {:form x})))
                              (let [sym (gensym "arg__")]
@@ -134,7 +151,7 @@
     [server-expr @found]))
 
 (defn- reply-form? [x]
-  (and (seq? x) (= 'reply (first x))))
+  (and (seq? x) (= :reply (mark (first x)))))
 
 (defn- handler!
   "`(server! ...)` in an event handler. Registers what the server does and
@@ -198,30 +215,31 @@
   (cond
     (and (seq? form) (seq form))
     (let [head (first form)
-          args (rest form)]
+          args (rest form)
+          mk   (mark head)]
       (cond
         ;; Each marker has one legal place. Somewhere else is an error, never a
         ;; different meaning.
-        (= 'server head)
+        (= :server mk)
         (if lambda?
           (throw (ex-info "(server ...) is a value. An event handler wants (server! ...)"
                           {:form form}))
           (slot! (if (= 1 (count args)) (first args) (cons 'do args)) scope acc))
 
-        (= 'server! head)
+        (= :server! mk)
         (if lambda?
           (handler! args scope comp-id acc)
           (throw (ex-info "(server! ...) is an effect, so it needs an event handler to be in"
                           {:form form})))
 
-        (= 'reply head)
+        (= :reply mk)
         (throw (ex-info "(reply ...) only goes at the end of a (server! ...)" {:form form}))
         ;; `(client init)` in value position is a slot the browser owns: an atom
         ;; the runtime makes from `init` and redraws on. Inside a handler the
         ;; code is already the browser's, so it would say nothing.
         ;; `(local-state init)` is state the browser owns: an atom made once at
         ;; mount, not per render, and watched.
-        (= 'local-state head)
+        (= :local-state mk)
         (if lambda?
           (throw (ex-info "(local-state ...) declares state, so it belongs in the body rather than a handler"
                           {:form form}))
@@ -232,7 +250,7 @@
 
         ;; Anything reaching here is a `client` outside a `server!`, since the
         ;; ones inside are lifted out before the walk.
-        (= 'client head)
+        (= :client mk)
         (throw (ex-info "(client ...) crosses a value into a (server! ...). Browser state is (local-state ...)"
                         {:form form}))
         (= 'quote head)  form

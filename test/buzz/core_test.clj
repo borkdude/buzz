@@ -1,5 +1,5 @@
 (ns buzz.core-test
-  (:require [buzz.core :refer [defui server server!]]
+  (:require [buzz.core :as b :refer [defui server server!]]
             [clojure.test :refer [deftest is testing]]))
 
 ;; State the server owns. A component reads it, and a handler changes it.
@@ -74,3 +74,30 @@
     (is (re-find #"declares state"
                  (refusal '(buzz.core/defui e []
                              [:p {:on-click (fn [_] (local-state nil))}]))))))
+
+;; A mark names a var, so it means the same whether it was referred or reached
+;; through an alias.
+(defui aliased []
+  [:div
+   [:p (b/server @clicks)]
+   [:button {:on-click (fn [_] (b/server! (swap! clicks + (b/client 1))
+                                          (b/reply @clicks)))}
+    "+1"]])
+
+(deftest an-alias-marks-as-well-as-a-referred-name
+  (reset! clicks 0)
+  (let [inst (aliased)
+        h    (get (:handlers inst) "aliased/0")]
+
+    (testing "b/server is a slot"
+      (is (= [0] ((:slots inst)))))
+
+    (testing "b/server! is a handler"
+      (is (= ["aliased/0"] (keys (:handlers inst)))))
+
+    (testing "b/client became a parameter the browser supplies"
+      (is (= 5 ((:fn h) 5)))
+      (is (= 5 @clicks)))
+
+    (testing "b/reply says the response carries the value"
+      (is (true? (:reply h))))))
