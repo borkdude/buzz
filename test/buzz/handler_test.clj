@@ -1,6 +1,6 @@
 (ns buzz.handler-test
   (:require [babashka.fs :as fs]
-            [buzz.core :refer [defui reply server server!]]
+            [buzz.core :refer [defpart defui reply server server!]]
             [buzz.handler :as handler]
             [cheshire.core :as json]
             [clojure.string :as str]
@@ -409,3 +409,45 @@
 
         (testing "and the watches on its state go with it"
           (is (until 3000 #(empty? (.getWatches q)))))))))
+
+;; A part leaves no trace at runtime: it is spliced in when the component that
+;; uses it expands. Editing one has to expand those components again, or they
+;; keep running the JavaScript the old part produced.
+(defpart badge [^:server q]
+  [:em (server @q)])
+
+(defui card [q]
+  [:p (badge q)])
+
+(def ^:private wider-badge
+  '(defpart badge [^:server q] [:em (server @q) (server (inc @q))]))
+
+(def ^:private narrow-badge
+  '(defpart badge [^:server q] [:em (server @q)]))
+
+(def ^:private card-spec
+  {:title "card"
+   :mounts [{:el "app"
+             :state (fn [] {:q (atom 0)})
+             :component (fn [st] (card (:q st)))}]})
+
+(deftest editing-a-part-reloads-the-components-that-use-it
+  (with-connection card-spec
+    (fn [{:keys [rdr session]}]
+      (let [q (:q (connection-state session))]
+        (try
+          (testing "the part contributes its slot to the component"
+            (is (= ["mount" "card" "app" [0]] (next-event rdr))))
+
+          (testing "editing the part reloads the component, which was not touched"
+            (redefine! wider-badge)
+            (let [[kind _rev id vals] (next-event rdr)]
+              (is (= "reload" kind))
+              (is (= "card" id))
+              (is (= [0 1] vals))))
+
+          (testing "and the component now runs what the new part produced"
+            (swap! q inc)
+            (is (= ["patch" "card" [1 2]] (next-event rdr))))
+
+          (finally (redefine! narrow-badge)))))))
