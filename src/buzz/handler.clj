@@ -77,9 +77,12 @@
                             "Cache-Control" "no-cache"
                             "X-Accel-Buffering" "no"}}
               false)
-  (event! ch ["session" session])
+  ;; The session id is what an RPC arrives with, so it goes out only once there
+  ;; is something here to find under it. Building the mounts renders every
+  ;; component, which is long enough for a browser to have answered.
   (let [mounted (mapv build (:mounts @page))]
     (swap! conns assoc session {:ch ch :mounted mounted})
+    (event! ch ["session" session])
     (doseq [{:keys [el instance sent] :as m} mounted]
       (watch-session! ch session m)
       (let [vals ((:slots instance))]
