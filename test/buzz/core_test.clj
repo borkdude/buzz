@@ -1,5 +1,5 @@
 (ns buzz.core-test
-  (:require [buzz.core :as b :refer [defui server server!]]
+  (:require [buzz.core :as b :refer [client defpart defui server server!]]
             [clojure.test :refer [deftest is testing]]))
 
 ;; State the server owns. A component reads it, and a handler changes it.
@@ -101,3 +101,38 @@
 
     (testing "b/reply says the response carries the value"
       (is (true? (:reply h))))))
+
+;; A part is not called. It is spliced into whichever component uses it, so what
+;; is inside belongs to that component. `item` is a browser value. `store` is
+;; marked ^:server, so it is substituted rather than bound and keeps meaning
+;; what it means where the part was used.
+(defpart row [item ^:server store]
+  [:li {:on-click (fn [_] (server! (swap! store conj (client item))))}
+   item " of " (server (count @store))])
+
+(defui shelf [store]
+  [:ul (row "a" store) (row "b" store)])
+
+(deftest a-part-is-spliced-into-the-component-that-uses-it
+  (let [store (atom [])
+        inst  (shelf store)]
+
+    (testing "the handlers are named after the component, not the part"
+      (is (= ["shelf/0" "shelf/1"] (sort (keys (:handlers inst))))))
+
+    (testing "each use of the part brings its own slot"
+      (is (= [0 0] ((:slots inst)))))
+
+    (testing "a ^:server parameter reads the atom the component was given"
+      ((:fn (get (:handlers inst) "shelf/0")) "a")
+      (is (= ["a"] @store))
+      (is (= [1 1] ((:slots inst)))))
+
+    (testing "an ordinary parameter stays a browser value"
+      (is (re-find #"\"a\"" (:js inst)))
+      (is (not (some #{"a"} ((:slots inst))))))
+
+    (testing "the wrong number of arguments is an error"
+      (is (re-find #"takes 2 arguments, given 1"
+                   (refusal '(buzz.core/defui bad []
+                               [:ul (buzz.core-test/row "a")])))))))

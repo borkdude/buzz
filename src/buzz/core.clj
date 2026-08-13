@@ -98,8 +98,8 @@
 (defn- part
   "The part a head symbol names, if it names one and is not shadowed."
   [head scope]
-  (when (and (simple-symbol? head) (not (scope head)))
-    (when-let [v (resolve head)]
+  (when (and (symbol? head) (not (scope head)))
+    (when-let [v (try (resolve head) (catch Exception _ nil))]
       (when (and (var? v) (bound? v))
         (let [value @v]
           (when (and (map? value) (::part value)) value))))))
