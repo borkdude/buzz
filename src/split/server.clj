@@ -34,8 +34,13 @@
                             "X-Accel-Buffering" "no"}}
               false)
   (event! ch ["session" session])
-  (let [inst (app/todo-app)]
-    (swap! conns assoc session {:ch ch :instances {(:id inst) inst}})
+  ;; State the browser owns but cannot hold: made per connection, so two windows
+  ;; get their own search box. Its watch patches only this stream.
+  (let [query (atom "")
+        inst  (app/todo-app query)]
+    (swap! conns assoc session {:ch ch :query query :instances {(:id inst) inst}})
+    (add-watch query ::render
+               (fn [_ _ _ _] (event! ch ["patch" (:id inst) ((:slots inst))])))
     (event! ch ["mount" (:id inst) "app" ((:slots inst))])))
 
 (defn- events [req]
@@ -65,8 +70,8 @@
 ;; connection's instance so its handler ids match the new code, then tell the
 ;; browser to import the components again under a fresh URL.
 (defn- reload-all! [_ _ _ rev]
-  (doseq [[session {:keys [ch]}] @conns]
-    (let [inst (app/todo-app)]
+  (doseq [[session {:keys [ch query]}] @conns]
+    (let [inst (app/todo-app query)]
       (swap! conns assoc-in [session :instances] {(:id inst) inst})
       (event! ch ["reload" rev (:id inst) ((:slots inst))]))))
 
@@ -98,7 +103,8 @@
 ;; one to a JavaScript expression, so this only has to give them their imports
 ;; and a name. The browser imports the result and never evaluates a string.
 (defn- components-module []
-  (let [insts [(app/todo-app)]]
+  ;; Only :js is read here, and that does not depend on the arguments.
+  (let [insts [(app/todo-app (atom ""))]]
     {:status 200
      :headers {"Content-Type" "text/javascript"}
      :body (str "import * as SQ from \"squint-cljs/core.js\";\n"
@@ -129,7 +135,8 @@
        "base-uri 'none'"))
 
 (defn- index []
-  (let [inst  (app/todo-app)
+  ;; No connection yet, so the first paint always renders an empty search box.
+  (let [inst  (app/todo-app (atom ""))
         html  (ssr/render (into [(:ssr inst)] ((:slots inst))))
         nonce (str (random-uuid))]
     {:status 200

@@ -11,7 +11,7 @@
                 :task (server/-main "--nrepl")}
          split {:doc "Print what the splitter makes of the demo component"
                 :requires ([split.app :as app])
-                :task (let [inst (app/todo-app)]
+                :task (let [inst (app/todo-app (atom ""))]
                         (println "id      " (:id inst))
                         (println "src     " (:src inst))
                         (println "slots   " ((:slots inst)))

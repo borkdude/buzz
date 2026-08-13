@@ -18,6 +18,13 @@
 (defn toggle! [id] (swap! db update-in [id :done] not))
 (defn delete! [id] (swap! db dissoc id))
 
+(defn matching
+  "The todos a query selects. Runs here, because the data is here."
+  [q]
+  (let [q (str/lower-case (str/trim (or q "")))]
+    (cond->> (vals @db)
+      (seq q) (filter #(str/includes? (str/lower-case (:title %)) q)))))
+
 (defn seed! []
   (when (empty? @db)
     (add! "ship code, not JSON")
@@ -31,12 +38,23 @@
 ;; browser gets an `rpc!` call carrying `id` — which is a binding the browser
 ;; itself introduced, in the `for`.
 
-(defsplit todo-app []
-  (let [todos (server (vals @db))
+;; `query` is an atom the server makes per connection, so the search box is not
+;; shared between windows the way `clicks` is. It has to live here because a
+;; value-position `(server ...)` cannot see anything the browser bound.
+
+(defsplit todo-app [query]
+  (let [todos (server (matching @query))
         left  (server (count (remove :done (vals @db))))
         n     (server @clicks)]
     [:div
      [:h1 "todos"]
+     ;; Deliberately not `:value`. The browser owns what is in this box and
+     ;; echoes it instantly. Binding it to a server slot would let a patch
+     ;; overwrite what was typed while the round trip was still in the air.
+     [:input.search {:placeholder "search"
+                     :on-input (fn [e]
+                                 (let [v (.. e -target -value)]
+                                   (server (reset! query v))))}]
      [:input.new {:placeholder (str "what needs doing, " (server (System/getProperty "user.name"))
                                     "?")
                   :autofocus true
