@@ -1,9 +1,9 @@
-(ns split.app
+(ns buzz.app
   (:require [babashka.nrepl.server :as nrepl]
+            [buzz.core :refer [client defpart defui server]]
+            [buzz.handler :as buzz]
             [clojure.string :as str]
-            [org.httpkit.server :as http]
-            [split.core :refer [client defpart defui server]]
-            [split.server :as server]))
+            [org.httpkit.server :as http]))
 
 ;; Stands in for a database. Every connected browser renders from these atoms,
 ;; so two windows stay in step without either of them knowing about the other.
@@ -97,7 +97,7 @@
 ;; one.
 
 (def ui
-  (server/handler {:index "public/index.html"
+  (buzz/handler {:index "public/index.html"
                    :watch [db clicks]
                    :mounts [{:el "app"
                              :state (fn [] {:query (atom "")})

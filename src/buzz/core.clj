@@ -1,4 +1,4 @@
-(ns split.core
+(ns buzz.core
   "Splits one component definition into a part that runs here and a part that
   runs in the browser.
 

@@ -1,4 +1,4 @@
-(ns split.server
+(ns buzz.handler
   "A Ring handler for a page built from components. Knows nothing about any
   particular application, and runs no server of its own:
 
@@ -16,12 +16,12 @@
 
   Requests the page does not own return nil, so the application composes."
   (:require [babashka.fs :as fs]
+            [buzz.core :as core]
             [cheshire.core :as json]
             [clojure.java.io :as io]
             [clojure.string :as str]
             [org.httpkit.server :as http]
             [reagami.ssr :as ssr]
-            [split.core :as core]
             [squint.compiler :as squint]))
 
 (defonce ^:private page (atom nil))
@@ -141,7 +141,7 @@
 (defn- runtime-module [n]
   {:status 200
    :headers js-headers
-   :body (squint/compile-string (slurp (io/resource (str "split/" n))))})
+   :body (squint/compile-string (slurp (io/resource (str "buzz/" n))))})
 
 ;; The components are an ordinary module too. `defui` already compiled each
 ;; one to a JavaScript expression, so this only has to give them their imports

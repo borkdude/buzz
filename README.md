@@ -1,4 +1,4 @@
-# scittle-split, squint branch
+# buzz
 
 Electric Clojure's split-a-component-across-the-network idea, without a
 ClojureScript build. The server evaluates its share of a component and compiles
