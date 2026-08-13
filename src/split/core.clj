@@ -23,6 +23,17 @@
   [& _]
   (throw (ex-info "(server ...) used outside defui" {})))
 
+(defmacro client
+  "Marker for a browser expression inside a handler's `(server ...)`. The
+  browser evaluates it and sends the result as an argument.
+
+    (server (add! (client (.. e -target -value))))
+
+  A bare symbol inside `(server ...)` always means this side, so anything
+  crossing from the browser has to say so."
+  [& _]
+  (throw (ex-info "(client ...) used outside a (server ...) handler" {})))
+
 (defmacro defpart
   "A hiccup helper. Unlike a function, this is spliced into whichever component
   uses it, before the body is walked, so `(server ...)` inside one is seen and
@@ -70,24 +81,42 @@
 
 (defn- slot!
   "`(server ...)` in value position. Hoists the expression to a parameter of the
-  client function."
-  [expr scope acc]
-  (when-let [free (seq (filter scope (syms expr)))]
-    (throw (ex-info (str "(server ...) in value position cannot see browser bindings: "
-                         (pr-str (vec (distinct free))))
-                    {:expr expr :free (vec (distinct free))})))
+  client function. Nothing crosses from the browser here: a slot is evaluated
+  before the browser renders, so there is nothing of its to read yet."
+  [expr _scope acc]
+  (when (some #(and (seq? %) (= 'client (first %))) (tree-seq coll? seq expr))
+    (throw (ex-info "(client ...) only works inside a handler, not in value position"
+                    {:expr expr})))
   (let [sym (gensym "slot__")]
     (swap! acc update :slots conj {:sym sym :expr expr})
     sym))
 
+(defn- lift-client
+  "Replaces every `(client expr)` with a fresh name. Returns the expression the
+  server runs and the [name expr] pairs the browser has to supply."
+  [expr]
+  (let [found (atom [])
+        server-expr (walk/postwalk
+                     (fn [x]
+                       (if (and (seq? x) (= 'client (first x)))
+                         (do (when-not (= 2 (count x))
+                               (throw (ex-info "(client ...) takes one expression" {:form x})))
+                             (let [sym (gensym "arg__")]
+                               (swap! found conj [sym (second x)])
+                               sym))
+                         x))
+                     expr)]
+    [server-expr @found]))
+
 (defn- handler!
   "`(server ...)` inside a lambda. Registers a handler and returns the call the
-  browser makes in its place."
+  browser makes in its place. Its arguments are the `(client ...)` expressions,
+  evaluated over there."
   [expr scope comp-id acc]
-  (let [free (into [] (comp (filter scope) (distinct)) (syms expr))
-        id   (str comp-id "/" (count (:handlers @acc)))]
-    (swap! acc update :handlers conj [id {:params free :expr expr}])
-    (list 'rpc! id (vec free))))
+  (let [[server-expr pairs] (lift-client expr)
+        id (str comp-id "/" (count (:handlers @acc)))]
+    (swap! acc update :handlers conj [id {:params (mapv first pairs) :expr server-expr}])
+    (list 'rpc! id (mapv #(conv (second %) scope true comp-id acc) pairs))))
 
 (defn- conv-bindings
   "Walks a binding vector left to right, so each init sees the names bound
