@@ -22,6 +22,26 @@
   [& _]
   (throw (ex-info "(server ...) used outside defsplit" {})))
 
+(defmacro defpart
+  "A hiccup helper. Unlike a function, this is spliced into whichever component
+  uses it, before the body is walked, so `(server ...)` inside one is seen and
+  its handlers belong to the enclosing component.
+
+  It is an ordinary `def`, so it resolves like anything else and a stale
+  reference fails loudly. Editing one does not recompile its users, for the same
+  reason editing a macro does not: re-evaluate the component, or the namespace."
+  [nm argv & body]
+  `(def ~nm {::part true :params '~argv :body '~body}))
+
+(defn- part
+  "The part a head symbol names, if it names one and is not shadowed."
+  [head scope]
+  (when (and (simple-symbol? head) (not (scope head)))
+    (when-let [v (resolve head)]
+      (when (and (var? v) (bound? v))
+        (let [value @v]
+          (when (and (map? value) (::part value)) value))))))
+
 (def ^:private lambda-heads '#{fn fn*})
 (def ^:private let-heads '#{let let* loop loop* when-let if-let when-some if-some})
 (def ^:private seq-heads '#{for doseq})
@@ -110,7 +130,18 @@
         (lambda-heads head) (conv-fn form scope comp-id acc)
         (let-heads head)    (conv-let form scope lambda? comp-id acc)
         (seq-heads head)    (conv-let form scope lambda? comp-id acc)
-        :else (apply list (mapv #(conv % scope lambda? comp-id acc) form))))
+        :else
+        ;; A part becomes a `let` binding its parameters to the forms it was
+        ;; called with, then is walked like anything else. Destructuring and
+        ;; scope tracking come for free that way.
+        (if-let [p (part head scope)]
+          (let [params (:params p)]
+            (when-not (= (count params) (count args))
+              (throw (ex-info (str head " takes " (count params) " arguments, given " (count args))
+                              {:part head :params params :args (vec args)})))
+            (conv (apply list 'let (vec (interleave params args)) (:body p))
+                  scope lambda? comp-id acc))
+          (apply list (mapv #(conv % scope lambda? comp-id acc) form)))))
 
     (vector? form) (mapv #(conv % scope lambda? comp-id acc) form)
     (map? form)    (into {} (mapv (fn [[k v]] [(conv k scope lambda? comp-id acc)
