@@ -18,9 +18,9 @@ In this project, you can run:
 
 Also take a look at [tube-pod](https://github.com/borkdude/tube-pod), a real application I wrote using Buzz.
 
-## Quick start
+## Quickstart
 
-Three files. `deps.edn`:
+To quickly get up and running with Buzz, create a new project with the following files:
 
 ```clojure
 {:paths ["src"]
@@ -81,88 +81,42 @@ Then run it:
 
     clojure -M -m counter
 
-The count comes from the server, so a second browser shows the same number. The
-step is browser state, so each browser has its own.
+The count is a server value, so it is the same for all browsers. The step is a browser value, so each browser has a different one.
 
-The body of a component is browser code. The four marks below say what is not.
+The body of a component is client side code. In the body you can use four marks to communicate with the server or to make local state.
 
-## The four marks
+- `(server expr)` is a value from the server. The server runs the expression again
+after each change to an observed atom and the result is sent to the browser.
 
-`(server expr)` is a value from the server. The server runs the expression again
-after each change and sends the result. Value position only.
+- `(server! expr)` is way to make the server do something. It is a side effect, not a value. The return value is a promise. Using the special `reply` form, you can send a value back to the browser.
 
-`(server! expr)` is work for the server. It goes in an event handler and returns
-a promise.
+- `(client expr)` is a client value that crosses into a `server!` form.
 
-`(client expr)` is a browser value that crosses into a `server!` form. A plain
-symbol inside `server!` means the server, so a browser value says so.
-
-`(local-state init)` is an atom that the browser owns. Buzz makes it once, when
-the component mounts, and redraws when it changes. The server never sees it.
-
-Each mark has one place. Somewhere else is an error, not a different meaning.
-
-## Answers and errors
-
-The promise from `server!` is empty. To send a value back, put `reply` last:
-
-```clojure
-(server! (delete! (client id)) (reply :ok))
-```
-
-The promise fails when the handler throws, and the message goes to the console.
-To handle it, use `await`:
-
-```clojure
-(^:async fn [_]
-  (try
-    (await (server! (delete! (client id))))
-    (catch :default e (reset! error (.-message e)))))
-```
-
-A reply is one answer and not a subscription. For a value that stays current,
-use a `server` slot.
+- `(local-state init)` is an atom that the client can read and write. It is not sent to the server. This state survives a re-render of the app and is only created once per mount. It is not shared between browsers or tabs.
 
 ## Parts
+
+You can define a part of a component with `defpart`. A part is like a component, but it does not have its own root element. You can use a `defpart` inside a `defui` to break it into smaller pieces.
 
 ```clojure
 (defpart row [item]
   [:li (:title item)])
 ```
-
 Buzz splices a part into the component that uses it, so a `server!` inside a
-part belongs to that component. Parts take browser values. Mark a parameter
-`^:server` to pass something that lives on the server.
+part belongs to that component.
 
 ## Mounting
 
-`buzz/handler` returns a Ring handler. For a request that Buzz does not own, the
-handler returns nil. You choose the web server and the other routes:
+The `buzz/handler` function returns a Ring handler and is server agnostic. In babashka, we typically use `org.httpkit.server/run-server` to run it.
+
+To compose the handler with other routes, you can use `or` since the handler returns `nil` for unknown routes. For example:
 
 ```clojure
 (defn app [req]
   (or (ui req) (my-other-routes req)))
 ```
 
-Buzz watches each atom in `:watch`. When one changes, each browser with a
-changed value gets a patch.
-
-One mount holds one component at one element. A page can have more than one.
-Give each mount its own element and its own comment in the HTML.
-
-## What crosses the network
-
-The page loads Reagami and the Squint core from a CDN, and imports the
-components from `/components.mjs`. There is no interpreter and no `eval`, so a
-strict Content-Security-Policy works.
-
-`curl -N localhost:1341/events` prints the stream:
-
-```js
-data: ["session","2fbe6cf7-..."]
-data: ["mount","todos","app",[[{"title":"buy milk"}]]]
-data: ["patch","todos",[[{"title":"buy bread"}]]]
-```
+Buzz watches each atom in `:watch`. When one of them changes, it re-renders the component and sends a patch to each browser. One mount can hold one component at one element. A page can have more than one mount. Give each mount its own element and its own comment in the HTML.
 
 ## Development
 
@@ -170,10 +124,3 @@ data: ["patch","todos",[[{"title":"buy bread"}]]]
 
 Evaluate a `defui` or a `defpart` again and the open page updates. Browser state
 survives the update, and also a reconnect after a restart.
-
-## Limits
-
-A patch carries every value of a component, not a difference. One changed row in
-a table of 5000 costs 191 KB and 318 ms. Keep a slot small.
-
-A component cannot render another component. Use a part, or a second mount.
