@@ -282,3 +282,44 @@
       (is (= 200 status))
       (is (str/includes? body "<div id=\"app\"></div>"))
       (is (not (str/includes? body "hello"))))))
+
+(defn- mount-state
+  "The atoms one mount of one connection owns."
+  [session el]
+  (:state (first (filter #(= el (:el %)) (:mounted (get @handler/conns session))))))
+
+;; A page can hold more than one mount. Each gets its own instance, its own
+;; state and its own slots, so nothing one does reaches the other.
+(defui left-tally [n]
+  [:p (server @n) [:button {:on-click (fn [_] (server! (swap! n inc)))} "+"]])
+
+(defui right-tally [n]
+  [:p (server @n) [:button {:on-click (fn [_] (server! (swap! n dec)))} "-"]])
+
+(def ^:private two-mounts-spec
+  {:title "two"
+   :mounts [{:el "left"
+             :state (fn [] {:n (atom 0)})
+             :component (fn [st] (left-tally (:n st)))}
+            {:el "right"
+             :state (fn [] {:n (atom 100)})
+             :component (fn [st] (right-tally (:n st)))}]})
+
+(deftest each-mount-is-its-own
+  (with-connection two-mounts-spec
+    (fn [{:keys [sock rdr session port]}]
+
+      (testing "every mount arrives with the value it was built with"
+        (is (= ["mount" "left-tally" "left" [0]] (next-event rdr)))
+        (is (= ["mount" "right-tally" "right" [100]] (next-event rdr))))
+
+      (testing "writing one mount's state patches that mount alone"
+        (swap! (:n (mount-state session "left")) inc)
+        (is (= ["patch" "left-tally" [1]] (next-event rdr)))
+        (is (silent? sock rdr 300)))
+
+      (testing "a handler belongs to the mount it came from"
+        (is (= 204 (first (rpc port session "right-tally/0" []))))
+        (is (= 1 @(:n (mount-state session "left"))))
+        (is (= 99 @(:n (mount-state session "right"))))
+        (is (= ["patch" "right-tally" [99]] (next-event rdr)))))))
