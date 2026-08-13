@@ -1,5 +1,5 @@
 (ns buzz.handler-test
-  (:require [buzz.core :refer [defui server]]
+  (:require [buzz.core :refer [defui reply server server!]]
             [buzz.handler :as handler]
             [cheshire.core :as json]
             [clojure.string :as str]
@@ -34,7 +34,8 @@
                               {:port 0})
         ;; asking for port 0 and reading back what was bound leaves no window
         ;; for another process to take the port first
-        sock (java.net.Socket. "127.0.0.1" (int (:local-port (meta stop))))]
+        port (:local-port (meta stop))
+        sock (java.net.Socket. "127.0.0.1" (int port))]
     (.setSoTimeout sock 5000)
     (doto (.getOutputStream sock)
       (.write (.getBytes "GET /events HTTP/1.1\r\nHost: localhost\r\n\r\n"))
@@ -43,7 +44,7 @@
                (java.io.InputStreamReader. (.getInputStream sock) "UTF-8"))]
       (try
         (let [[_ session] (next-event rdr)]
-          (f {:sock sock :rdr rdr :session session}))
+          (f {:sock sock :rdr rdr :session session :port port}))
         (finally
           (.close sock)
           (stop))))))
@@ -52,6 +53,27 @@
   "The atoms one connection owns, which is what a REPL reaches for too."
   [session]
   (:state (first (:mounted (get @handler/conns session)))))
+
+(defn- rpc
+  "One POST to /rpc, the way the browser makes it. Returns [status body]."
+  [port session handler-id args]
+  (let [payload (.getBytes (json/generate-string [session handler-id args]) "UTF-8")]
+    (with-open [sock (java.net.Socket. "127.0.0.1" (int port))]
+      (.setSoTimeout sock 5000)
+      (doto (.getOutputStream sock)
+        ;; asking to close lets the body be read to the end of the stream,
+        ;; without a length to parse first
+        (.write (.getBytes (str "POST /rpc HTTP/1.1\r\n"
+                                "Host: localhost\r\n"
+                                "Content-Type: application/json\r\n"
+                                "Content-Length: " (alength payload) "\r\n"
+                                "Connection: close\r\n\r\n")
+                           "UTF-8"))
+        (.write payload)
+        (.flush))
+      (let [[head body] (str/split (slurp (.getInputStream sock)) #"\r\n\r\n" 2)
+            status (second (str/split (first (str/split-lines head)) #" "))]
+        [(Integer/parseInt status) (or body "")]))))
 
 ;; Two slots over an atom the connection owns. Redefining this is the reload.
 (defui panel [q]
@@ -134,3 +156,43 @@
         (testing "a value that differs is sent"
           (swap! st update :shown inc)
           (is (= ["patch" "board" [1]] (next-event rdr))))))))
+
+;; Three handlers. The first answers nothing, the second replies with a value,
+;; and the third fails.
+(def ^:private log (atom []))
+
+(defui desk []
+  [:p
+   [:button {:on-click (fn [_] (server! (swap! log conj :quiet)))} "quiet"]
+   [:button {:on-click (fn [_] (server! (reply (count @log))))} "ask"]
+   [:button {:on-click (fn [_] (server! (throw (ex-info "the database password" {}))))} "boom"]])
+
+(def ^:private desk-spec
+  {:title "desk"
+   :mounts [{:el "app" :component (fn [_] (desk))}]})
+
+(deftest a-handler-answers-over-rpc
+  (reset! log [])
+  (with-connection desk-spec
+    (fn [{:keys [port session]}]
+
+      (testing "a handler with no reply says so rather than sending a body"
+        (is (= [204 ""] (rpc port session "desk/0" [])))
+        (is (= [:quiet] @log)))
+
+      (testing "a reply carries the value back"
+        (is (= [200 "1"] (rpc port session "desk/1" []))))
+
+      (testing "a handler that throws fails the browser's promise"
+        (let [[status body] (rpc port session "desk/2" [])]
+          (is (= 500 status))
+          (is (= {"error" "handler failed"} (json/parse-string body)))
+          (testing "and says nothing about why"
+            (is (not (str/includes? body "database password"))))))
+
+      (testing "an unknown handler is not found"
+        (is (= [404 "{\"error\":\"no such handler\"}"]
+               (rpc port session "desk/9" []))))
+
+      (testing "a handler cannot be reached without a session"
+        (is (= 404 (first (rpc port "made-up" "desk/0" []))))))))
