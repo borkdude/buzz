@@ -25,18 +25,18 @@
 ;; A reconnect or a live reload mounts again. Browser state belongs to the
 ;; browser, so it is kept when the component still has the same number of
 ;; slots, and started over when the shape changed under it.
-(defn- locals-for [id prev]
+(defn- locals-for [id prev vals]
   (let [c (component id)]
     (if (and prev (= (count (.-locals prev)) (.-nlocals c)))
       (.-locals prev)
-      (mapv atom ((.-init c))))))
+      (mapv atom (.apply (.-init c) nil vals)))))
 
 (defn- watch-locals! [id locals]
   (doseq [a locals]
     (add-watch a ::draw (fn [_ _ _ _] (draw! id)))))
 
 (defn- mount! [id el vals]
-  (let [locals (locals-for id (.get instances id))]
+  (let [locals (locals-for id (.get instances id) vals)]
     (.set instances id #js {:vals vals :locals locals :node (js/document.getElementById el)})
     (watch-locals! id locals)
     (draw! id)))
@@ -52,7 +52,7 @@
       (.then (fn [m]
                (set! (.-v registry) (.-registry m))
                (let [entry  (.get instances id)
-                     locals (locals-for id entry)]
+                     locals (locals-for id entry vals)]
                  (set! (.-locals entry) locals)
                  (watch-locals! id locals)
                  (patch! id vals))))))

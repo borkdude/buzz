@@ -164,3 +164,22 @@
     (testing "nothing about a local reaches the server"
       (is (empty? (:handlers inst)))
       (is (= 1 (count ((:slots inst))))))))
+
+(defui seeded []
+  (let [q (local-state (server @store))]
+    [:p @q]))
+
+;; A local is made once, in the browser, from whatever the server sent for that
+;; render. The values it reads have to be in scope where it is built.
+(deftest a-local-can-start-from-a-server-value
+  (let [inst (seeded)]
+
+    (testing "the server value is a slot like any other"
+      (is (= [5] ((:slots inst))))
+      (is (= 1 (:locals inst))))
+
+    (testing "and the initial values take the slots, so the one it reads is bound"
+      (let [slot   (re-find #"slot__\d+" (:init inst))
+            params (second (re-find #"function \(([^)]*)\)" (:init inst)))]
+        (is (some? slot))
+        (is (str/includes? params slot))))))

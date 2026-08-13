@@ -358,7 +358,9 @@
         {:keys [slots handlers locals]} @acc
         params (into (mapv :sym slots) (mapv :sym locals))]
     {:js         (to-js (apply list 'fn params forms))
-     :init-js    (to-js (list 'fn [] (mapv :init locals)))
+     ;; the initial values take the slots, so a local can start from what the
+     ;; server sent rather than only from a literal
+     :init-js    (to-js (list 'fn (mapv :sym slots) (mapv :init locals)))
      :locals     (count locals)
      :ssr-forms  (mapv ssr-form forms)
      :slot-exprs (mapv :expr slots)
