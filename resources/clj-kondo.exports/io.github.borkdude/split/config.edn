@@ -1,0 +1,4 @@
+;; Shipped with the library, so a project using it does not have to know that
+;; defsplit and defpart bind their arguments.
+{:lint-as {split.core/defsplit clojure.core/defn
+           split.core/defpart clojure.core/defn}}

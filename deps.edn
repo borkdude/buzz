@@ -1,0 +1,5 @@
+{:paths ["src" "resources"]
+ :deps {io.github.borkdude/reagami {:git/tag "v0.2.40"
+                                    :git/sha "d283b55d4a0864cf39303f25f6ff79100937a8aa"}
+        io.github.squint-cljs/squint {:git/tag "v0.14.208"
+                                      :git/sha "e83befd03153b842d45cd25a77fefb915f120eb7"}}}

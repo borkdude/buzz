@@ -10,7 +10,10 @@
                        :component (fn [state] (app/todo-app (:query state)))}]})
 
   Every atom in a mount's `:state` map is watched for that connection alone.
-  Atoms in the top level `:watch` are watched for all of them."
+  Atoms in the top level `:watch` are watched for all of them.
+
+  `:routes` is an optional (fn [req] ...) returning a response or nil, tried
+  before files are served from `:public`."
   (:require [babashka.fs :as fs]
             [babashka.nrepl.server :as nrepl]
             [cheshire.core :as json]
@@ -152,6 +155,8 @@
        "script-src 'self' https://esm.sh 'nonce-" nonce "'; "
        "style-src 'nonce-" nonce "'; "
        "connect-src 'self' https://esm.sh; "
+       "media-src 'self'; "
+       "img-src 'self' data:; "
        "base-uri 'none'"))
 
 ;; First paint. Each component renders here from the same converted form, with
@@ -193,7 +198,10 @@
     "/components.mjs" (components-module)
     "/events"         (events req)
     "/rpc"            (rpc req)
-    (serve-file (:uri req))))
+    ;; An application gets a look before the static fallback. `:routes` returns
+    ;; a response, or nil to decline.
+    (or (when-let [routes (:routes @page)] (routes req))
+        (serve-file (:uri req)))))
 
 (defn start!
   "Runs the page described by `spec`. Blocks."
