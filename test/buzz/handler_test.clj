@@ -370,3 +370,42 @@
             (is (= 1 @(:seen (connection-state (:session two))))))
 
           (finally (.close (:sock two))))))))
+
+(defn- until
+  "Polls until `f` answers, or the deadline passes. A close is noticed on
+  another thread, so this waits for it rather than assuming it has happened."
+  [ms f]
+  (let [deadline (+ (System/currentTimeMillis) ms)]
+    (loop []
+      (or (f)
+          (when (< (System/currentTimeMillis) deadline)
+            (Thread/sleep 10)
+            (recur))))))
+
+(defui leaky [q]
+  [:p (server @q)])
+
+(def ^:private leaky-spec
+  {:title "leaky"
+   :mounts [{:el "app"
+             :state (fn [] {:q (atom 0)})
+             :component (fn [st] (leaky (:q st)))}]})
+
+;; A browser that goes away takes its instances and its watches with it.
+;; Otherwise every reload of a page leaves another watch on the atoms behind it.
+(deftest a-closed-connection-is-forgotten
+  (with-connection leaky-spec
+    (fn [{:keys [sock rdr session]}]
+      (let [q (:q (connection-state session))]
+
+        (testing "while it is open the connection is watching its own state"
+          (is (= ["mount" "leaky" "app" [0]] (next-event rdr)))
+          (is (seq (.getWatches q))))
+
+        (.close sock)
+
+        (testing "closing it drops the connection"
+          (is (until 3000 #(not (contains? @handler/conns session)))))
+
+        (testing "and the watches on its state go with it"
+          (is (until 3000 #(empty? (.getWatches q)))))))))
