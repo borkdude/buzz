@@ -196,3 +196,47 @@
 
       (testing "a handler cannot be reached without a session"
         (is (= 404 (first (rpc port "made-up" "desk/0" []))))))))
+
+;; No slots and no handlers. This one is only here to be rendered into a page.
+(defui greeting []
+  [:p "hello"])
+
+(def ^:private page-spec
+  {:title "a title"
+   :head "<link rel=\"stylesheet\" href=\"/style.css\">"
+   :mounts [{:el "app" :component (fn [_] (greeting))}]})
+
+(defn- nonce-of [csp]
+  (second (re-find #"nonce-([^']+)'" csp)))
+
+;; The page is handed out with a policy it has to satisfy itself. Nothing in the
+;; browser evaluates Clojure or JavaScript from a string, so the policy says so
+;; and the browser holds the page to it.
+(deftest the-page-carries-the-nonce-its-policy-names
+  (let [ui (handler/handler page-spec)
+        {:keys [status headers body]} (ui {:uri "/"})
+        csp (get headers "Content-Security-Policy")
+        nonce (nonce-of csp)]
+
+    (testing "the page is written from the spec"
+      (is (= 200 status))
+      (is (str/includes? body "<title>a title</title>"))
+      (is (str/includes? body "/style.css"))
+      (testing "with a div per mount holding its first render"
+        (is (str/includes? body "<div id=\"app\"><p>hello</p></div>"))))
+
+    (testing "every script the page carries is named by the policy"
+      (is (some? nonce))
+      (is (pos? (count (re-seq #"nonce=" body))))
+      (is (= (count (re-seq #"nonce=" body))
+             (count (re-seq (re-pattern (str "nonce=\"" nonce "\"")) body)))))
+
+    (testing "no script may be built from a string"
+      (is (not (str/includes? csp "unsafe-eval")))
+      (is (not (str/includes? csp "unsafe-inline"))))
+
+    (testing "a second request is named by a nonce of its own"
+      (is (not= nonce (nonce-of (get-in (ui {:uri "/"}) [:headers "Content-Security-Policy"])))))
+
+    (testing "a request the page does not own is declined rather than answered"
+      (is (nil? (ui {:uri "/feed.xml"}))))))
