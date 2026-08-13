@@ -25,7 +25,7 @@ To quickly get up and running with Buzz, create a new project with the following
 ```clojure
 {:paths ["src"]
  :deps {io.github.borkdude/buzz
-        {:git/sha "533cc5d03fc525ea1bdaba4d84091ffde55b8c79"}}}
+        {:git/sha "<latest>"}}}
 ```
 
 `public/index.html`:
