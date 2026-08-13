@@ -15,6 +15,7 @@
   What is left is compiled to JavaScript by Squint, here, once. Renders after
   the first one send only the values."
   (:require [clojure.string :as str]
+            [clojure.walk :as walk]
             [squint.compiler :as squint]))
 
 (defmacro server
@@ -26,6 +27,12 @@
   "A hiccup helper. Unlike a function, this is spliced into whichever component
   uses it, before the body is walked, so `(server ...)` inside one is seen and
   its handlers belong to the enclosing component.
+
+  Parameters carry browser values. Mark one `^:server` to pass something that
+  only exists here, such as an atom a component was given:
+
+    (defpart row [item ^:server store]
+      [:li {:on-click (fn [_] (server (swap! store conj item)))} item])
 
   It is an ordinary `def`, so it resolves like anything else and a stale
   reference fails loudly. Evaluating one expands every component again, so a
@@ -136,13 +143,22 @@
         ;; A part becomes a `let` binding its parameters to the forms it was
         ;; called with, then is walked like anything else. Destructuring and
         ;; scope tracking come for free that way.
+        ;;
+        ;; A `^:server` parameter is substituted into the body instead of bound,
+        ;; so it never enters browser scope and a `(server ...)` using it keeps
+        ;; resolving where the part was called from.
         (if-let [p (part head scope)]
           (let [params (:params p)]
             (when-not (= (count params) (count args))
               (throw (ex-info (str head " takes " (count params) " arguments, given " (count args))
                               {:part head :params params :args (vec args)})))
-            (conv (apply list 'let (vec (interleave params args)) (:body p))
-                  scope lambda? comp-id acc))
+            (let [pairs  (map vector params args)
+                  server? #(:server (meta (first %)))
+                  subs   (into {} (map (fn [[p a]] [p a])) (filter server? pairs))
+                  binds  (vec (mapcat identity (remove server? pairs)))
+                  body   (cond->> (:body p)
+                           (seq subs) (walk/postwalk-replace subs))]
+              (conv (apply list 'let binds body) scope lambda? comp-id acc)))
           (apply list (mapv #(conv % scope lambda? comp-id acc) form)))))
 
     (vector? form) (mapv #(conv % scope lambda? comp-id acc) form)
