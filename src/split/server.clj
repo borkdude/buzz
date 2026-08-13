@@ -42,12 +42,20 @@
   [ch msg]
   (http/send! ch (str "data: " (json/generate-string msg) "\n\n") false))
 
-(defn- patch! [ch {:keys [instance]}]
-  (event! ch ["patch" (:id instance) ((:slots instance))]))
+;; A watched atom says something changed somewhere, not that this mount cares.
+;; Rather than have each mount declare what it reads, which can drift from what
+;; its slots actually do, run the slots and send nothing when the values are the
+;; same as last time. Unchanged slots are usually the identical objects, so the
+;; comparison stops at the first identity check.
+(defn- patch! [ch {:keys [instance sent]}]
+  (let [vals ((:slots instance))]
+    (when (not= vals @sent)
+      (reset! sent vals)
+      (event! ch ["patch" (:id instance) vals]))))
 
 (defn- build [{:keys [el state component] :as spec}]
   (let [st (if state (state) {})]
-    {:el el :state st :spec spec :instance (component st)}))
+    {:el el :state st :spec spec :sent (atom ::none) :instance (component st)}))
 
 (defn- watch-session! [ch session mount]
   (doseq [a (vals (:state mount))]
@@ -67,9 +75,11 @@
   (event! ch ["session" session])
   (let [mounted (mapv build (:mounts @page))]
     (swap! conns assoc session {:ch ch :mounted mounted})
-    (doseq [{:keys [el instance] :as m} mounted]
+    (doseq [{:keys [el instance sent] :as m} mounted]
       (watch-session! ch session m)
-      (event! ch ["mount" (:id instance) el ((:slots instance))]))))
+      (let [vals ((:slots instance))]
+        (reset! sent vals)
+        (event! ch ["mount" (:id instance) el vals])))))
 
 (defn- events [req]
   (let [session (str (random-uuid))]
@@ -102,8 +112,11 @@
   (doseq [[session {:keys [ch mounted]}] @conns]
     (let [rebuilt (mapv (fn [m] (assoc m :instance ((:component (:spec m)) (:state m)))) mounted)]
       (swap! conns assoc-in [session :mounted] rebuilt)
-      (doseq [{:keys [instance]} rebuilt]
-        (event! ch ["reload" rev (:id instance) ((:slots instance))])))))
+      ;; the slots may have changed shape, so this one always goes out
+      (doseq [{:keys [instance sent]} rebuilt]
+        (let [vals ((:slots instance))]
+          (reset! sent vals)
+          (event! ch ["reload" rev (:id instance) vals]))))))
 
 (add-watch core/revision ::reload reload-all!)
 
