@@ -1,5 +1,6 @@
 (ns buzz.core-test
-  (:require [buzz.core :as b :refer [client defpart defui server server!]]
+  (:require [buzz.core :as b :refer [client defpart defui local-state server server!]]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]))
 
 ;; State the server owns. A component reads it, and a handler changes it.
@@ -136,3 +137,30 @@
       (is (re-find #"takes 2 arguments, given 1"
                    (refusal '(buzz.core/defui bad []
                                [:ul (buzz.core-test/row "a")])))))))
+
+;; The one mark the server never sees. A local is an atom the browser makes at
+;; mount, so nothing about it travels except the code that builds it.
+(def store (atom 5))
+
+(defui widget []
+  (let [n    (server @store)
+        open (local-state false)
+        note (local-state "hi")]
+    [:p n (str @open) @note]))
+
+(deftest local-state-belongs-to-the-browser
+  (let [inst (widget)]
+
+    (testing "a local is not a slot, and is counted on its own"
+      (is (= [5] ((:slots inst))))
+      (is (= 2 (:locals inst))))
+
+    (testing "the initial values are built in the browser rather than sent"
+      (is (str/includes? (:init inst) "[false, \"hi\"]")))
+
+    (testing "the browser function takes the slots first, then the locals"
+      (is (re-find #"function \(slot__\d+, local__\d+, local__\d+\)" (:js inst))))
+
+    (testing "nothing about a local reaches the server"
+      (is (empty? (:handlers inst)))
+      (is (= 1 (count ((:slots inst))))))))
