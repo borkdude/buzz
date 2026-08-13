@@ -1,6 +1,7 @@
 (ns split.app
   (:require [clojure.string :as str]
-            [split.core :refer [defpart defsplit server]]))
+            [split.core :refer [defpart defsplit server]]
+            [split.server :as server]))
 
 ;; Stands in for a database. Every connected browser renders from these atoms,
 ;; so two windows stay in step without either of them knowing about the other.
@@ -82,3 +83,16 @@
      ;; window and it moves in the other.
      [:p.local "clicks, counted on the server: "
       [:button {:on-click (fn [_] (server (swap! clicks inc)))} n]]]))
+
+;; `db` and `clicks` are shared, so a change patches every connection. `query`
+;; belongs to one browser, so it is made per connection and patches only that
+;; one.
+
+(defn -main [& args]
+  (seed!)
+  (server/start! {:port 1341
+                  :nrepl (when (some #{"--nrepl"} args) 1667)
+                  :watch [db clicks]
+                  :mounts [{:el "app"
+                            :state (fn [] {:query (atom "")})
+                            :component (fn [{:keys [query]}] (todo-app query))}]}))

@@ -1,18 +1,18 @@
-{:paths ["src"]
+{:paths ["src" "resources"]
  :deps {io.github.borkdude/reagami {:git/tag "v0.2.40"
                                     :git/sha "d283b55d4a0864cf39303f25f6ff79100937a8aa"}
         io.github.squint-cljs/squint {:git/tag "v0.14.208"
                                       :git/sha "e83befd03153b842d45cd25a77fefb915f120eb7"}}
- :tasks {serve {:doc "Start the server on http://localhost:1341"
-                :requires ([split.server :as server])
-                :task (server/-main)}
-         dev   {:doc "Start the server plus an nrepl on 1667. Re-evaluate a defsplit and the page updates."
-                :requires ([split.server :as server])
-                :task (server/-main "--nrepl")}
+ :tasks {serve {:doc "Start the demo on http://localhost:1341"
+                :requires ([split.app :as app])
+                :task (app/-main)}
+         dev   {:doc "Start the demo plus an nrepl on 1667. Re-evaluate a defsplit and the page updates."
+                :requires ([split.app :as app])
+                :task (app/-main "--nrepl")}
          split {:doc "Print what the splitter makes of the demo component"
                 :requires ([split.app :as app])
                 :task (let [inst (app/todo-app (atom ""))]
                         (println "id      " (:id inst))
-                        (println "src     " (:src inst))
+                        (println "js      " (:js inst))
                         (println "slots   " ((:slots inst)))
                         (println "handlers" (sort (keys (:handlers inst)))))}}}

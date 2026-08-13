@@ -1,24 +1,36 @@
 (ns split.server
+  "Serves a page built from components. Knows nothing about any particular
+  application: everything app-specific arrives in the spec given to `start!`.
+
+    (start! {:port 1341
+             :public \"public\"
+             :watch [app/db]                              ; patch everyone on change
+             :mounts [{:el \"app\"
+                       :state (fn [] {:query (atom \"\")}) ; per connection, optional
+                       :component (fn [state] (app/todo-app (:query state)))}]})
+
+  Every atom in a mount's `:state` map is watched for that connection alone.
+  Atoms in the top level `:watch` are watched for all of them."
   (:require [babashka.fs :as fs]
             [babashka.nrepl.server :as nrepl]
             [cheshire.core :as json]
+            [clojure.java.io :as io]
             [clojure.string :as str]
             [org.httpkit.server :as http]
             [reagami.ssr :as ssr]
-            [split.app :as app]
             [split.core :as core]
             [squint.compiler :as squint]))
 
-(def ^:private public (fs/canonicalize "public"))
+(defonce ^:private page (atom nil))
 
 ;; Two endpoints. GET /events is one long-lived SSE stream per browser, POST
 ;; /rpc is a plain request. Nothing is bidirectional, so there is no upgrade to
 ;; negotiate and no socket to nurse: EventSource reconnects on its own.
 ;;
-;; session -> {:ch channel :instances {id instance}}. A connection needs its own
-;; instances because a handler closes over the arguments its component was
-;; called with, and it needs a session id because the RPC arrives on a separate
-;; request that has to find them again.
+;; session -> {:ch channel :mounted [{:el :state :instance :spec}]}. A connection
+;; needs its own instances because a handler closes over the arguments its
+;; component was called with, and it needs a session id because the RPC arrives
+;; on a separate request that has to find them again.
 (defonce conns (atom {}))
 
 (defn- event!
@@ -27,6 +39,22 @@
   [ch msg]
   (http/send! ch (str "data: " (json/generate-string msg) "\n\n") false))
 
+(defn- patch! [ch {:keys [instance]}]
+  (event! ch ["patch" (:id instance) ((:slots instance))]))
+
+(defn- build [{:keys [el state component] :as spec}]
+  (let [st (if state (state) {})]
+    {:el el :state st :spec spec :instance (component st)}))
+
+(defn- watch-session! [ch session mount]
+  (doseq [a (vals (:state mount))]
+    (add-watch a [::render session (:id (:instance mount))]
+               (fn [_ _ _ _] (patch! ch mount)))))
+
+(defn- unwatch-session! [session mounted]
+  (doseq [m mounted, a (vals (:state m))]
+    (remove-watch a [::render session (:id (:instance m))])))
+
 (defn- open-stream [session ch]
   (http/send! ch {:status 200
                   :headers {"Content-Type" "text/event-stream"
@@ -34,24 +62,24 @@
                             "X-Accel-Buffering" "no"}}
               false)
   (event! ch ["session" session])
-  ;; State the browser owns but cannot hold: made per connection, so two windows
-  ;; get their own search box. Its watch patches only this stream.
-  (let [query (atom "")
-        inst  (app/todo-app query)]
-    (swap! conns assoc session {:ch ch :query query :instances {(:id inst) inst}})
-    (add-watch query ::render
-               (fn [_ _ _ _] (event! ch ["patch" (:id inst) ((:slots inst))])))
-    (event! ch ["mount" (:id inst) "app" ((:slots inst))])))
+  (let [mounted (mapv build (:mounts @page))]
+    (swap! conns assoc session {:ch ch :mounted mounted})
+    (doseq [{:keys [el instance] :as m} mounted]
+      (watch-session! ch session m)
+      (event! ch ["mount" (:id instance) el ((:slots instance))]))))
 
 (defn- events [req]
   (let [session (str (random-uuid))]
-    (http/as-channel req {:on-open  (fn [ch] (open-stream session ch))
-                          :on-close (fn [_ _] (swap! conns dissoc session))})))
+    (http/as-channel req
+                     {:on-open  (fn [ch] (open-stream session ch))
+                      :on-close (fn [_ _]
+                                  (unwatch-session! session (:mounted (get @conns session)))
+                                  (swap! conns dissoc session))})))
 
 (defn- rpc [req]
   (let [[session handler-id args] (json/parse-string (slurp (:body req)))]
-    (if-let [f (some #(get (:handlers %) handler-id)
-                     (vals (:instances (get @conns session))))]
+    (if-let [f (some #(get (:handlers (:instance %)) handler-id)
+                     (:mounted (get @conns session)))]
       (do (apply f args)
           {:status 204})
       {:status 404 :body "no such handler"})))
@@ -59,21 +87,20 @@
 ;; The reply to an RPC is not the response. It is whatever :patch the write
 ;; happens to produce, on every stream watching that data.
 (defn- broadcast-patch! [_ _ _ _]
-  (doseq [{:keys [ch instances]} (vals @conns)
-          inst (vals instances)]
-    (event! ch ["patch" (:id inst) ((:slots inst))])))
-
-(add-watch app/db ::render broadcast-patch!)
-(add-watch app/clicks ::render broadcast-patch!)
+  (doseq [{:keys [ch mounted]} (vals @conns)
+          m mounted]
+    (patch! ch m)))
 
 ;; Re-evaluating a defsplit in a REPL bumps the revision. Rebuild each
-;; connection's instance so its handler ids match the new code, then tell the
-;; browser to import the components again under a fresh URL.
+;; connection's instances so their handler ids match the new code, then tell the
+;; browser to import the components again under a fresh URL. Per-connection
+;; state is kept, so a reload does not clear what someone had typed.
 (defn- reload-all! [_ _ _ rev]
-  (doseq [[session {:keys [ch query]}] @conns]
-    (let [inst (app/todo-app query)]
-      (swap! conns assoc-in [session :instances] {(:id inst) inst})
-      (event! ch ["reload" rev (:id inst) ((:slots inst))]))))
+  (doseq [[session {:keys [ch mounted]}] @conns]
+    (let [rebuilt (mapv (fn [m] (assoc m :instance ((:component (:spec m)) (:state m)))) mounted)]
+      (swap! conns assoc-in [session :mounted] rebuilt)
+      (doseq [{:keys [instance]} rebuilt]
+        (event! ch ["reload" rev (:id instance) ((:slots instance))])))))
 
 (add-watch core/revision ::reload reload-all!)
 
@@ -88,45 +115,38 @@
       (recur))))
 
 ;; The runtime is written in Clojure and compiled here. Nothing interprets
-;; Clojure in the browser, so the page loads no interpreter at all.
+;; Clojure in the browser, so the page loads no interpreter at all. These two
+;; ship with the library rather than with the application.
 (def ^:private js-headers
   {"Content-Type" "text/javascript"
    ;; compiled per request, so never let a stale copy survive an edit
    "Cache-Control" "no-store"})
 
-(defn- squint-module [f]
+(defn- runtime-module [n]
   {:status 200
    :headers js-headers
-   :body (squint/compile-string (slurp (fs/file public f)))})
+   :body (squint/compile-string (slurp (io/resource (str "split/" n))))})
 
 ;; The components are an ordinary module too. `defsplit` already compiled each
 ;; one to a JavaScript expression, so this only has to give them their imports
 ;; and a name. The browser imports the result and never evaluates a string.
 (defn- components-module []
-  ;; Only :js is read here, and that does not depend on the arguments.
-  (let [insts [(app/todo-app (atom ""))]]
+  ;; Only :js is read, and that does not depend on the arguments, so these
+  ;; instances are thrown away.
+  (let [insts (map (comp :instance build) (:mounts @page))]
     {:status 200
-     :headers {"Content-Type" "text/javascript"}
+     :headers js-headers
      :body (str "import * as SQ from \"squint-cljs/core.js\";\n"
                 "import { rpc_BANG_ } from \"/rpc.mjs\";\n"
                 "export const registry = {\n"
                 (str/join ",\n" (map #(str "  " (pr-str (:id %)) ": " (:js %)) insts))
                 "\n};\n")}))
 
-(def ^:private content-types
-  {"html" "text/html" "cljs" "text/plain; charset=utf-8" "css" "text/css"})
-
-;; First paint. The same component renders here, from the same converted form,
-;; with handlers blanked — which changes no output, because Reagami's ssr drops
-;; every `on*` attribute by name anyway. Reagami adopts these nodes on the
-;; browser side instead of rebuilding them, so nothing on that side knows this
-;; happened.
 ;; Nothing here evaluates code the browser was handed, so the page can say so
 ;; and let the browser hold it to that. Without 'unsafe-eval' a stray `eval` or
-;; `new Function` fails loudly instead of quietly working.
-;; esm.sh appears in connect-src as well as script-src because devtools fetches
-;; source maps through connect-src. It grants nothing new: that origin is
-;; already allowed to run code here.
+;; `new Function` fails loudly instead of quietly working. esm.sh appears in
+;; connect-src as well as script-src because devtools fetches source maps
+;; through connect-src, which grants nothing new.
 (defn- csp [nonce]
   (str "default-src 'none'; "
        "script-src 'self' https://esm.sh 'nonce-" nonce "'; "
@@ -134,21 +154,32 @@
        "connect-src 'self' https://esm.sh; "
        "base-uri 'none'"))
 
+;; First paint. Each component renders here from the same converted form, with
+;; handlers blanked, which changes no output because Reagami's ssr drops every
+;; `on*` attribute by name anyway. Reagami adopts these nodes in the browser
+;; instead of rebuilding them. There is no connection yet, so a mount's `:state`
+;; starts empty for this render.
 (defn- index []
-  ;; No connection yet, so the first paint always renders an empty search box.
-  (let [inst  (app/todo-app (atom ""))
-        html  (ssr/render (into [(:ssr inst)] ((:slots inst))))
-        nonce (str (random-uuid))]
+  (let [nonce (str (random-uuid))
+        html  (reduce (fn [page-html {:keys [el] :as spec}]
+                        (let [inst (:instance (build spec))]
+                          (str/replace page-html
+                                       (str "<!--" el "-->")
+                                       (ssr/render (into [(:ssr inst)] ((:slots inst)))))))
+                      (slurp (fs/file (:public @page) "index.html"))
+                      (:mounts @page))]
     {:status 200
      :headers {"Content-Type" "text/html"
                "Content-Security-Policy" (csp nonce)}
-     :body (-> (slurp (fs/file public "index.html"))
-               (str/replace "<!--ssr-->" html)
-               (str/replace "NONCE" nonce))}))
+     :body (str/replace html "NONCE" nonce)}))
+
+(def ^:private content-types
+  {"html" "text/html" "css" "text/css" "js" "text/javascript"})
 
 (defn- serve-file [uri]
-  (let [f (fs/canonicalize (fs/path public (subs (if (= "/" uri) "/index.html" uri) 1)))]
-    (if (and (fs/starts-with? f public) (fs/regular-file? f))
+  (let [root (fs/canonicalize (:public @page))
+        f    (fs/canonicalize (fs/path root (subs uri 1)))]
+    (if (and (fs/starts-with? f root) (fs/regular-file? f))
       {:status 200
        :headers {"Content-Type" (content-types (fs/extension f) "text/plain")}
        :body (fs/read-all-bytes f)}
@@ -157,19 +188,23 @@
 (defn handler [req]
   (case (:uri req)
     "/"               (index)
-    "/client.mjs"     (squint-module "client.cljs")
-    "/rpc.mjs"        (squint-module "rpc.cljs")
+    "/client.mjs"     (runtime-module "client.cljs")
+    "/rpc.mjs"        (runtime-module "rpc.cljs")
     "/components.mjs" (components-module)
     "/events"         (events req)
     "/rpc"            (rpc req)
     (serve-file (:uri req))))
 
-(defn -main [& args]
-  (app/seed!)
+(defn start!
+  "Runs the page described by `spec`. Blocks."
+  [{:keys [port nrepl watch] :or {port 1341} :as spec}]
+  (reset! page (merge {:public "public"} spec))
+  (doseq [a watch]
+    (add-watch a ::render broadcast-patch!))
   (heartbeat!)
-  (http/run-server handler {:port 1341})
-  (println "http://localhost:1341")
-  (when (some #{"--nrepl"} args)
-    (nrepl/start-server! {:port 1667})
-    (println "nrepl://localhost:1667"))
+  (http/run-server handler {:port port})
+  (println (str "http://localhost:" port))
+  (when nrepl
+    (nrepl/start-server! {:port nrepl})
+    (println (str "nrepl://localhost:" nrepl)))
   @(promise))
