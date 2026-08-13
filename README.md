@@ -11,10 +11,12 @@ to renders it.
 
 Buzz runs on Babashka and on the JVM. You do not need other tooling like ClojureScript or Node.js.
 
-    bb serve    # the demo, on http://localhost:1341
-    bb bench    # a large table, on http://localhost:1342
+In this project, you can run:
 
-[tube-pod](https://github.com/borkdude/tube-pod) is a real application that uses
+    bb serve    # a demo on http://localhost:1341
+    bb bench    # a benchmark, on http://localhost:1342
+
+Also take a look at [tube-pod](https://github.com/borkdude/tube-pod), a real application I wrote using buzz.
 buzz.
 
 ## A component

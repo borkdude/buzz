@@ -302,6 +302,14 @@
 
 (def ^:dynamic ^:private *recompiling* false)
 
+(defn register!
+  "Records a component so that a part change can expand it again. Public because
+  `defui` expands into a call to it, and a macro cannot reach a private var from
+  the namespace it expands in."
+  [nm spec]
+  (swap! components assoc nm spec)
+  (when-not *recompiling* (swap! revision inc)))
+
 (defn recompile!
   "Expands every defui again. Called when a part changes."
   []
@@ -362,7 +370,6 @@
                                      [id {:fn `(fn ~(:params h) ~(:expr h))
                                           :reply (boolean (:reply h))}]))
                            handlers)})
-       (swap! components assoc '~(symbol (str *ns*) (str nm))
-              {:ns '~(ns-name *ns*) :form '~&form})
-       (when-not *recompiling* (swap! revision inc))
+       (register! '~(symbol (str *ns*) (str nm))
+                  {:ns '~(ns-name *ns*) :form '~&form})
        (var ~nm))))

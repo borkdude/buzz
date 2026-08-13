@@ -1,5 +1,10 @@
+;; Babashka supplies fs, cheshire and http-kit itself, but a JVM consumer needs
+;; them on the classpath, so they are listed here.
 {:paths ["src" "resources"]
  :deps {io.github.borkdude/reagami {:git/tag "v0.2.40"
                                     :git/sha "d283b55d4a0864cf39303f25f6ff79100937a8aa"}
         io.github.squint-cljs/squint {:git/tag "v0.14.208"
-                                      :git/sha "e83befd03153b842d45cd25a77fefb915f120eb7"}}}
+                                      :git/sha "e83befd03153b842d45cd25a77fefb915f120eb7"}
+        babashka/fs {:mvn/version "0.5.26"}
+        cheshire/cheshire {:mvn/version "6.1.0"}
+        http-kit/http-kit {:mvn/version "2.8.1"}}}
