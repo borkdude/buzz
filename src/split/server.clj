@@ -118,11 +118,14 @@
 ;; Nothing here evaluates code the browser was handed, so the page can say so
 ;; and let the browser hold it to that. Without 'unsafe-eval' a stray `eval` or
 ;; `new Function` fails loudly instead of quietly working.
+;; esm.sh appears in connect-src as well as script-src because devtools fetches
+;; source maps through connect-src. It grants nothing new: that origin is
+;; already allowed to run code here.
 (defn- csp [nonce]
   (str "default-src 'none'; "
        "script-src 'self' https://esm.sh 'nonce-" nonce "'; "
        "style-src 'nonce-" nonce "'; "
-       "connect-src 'self'; "
+       "connect-src 'self' https://esm.sh; "
        "base-uri 'none'"))
 
 (defn- index []

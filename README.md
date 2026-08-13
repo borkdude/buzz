@@ -280,8 +280,12 @@ The page serves a strict policy and holds itself to it:
     default-src 'none';
     script-src 'self' https://esm.sh 'nonce-…';
     style-src 'nonce-…';
-    connect-src 'self';
+    connect-src 'self' https://esm.sh;
     base-uri 'none'
+
+`esm.sh` appears in `connect-src` because devtools fetches source maps through
+it. That grants nothing new, since the same origin is already allowed to run
+code here.
 
 No `unsafe-eval`. Code reaches the browser only as a module it imports from a
 URL, never as a string in a message, so a stray `eval` or `new Function` fails
