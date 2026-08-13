@@ -1,6 +1,6 @@
 (ns split.app
   (:require [clojure.string :as str]
-            [split.core :refer [defpart defsplit server]]
+            [split.core :refer [defpart defui server]]
             [split.server :as server]))
 
 ;; Stands in for a database. Every connected browser renders from these atoms,
@@ -56,7 +56,7 @@
 ;; shared between windows the way `clicks` is. It has to live here because a
 ;; value-position `(server ...)` cannot see anything the browser bound.
 
-(defsplit todo-app [query]
+(defui todo-app [query]
   (let [todos (server (matching @query))
         left  (server (count (remove :done (vals @db))))
         n     (server @clicks)]
@@ -87,7 +87,7 @@
 ;; A second component, mounted at its own element. It is a sibling of `todo-app`,
 ;; not a child: separate trees, separate slots, separate patches.
 
-(defsplit stats []
+(defui stats []
   (let [total (server (count @db))
         done  (server (count (filter :done (vals @db))))]
     [:p.stats total " total, " done " done"]))

@@ -18,9 +18,9 @@
             [squint.compiler :as squint]))
 
 (defmacro server
-  "Marker. Only has meaning inside `defsplit`."
+  "Marker. Only has meaning inside `defui`."
   [& _]
-  (throw (ex-info "(server ...) used outside defsplit" {})))
+  (throw (ex-info "(server ...) used outside defui" {})))
 
 (defmacro defpart
   "A hiccup helper. Unlike a function, this is spliced into whichever component
@@ -28,10 +28,12 @@
   its handlers belong to the enclosing component.
 
   It is an ordinary `def`, so it resolves like anything else and a stale
-  reference fails loudly. Editing one does not recompile its users, for the same
-  reason editing a macro does not: re-evaluate the component, or the namespace."
+  reference fails loudly. Evaluating one expands every component again, so a
+  change reaches the browser without touching the components themselves."
   [nm argv & body]
-  `(def ~nm {::part true :params '~argv :body '~body}))
+  `(do (def ~nm {::part true :params '~argv :body '~body})
+       (recompile!)
+       (var ~nm)))
 
 (defn- part
   "The part a head symbol names, if it names one and is not shadowed."
@@ -172,9 +174,26 @@
                      (apply list (mapv ssr-form form)))
     :else form))
 
-;; Bumped every time a defsplit is evaluated, so re-evaluating one in a REPL is
+;; Bumped every time a defui is evaluated, so re-evaluating one in a REPL is
 ;; enough to tell the browsers something changed.
 (defonce revision (atom 0))
+
+;; Every defui keeps its own form, so it can be expanded again. A part is
+;; inlined at expansion time, which means editing one leaves every component
+;; that used it holding stale JavaScript. Re-evaluating them all is cheaper than
+;; working out which ones actually care.
+(defonce ^:private components (atom {}))
+
+(def ^:dynamic ^:private *recompiling* false)
+
+(defn recompile!
+  "Expands every defui again. Called when a part changes."
+  []
+  (binding [*recompiling* true]
+    (doseq [[_ {:keys [ns form]}] @components]
+      (binding [*ns* (the-ns ns)]
+        (eval form))))
+  (swap! revision inc))
 
 (defn- to-js
   "Compiles the browser form to a self-contained JavaScript expression. `SQ` and
@@ -197,7 +216,7 @@
      :handlers   handlers
      :slot-syms  (mapv :sym slots)}))
 
-(defmacro defsplit
+(defmacro defui
   "Defines a component. Calling it returns an instance:
 
     {:id       stable name, used as the key on the wire
@@ -215,5 +234,7 @@
           :ssr      (fn ~slot-syms ~@ssr-forms)
           :slots    (fn [] ~(vec slot-exprs))
           :handlers ~(into {} (map (fn [[id h]] [id `(fn ~(:params h) ~(:expr h))])) handlers)})
-       (swap! revision inc)
+       (swap! components assoc '~(symbol (str *ns*) (str nm))
+              {:ns '~(ns-name *ns*) :form '~&form})
+       (when-not *recompiling* (swap! revision inc))
        (var ~nm))))

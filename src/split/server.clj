@@ -94,7 +94,7 @@
           m mounted]
     (patch! ch m)))
 
-;; Re-evaluating a defsplit in a REPL bumps the revision. Rebuild each
+;; Re-evaluating a defui in a REPL bumps the revision. Rebuild each
 ;; connection's instances so their handler ids match the new code, then tell the
 ;; browser to import the components again under a fresh URL. Per-connection
 ;; state is kept, so a reload does not clear what someone had typed.
@@ -130,7 +130,7 @@
    :headers js-headers
    :body (squint/compile-string (slurp (io/resource (str "split/" n))))})
 
-;; The components are an ordinary module too. `defsplit` already compiled each
+;; The components are an ordinary module too. `defui` already compiled each
 ;; one to a JavaScript expression, so this only has to give them their imports
 ;; and a name. The browser imports the result and never evaluates a string.
 (defn- components-module []

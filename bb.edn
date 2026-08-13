@@ -6,7 +6,7 @@
  :tasks {serve {:doc "Start the demo on http://localhost:1341"
                 :requires ([split.app :as app])
                 :task (app/-main)}
-         dev   {:doc "Start the demo plus an nrepl on 1667. Re-evaluate a defsplit and the page updates."
+         dev   {:doc "Start the demo plus an nrepl on 1667. Re-evaluate a defui and the page updates."
                 :requires ([split.app :as app])
                 :task (app/-main "--nrepl")}
          split {:doc "Print what the splitter makes of the demo component"

@@ -1,5 +1,5 @@
-;; A defsplit body is browser code, so it calls things that only exist there.
+;; A defui body is browser code, so it calls things that only exist there.
 ;; Reagami is loaded by index.html and never required on this side.
-{:lint-as {split.core/defsplit clojure.core/defn
+{:lint-as {split.core/defui clojure.core/defn
            split.core/defpart clojure.core/defn}
  :linters {:unresolved-namespace {:exclude [reagami]}}}

@@ -24,7 +24,7 @@ and arrives as the exact shape Reagami already expects.
 The body is browser code. `(server ...)` marks what stays here:
 
 ```clojure
-(defsplit todo-app []
+(defui todo-app []
   (let [todos (server (vals @db))]
     [:ul
      (for [{:keys [id title done]} todos]
@@ -106,15 +106,15 @@ reload — kill the server and restart it with the page open to watch it come ba
 
     bb dev     # server plus an nrepl on 1667
 
-Re-evaluate a `defsplit` in the repl and the open page updates. No file watcher
+Re-evaluate a `defui` in the repl and the open page updates. No file watcher
 and no reload:
 
 ```clojure
-(defsplit todo-app []
+(defui todo-app []
   [:div [:h1 "todos, redefined from the repl"] …])
 ```
 
-Expanding a `defsplit` bumps a revision counter, so evaluating the form is the
+Expanding a `defui` bumps a revision counter, so evaluating the form is the
 whole trigger. The server rebuilds each connection's instance, so its handler
 ids match the new code, and sends `["reload" rev id vals]`. The browser imports
 `/components.mjs?v=rev` and redraws. The query string is what makes the browser
@@ -136,7 +136,7 @@ its own:
     …))
 ```
 
-`defsplit` emits `:ssr` next to `:js`: the same converted form, compiled as
+`defui` emits `:ssr` next to `:js`: the same converted form, compiled as
 Clojure rather than to JavaScript, with every `on*` attribute blanked. Blanking
 costs nothing, because Reagami's `split-attrs` drops `:key`, `:on-render` and
 every `on*` key by name whatever the value — the HTML is identical either way.
@@ -197,7 +197,7 @@ What the browser downloads before anything renders:
     client.cljs, interpreted                reagami.mjs      9.5 KB (3.8 KB gz)
                                             squint core       59 KB  (18 KB gz)
 
-Both branches keep the same `defsplit`, the same splitter and the same SSR path.
+Both branches keep the same `defui`, the same splitter and the same SSR path.
 They differ in what reaches the browser and who reads it.
 
 Scittle ships Clojure and keeps a reader and an interpreter in the page, so a
@@ -221,7 +221,7 @@ thing is a walk over a form: readable, printable, and debuggable with `curl`.
 
 ## Layout
 
-    src/split/core.clj     the splitter and defsplit
+    src/split/core.clj     the splitter and defui
     src/split/app.clj      demo db and component
     src/split/server.clj   http-kit, SSE, /rpc, static files
     public/client.cljs     browser runtime, compiled and served as /client.mjs
@@ -267,7 +267,7 @@ its own core, which is the one thing `index.html` has to map:
 - Everything the page shows is server state, so there is nowhere to put state
   that should stay in one browser. Adding that back means either a nested render
   or letting the client contribute slots of its own.
-- One component per page, mounted once per connection. A `defsplit` cannot render
+- One component per page, mounted once per connection. A `defui` cannot render
   another, and nesting one inside another is not implemented.
 - `rpc!` is fire and forget. There is no error path back to the caller.
 - Sessions are never expired, and an RPC only needs a session id to act. Fine on
