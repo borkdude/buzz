@@ -295,27 +295,17 @@
         (eval form))))
   (swap! revision inc))
 
-;; Squint reads `^:async` and `^:gen` off a form's metadata, and the form
-;; reaches it as text, so those two have to survive printing. Everything else is
-;; dropped: reader line and column numbers would otherwise be printed on every
-;; form for squint to throw away again.
-(defn- fn-markers-only [form]
-  (walk/postwalk (fn [x]
-                   (if (instance? clojure.lang.IObj x)
-                     (let [m (select-keys (meta x) [:async :gen])]
-                       (with-meta x (not-empty m)))
-                     x))
-                 form))
-
 (defn- to-js
   "Compiles the browser form to a self-contained JavaScript expression. `SQ` and
   `rpc_BANG_` are left free, so the browser supplies both as arguments rather
   than through globals. Squint runs here, at macro expansion, so the result is a
-  string constant like any other."
+  string constant like any other.
+
+  The form goes to `compile*` as data rather than through `compile-string`.
+  Printing it would drop metadata, and squint reads `^:async` from there."
   [form]
-  (squint/compile-string (binding [*print-meta* true]
-                           (pr-str (fn-markers-only form)))
-                         {:context :expr :core-alias "SQ" :elide-imports true}))
+  (:body (squint/compile* [form]
+                          {:context :expr :core-alias "SQ" :elide-imports true})))
 
 (defn split-body
   "Returns the pieces a component is made of. Server slots come first in the
