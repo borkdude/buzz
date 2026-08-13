@@ -73,7 +73,7 @@ after each change to an observed atom and the result is sent to the browser.
 
 - `(client expr)` is a client value that crosses into a `server!` form.
 
-- `(local-state init)` is an atom that the client can read and write. It is not sent to the server. This state survives a re-render of the app and is only created once per mount. It is not shared between browsers or tabs.
+- `(local-state init)` is an atom that the client can read and write. It is not sent to the server. This state survives a re-render of the app and is only created once per mount. It is not shared between browsers or tabs. The initial value can read a `server` expression, so a client atom can start from what the server sent.
 
 ## Parts
 
