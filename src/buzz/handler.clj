@@ -89,13 +89,28 @@
                                   (unwatch-session! session (:mounted (get @conns session)))
                                   (swap! conns dissoc session))})))
 
+(defn- json-response [status body]
+  {:status status
+   :headers {"Content-Type" "application/json"}
+   :body (json/generate-string body)})
+
+;; A handler that threw used to escape into http-kit, so the browser saw nothing
+;; and the log said nothing about which handler it was. Now it answers and the
+;; browser's promise rejects. The detail stays here: an exception message can
+;; carry more than a browser should be told.
 (defn- rpc [req]
   (let [[session handler-id args] (json/parse-string (slurp (:body req)))]
-    (if-let [f (some #(get (:handlers (:instance %)) handler-id)
+    (if-let [h (some #(get (:handlers (:instance %)) handler-id)
                      (:mounted (get @conns session)))]
-      (do (apply f args)
-          {:status 204})
-      {:status 404 :body "no such handler"})))
+      (try
+        (let [v (apply (:fn h) args)]
+          (if (:reply h)
+            (json-response 200 v)
+            {:status 204}))
+        (catch Exception e
+          (println "buzz:" handler-id "failed on" (pr-str args) "-" (ex-message e))
+          (json-response 500 {:error "handler failed"})))
+      (json-response 404 {:error "no such handler"}))))
 
 ;; The reply to an RPC is not the response. It is whatever :patch the write
 ;; happens to produce, on every stream watching that data.

@@ -3,7 +3,7 @@
   over HTTP so the browser knows when it asked, and can time the whole loop:
   server work, wire, and render."
   (:require [babashka.nrepl.server :as nrepl]
-            [buzz.core :refer [client defpart defui server]]
+            [buzz.core :refer [client defpart defui server server!]]
             [buzz.handler :as buzz]
             [clojure.string :as str]
             [org.httpkit.server :as http]))
@@ -40,7 +40,7 @@
   [:tr {:key id}
    [:td.id id]
    [:td.label label]
-   [:td [:button.rm {:on-click (fn [_] (server (remove-row! (client id))))} "x"]]])
+   [:td [:button.rm {:on-click (fn [_] (server! (remove-row! (client id))))} "x"]]])
 
 (defui table []
   (let [items (server @rows)

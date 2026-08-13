@@ -19,20 +19,38 @@
             [squint.compiler :as squint]))
 
 (defmacro server
-  "Marker. Only has meaning inside `defui`."
+  "A value from the server. Evaluated here on every render and pushed to the
+  browser as a slot. Value position only, so an event handler uses `server!`."
   [& _]
   (throw (ex-info "(server ...) used outside defui" {})))
 
-(defmacro client
-  "Marker for a browser expression inside a handler's `(server ...)`. The
-  browser evaluates it and sends the result as an argument.
+(defmacro server!
+  "Something for the server to do, from an event handler. The browser gets a
+  promise: empty when it worked, rejected when it did not. Wrap the last form in
+  `reply` to send a value back.
 
-    (server (add! (client (.. e -target -value))))
-
-  A bare symbol inside `(server ...)` always means this side, so anything
-  crossing from the browser has to say so."
+    (server! (delete! (client id)))
+    (server! (swap! db dissoc (client id)) (reply :ok))
+    (server! (reply (taken? (client name))))"
   [& _]
-  (throw (ex-info "(client ...) used outside a (server ...) handler" {})))
+  (throw (ex-info "(server! ...) used outside defui" {})))
+
+(defmacro reply
+  "Marks what a `server!` answers with. Last form only. A reply is a snapshot,
+  not a subscription: use a `server` slot for anything that should stay live."
+  [& _]
+  (throw (ex-info "(reply ...) used outside (server! ...)" {})))
+
+(defmacro client
+  "A browser expression whose value crosses into a `server!` form. A bare symbol
+  in there always means the server, so anything from the browser says so.
+
+    (server! (add! (client (.. e -target -value))))
+
+  In value position it is a slot the browser owns: an atom made from `init`,
+  watched, so setting it redraws without asking the server."
+  [& _]
+  (throw (ex-info "(client ...) used outside defui" {})))
 
 (defmacro defpart
   "A hiccup helper. Unlike a function, this is spliced into whichever component
@@ -108,15 +126,30 @@
                      expr)]
     [server-expr @found]))
 
+(defn- reply-form? [x]
+  (and (seq? x) (= 'reply (first x))))
+
 (defn- handler!
-  "`(server ...)` inside a lambda. Registers a handler and returns the call the
-  browser makes in its place. Its arguments are the `(client ...)` expressions,
-  evaluated over there."
-  [expr scope comp-id acc]
-  (let [[server-expr pairs] (lift-client expr)
-        id (str comp-id "/" (count (:handlers @acc)))]
-    (swap! acc update :handlers conj [id {:params (mapv first pairs) :expr server-expr}])
-    (list 'rpc! id (mapv #(conv (second %) scope true comp-id acc) pairs))))
+  "`(server! ...)` in an event handler. Registers what the server does and
+  returns the call the browser makes in its place, carrying the `(client ...)`
+  expressions as arguments. A trailing `(reply x)` says the response carries x."
+  [forms scope comp-id acc]
+  (let [tail    (last forms)
+        answer? (reply-form? tail)
+        _       (when (and answer? (not= 2 (count tail)))
+                  (throw (ex-info "(reply ...) takes one expression" {:form tail})))
+        body    (if answer?
+                  (concat (butlast forms) [(second tail)])
+                  forms)
+        expr    (if (= 1 (count body)) (first body) (cons 'do body))]
+    (when (some reply-form? (tree-seq coll? seq expr))
+      (throw (ex-info "(reply ...) must be the last form of a (server! ...)"
+                      {:forms (vec forms)})))
+    (let [[server-expr pairs] (lift-client expr)
+          id (str comp-id "/" (count (:handlers @acc)))]
+      (swap! acc update :handlers conj
+             [id {:params (mapv first pairs) :expr server-expr :reply answer?}])
+      (list 'rpc! id (mapv #(conv (second %) scope true comp-id acc) pairs)))))
 
 (defn- conv-bindings
   "Walks a binding vector left to right, so each init sees the names bound
@@ -160,10 +193,22 @@
     (let [head (first form)
           args (rest form)]
       (cond
-        (= 'server head) (let [expr (if (= 1 (count args)) (first args) (cons 'do args))]
-                           (if lambda?
-                             (handler! expr scope comp-id acc)
-                             (slot! expr scope acc)))
+        ;; Each marker has one legal place. Somewhere else is an error, never a
+        ;; different meaning.
+        (= 'server head)
+        (if lambda?
+          (throw (ex-info "(server ...) is a value. An event handler wants (server! ...)"
+                          {:form form}))
+          (slot! (if (= 1 (count args)) (first args) (cons 'do args)) scope acc))
+
+        (= 'server! head)
+        (if lambda?
+          (handler! args scope comp-id acc)
+          (throw (ex-info "(server! ...) is an effect, so it needs an event handler to be in"
+                          {:form form})))
+
+        (= 'reply head)
+        (throw (ex-info "(reply ...) only goes at the end of a (server! ...)" {:form form}))
         ;; `(client init)` in value position is a slot the browser owns: an atom
         ;; the runtime makes from `init` and redraws on. Inside a handler the
         ;; code is already the browser's, so it would say nothing.
@@ -250,13 +295,26 @@
         (eval form))))
   (swap! revision inc))
 
+;; Squint reads `^:async` and `^:gen` off a form's metadata, and the form
+;; reaches it as text, so those two have to survive printing. Everything else is
+;; dropped: reader line and column numbers would otherwise be printed on every
+;; form for squint to throw away again.
+(defn- fn-markers-only [form]
+  (walk/postwalk (fn [x]
+                   (if (instance? clojure.lang.IObj x)
+                     (let [m (select-keys (meta x) [:async :gen])]
+                       (with-meta x (not-empty m)))
+                     x))
+                 form))
+
 (defn- to-js
   "Compiles the browser form to a self-contained JavaScript expression. `SQ` and
   `rpc_BANG_` are left free, so the browser supplies both as arguments rather
   than through globals. Squint runs here, at macro expansion, so the result is a
   string constant like any other."
   [form]
-  (squint/compile-string (pr-str form)
+  (squint/compile-string (binding [*print-meta* true]
+                           (pr-str (fn-markers-only form)))
                          {:context :expr :core-alias "SQ" :elide-imports true}))
 
 (defn split-body
@@ -294,7 +352,10 @@
           :locals   ~locals
           :ssr      (fn ~slot-syms ~@ssr-forms)
           :slots    (fn [] ~(vec slot-exprs))
-          :handlers ~(into {} (map (fn [[id h]] [id `(fn ~(:params h) ~(:expr h))])) handlers)})
+          :handlers ~(into {} (map (fn [[id h]]
+                                     [id {:fn `(fn ~(:params h) ~(:expr h))
+                                          :reply (boolean (:reply h))}]))
+                           handlers)})
        (swap! components assoc '~(symbol (str *ns*) (str nm))
               {:ns '~(ns-name *ns*) :form '~&form})
        (when-not *recompiling* (swap! revision inc))
