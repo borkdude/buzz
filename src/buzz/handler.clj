@@ -3,13 +3,18 @@
   particular application, and runs no server of its own:
 
     (def ui
-      (handler {:index \"public/index.html\"
+      (handler {:title \"todos\"
                 :watch [app/db]                              ; patch everyone on change
                 :mounts [{:el \"app\"
                           :state (fn [] {:query (atom \"\")}) ; per connection, optional
                           :component (fn [state] (app/todo-app (:query state)))}]}))
 
     (defn app [req] (or (ui req) (my-static-files req)))
+
+  Without an `:index` the page is written here, from `:title`, `:head` and one
+  div per mount. Give `:index` a file instead to write your own, and mark each
+  mount with an `<!--el-->` comment for the first paint and the script tags with
+  `nonce=\"NONCE\"`.
 
   Every atom in a mount's `:state` map is watched for that connection alone.
   Atoms in the top level `:watch` are watched for all of them.
@@ -196,24 +201,54 @@
 ;; `on*` attribute by name anyway. Reagami adopts these nodes in the browser
 ;; instead of rebuilding them. There is no connection yet, so a mount's `:state`
 ;; starts empty for this render.
+(defn- first-paint [spec]
+  (let [inst (:instance (build spec))
+        ;; a browser slot has no value yet, so the first paint renders whatever
+        ;; the component makes of an empty one
+        locals (repeatedly (:locals inst 0) #(atom nil))]
+    (ssr/render (into [(:ssr inst)] (concat ((:slots inst)) locals)))))
+
+;; The version comes from this library rather than from the page, so an import
+;; map cannot drift away from the Squint that compiled the components.
+(def ^:private squint-core "https://esm.sh/squint-cljs@0.14.208/core.js")
+
+(defn- scripts [nonce]
+  (str "<script type=\"importmap\" nonce=\"" nonce "\">\n"
+       "{\"imports\": {\"squint-cljs/core.js\": \"" squint-core "\"}}\n"
+       "</script>\n"
+       "<script type=\"module\" src=\"/client.mjs\"></script>\n"))
+
+(defn- escape [s]
+  (str/escape (str s) {\& "&amp;" \< "&lt;" \> "&gt;" \" "&quot;"}))
+
+;; Without an `:index` the page is boilerplate: a div per mount and the two
+;; script tags. Buzz knows all of it, so it writes the page instead.
+(defn- generated-page [nonce]
+  (let [{:keys [title head mounts]} @page]
+    (str "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n"
+         "<title>" (escape (or title "buzz")) "</title>\n"
+         head
+         "</head>\n<body>\n"
+         (str/join (for [{:keys [el] :as spec} mounts]
+                     (str "<div id=\"" (escape el) "\">" (first-paint spec) "</div>\n")))
+         (scripts nonce)
+         "</body>\n</html>\n")))
+
+;; With an `:index` the page is yours. Buzz fills each `<!--el-->` with the
+;; first paint and every NONCE with the one in the header.
+(defn- rendered-page [nonce]
+  (-> (reduce (fn [html {:keys [el] :as spec}]
+                (str/replace html (str "<!--" el "-->") (first-paint spec)))
+              (slurp (fs/file (:index @page)))
+              (:mounts @page))
+      (str/replace "NONCE" nonce)))
+
 (defn- index []
-  (let [nonce (str (random-uuid))
-        html  (reduce (fn [page-html {:keys [el] :as spec}]
-                        (let [inst (:instance (build spec))
-                              ;; a browser slot has no value yet, so the first
-                              ;; paint renders whatever the component makes of
-                              ;; an empty one
-                              locals (repeatedly (:locals inst 0) #(atom nil))]
-                          (str/replace page-html
-                                       (str "<!--" el "-->")
-                                       (ssr/render (into [(:ssr inst)]
-                                                         (concat ((:slots inst)) locals))))))
-                      (slurp (fs/file (:index @page)))
-                      (:mounts @page))]
+  (let [nonce (str (random-uuid))]
     {:status 200
      :headers {"Content-Type" "text/html"
                "Content-Security-Policy" (csp nonce)}
-     :body (str/replace html "NONCE" nonce)}))
+     :body (if (:index @page) (rendered-page nonce) (generated-page nonce))}))
 
 (defn handler
   "Returns a Ring handler for the page described by `spec`. Requests it does not
@@ -222,7 +257,7 @@
 
   Installs watches and starts the heartbeat as a side effect of being called."
   [{:keys [watch] :as spec}]
-  (reset! page (merge {:index "public/index.html"} spec))
+  (reset! page spec)
   (doseq [a watch]
     (add-watch a ::render broadcast-patch!))
   (heartbeat!)

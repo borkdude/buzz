@@ -20,32 +20,13 @@ Also take a look at [tube-pod](https://github.com/borkdude/tube-pod), a real app
 
 ## Quickstart
 
-To quickly get up and running with Buzz, create a new project with the following files:
+Create a project with two files. `deps.edn`:
 
 ```clojure
 {:paths ["src"]
  :deps {io.github.borkdude/buzz
         {:git/sha "<latest>"}}}
 ```
-
-`public/index.html`:
-
-```html
-<!DOCTYPE html>
-<html>
-  <head><meta charset="utf-8"><title>counter</title></head>
-  <body>
-    <div id="app"><!--app--></div>
-    <script type="importmap" nonce="NONCE">
-      {"imports": {"squint-cljs/core.js": "https://esm.sh/squint-cljs@0.14.208/core.js"}}
-    </script>
-    <script type="module" src="/client.mjs"></script>
-  </body>
-</html>
-```
-
-Buzz puts the first render in place of the `<!--app-->` comment, and gives each
-`NONCE` the value from its Content-Security-Policy header.
 
 `src/counter.clj`:
 
@@ -66,7 +47,7 @@ Buzz puts the first render in place of the `<!--app-->` comment, and gives each
      [:button {:on-click (fn [_] (swap! step inc))} (str "step " @step)]]))
 
 (def ui
-  (buzz/handler {:index "public/index.html"
+  (buzz/handler {:title "counter"
                  :watch [clicks]
                  :mounts [{:el "app" :component (fn [_] (counter))}]}))
 
@@ -116,7 +97,34 @@ To compose the handler with other routes, you can use `or` since the handler ret
   (or (ui req) (my-other-routes req)))
 ```
 
-Buzz watches each atom in `:watch`. When one of them changes, it re-renders the component and sends a patch to each browser. One mount can hold one component at one element. A page can have more than one mount. Give each mount its own element and its own comment in the HTML.
+Buzz watches each atom in `:watch`. When one of them changes, it re-renders the component and sends a patch to each browser. One mount can hold one component at one element. A page can have more than one mount.
+
+## The page
+
+Without an `:index`, Buzz writes the page: a title from `:title`, a div per
+mount holding its first render, and the two script tags. `:head` adds anything
+else that belongs in the head, such as a stylesheet.
+
+Give `:index` a file to write the page yourself:
+
+```clojure
+(buzz/handler {:index "public/index.html" …})
+```
+
+Two things in that file are then yours to place. Buzz replaces `<!--el-->` with
+the first render of the mount at that element, and every `NONCE` with the one in
+the Content-Security-Policy header:
+
+```html
+<div id="app"><!--app--></div>
+<script type="importmap" nonce="NONCE">
+  {"imports": {"squint-cljs/core.js": "https://esm.sh/squint-cljs@0.14.208/core.js"}}
+</script>
+<script type="module" src="/client.mjs"></script>
+```
+
+Leave out the comment and the page still works. It arrives empty and the browser
+fills it in.
 
 ## Development
 
