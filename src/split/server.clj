@@ -1,21 +1,21 @@
 (ns split.server
-  "Serves a page built from components. Knows nothing about any particular
-  application: everything app-specific arrives in the spec given to `start!`.
+  "A Ring handler for a page built from components. Knows nothing about any
+  particular application, and runs no server of its own:
 
-    (start! {:port 1341
-             :public \"public\"
-             :watch [app/db]                              ; patch everyone on change
-             :mounts [{:el \"app\"
-                       :state (fn [] {:query (atom \"\")}) ; per connection, optional
-                       :component (fn [state] (app/todo-app (:query state)))}]})
+    (def ui
+      (handler {:index \"public/index.html\"
+                :watch [app/db]                              ; patch everyone on change
+                :mounts [{:el \"app\"
+                          :state (fn [] {:query (atom \"\")}) ; per connection, optional
+                          :component (fn [state] (app/todo-app (:query state)))}]}))
+
+    (defn app [req] (or (ui req) (my-static-files req)))
 
   Every atom in a mount's `:state` map is watched for that connection alone.
   Atoms in the top level `:watch` are watched for all of them.
 
-  `:routes` is an optional (fn [req] ...) returning a response or nil, tried
-  before files are served from `:public`."
+  Requests the page does not own return nil, so the application composes."
   (:require [babashka.fs :as fs]
-            [babashka.nrepl.server :as nrepl]
             [cheshire.core :as json]
             [clojure.java.io :as io]
             [clojure.string :as str]
@@ -171,48 +171,30 @@
                           (str/replace page-html
                                        (str "<!--" el "-->")
                                        (ssr/render (into [(:ssr inst)] ((:slots inst)))))))
-                      (slurp (fs/file (:public @page) "index.html"))
+                      (slurp (fs/file (:index @page)))
                       (:mounts @page))]
     {:status 200
      :headers {"Content-Type" "text/html"
                "Content-Security-Policy" (csp nonce)}
      :body (str/replace html "NONCE" nonce)}))
 
-(def ^:private content-types
-  {"html" "text/html" "css" "text/css" "js" "text/javascript"})
+(defn handler
+  "Returns a Ring handler for the page described by `spec`. Requests it does not
+  own get nil, so an application can compose it with whatever else it serves and
+  run whichever server it likes.
 
-(defn- serve-file [uri]
-  (let [root (fs/canonicalize (:public @page))
-        f    (fs/canonicalize (fs/path root (subs uri 1)))]
-    (if (and (fs/starts-with? f root) (fs/regular-file? f))
-      {:status 200
-       :headers {"Content-Type" (content-types (fs/extension f) "text/plain")}
-       :body (fs/read-all-bytes f)}
-      {:status 404 :body "not found"})))
-
-(defn handler [req]
-  (case (:uri req)
-    "/"               (index)
-    "/client.mjs"     (runtime-module "client.cljs")
-    "/rpc.mjs"        (runtime-module "rpc.cljs")
-    "/components.mjs" (components-module)
-    "/events"         (events req)
-    "/rpc"            (rpc req)
-    ;; An application gets a look before the static fallback. `:routes` returns
-    ;; a response, or nil to decline.
-    (or (when-let [routes (:routes @page)] (routes req))
-        (serve-file (:uri req)))))
-
-(defn start!
-  "Runs the page described by `spec`. Blocks."
-  [{:keys [port nrepl watch] :or {port 1341} :as spec}]
-  (reset! page (merge {:public "public"} spec))
+  Installs watches and starts the heartbeat as a side effect of being called."
+  [{:keys [watch] :as spec}]
+  (reset! page (merge {:index "public/index.html"} spec))
   (doseq [a watch]
     (add-watch a ::render broadcast-patch!))
   (heartbeat!)
-  (http/run-server handler {:port port})
-  (println (str "http://localhost:" port))
-  (when nrepl
-    (nrepl/start-server! {:port nrepl})
-    (println (str "nrepl://localhost:" nrepl)))
-  @(promise))
+  (fn [req]
+    (case (:uri req)
+      "/"               (index)
+      "/client.mjs"     (runtime-module "client.cljs")
+      "/rpc.mjs"        (runtime-module "rpc.cljs")
+      "/components.mjs" (components-module)
+      "/events"         (events req)
+      "/rpc"            (rpc req)
+      nil)))

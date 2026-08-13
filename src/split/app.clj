@@ -1,5 +1,7 @@
 (ns split.app
-  (:require [clojure.string :as str]
+  (:require [babashka.nrepl.server :as nrepl]
+            [clojure.string :as str]
+            [org.httpkit.server :as http]
             [split.core :refer [defpart defui server]]
             [split.server :as server]))
 
@@ -96,13 +98,23 @@
 ;; belongs to one browser, so it is made per connection and patches only that
 ;; one.
 
+(def ui
+  (server/handler {:index "public/index.html"
+                   :watch [db clicks]
+                   :mounts [{:el "app"
+                             :state (fn [] {:query (atom "")})
+                             :component (fn [{:keys [query]}] (todo-app query))}
+                            {:el "stats"
+                             :component (fn [_] (stats))}]}))
+
+(defn app [req]
+  (or (ui req) {:status 404 :body "not found"}))
+
 (defn -main [& args]
   (seed!)
-  (server/start! {:port 1341
-                  :nrepl (when (some #{"--nrepl"} args) 1667)
-                  :watch [db clicks]
-                  :mounts [{:el "app"
-                            :state (fn [] {:query (atom "")})
-                            :component (fn [{:keys [query]}] (todo-app query))}
-                           {:el "stats"
-                            :component (fn [_] (stats))}]}))
+  (http/run-server app {:port 1341})
+  (println "http://localhost:1341")
+  (when (some #{"--nrepl"} args)
+    (nrepl/start-server! {:port 1667})
+    (println "nrepl://localhost:1667"))
+  @(promise))
