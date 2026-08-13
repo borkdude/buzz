@@ -1,5 +1,6 @@
 (ns buzz.handler-test
-  (:require [buzz.core :refer [defui reply server server!]]
+  (:require [babashka.fs :as fs]
+            [buzz.core :refer [defui reply server server!]]
             [buzz.handler :as handler]
             [cheshire.core :as json]
             [clojure.string :as str]
@@ -240,3 +241,44 @@
 
     (testing "a request the page does not own is declined rather than answered"
       (is (nil? (ui {:uri "/feed.xml"}))))))
+
+(defn- index-spec
+  "A spec whose page is the given file rather than one Buzz writes."
+  [html]
+  (let [f (fs/create-temp-file {:suffix ".html"})]
+    (fs/delete-on-exit f)
+    (spit (fs/file f) html)
+    {:index (str f)
+     :mounts [{:el "app" :component (fn [_] (greeting))}]}))
+
+;; With an :index the page is yours. Buzz fills in the mount comments and the
+;; nonce, and touches nothing else.
+(deftest an-index-file-is-filled-in-rather-than-written
+  (let [ui (handler/handler
+            (index-spec (str "<!DOCTYPE html>\n<html>\n<body>\n"
+                             "<h1>mine</h1>\n"
+                             "<div id=\"app\"><!--app--></div>\n"
+                             "<script type=\"importmap\" nonce=\"NONCE\">{}</script>\n"
+                             "</body>\n</html>\n")))
+        {:keys [status headers body]} (ui {:uri "/"})
+        nonce (nonce-of (get headers "Content-Security-Policy"))]
+
+    (testing "the comment becomes the first render of that mount"
+      (is (= 200 status))
+      (is (str/includes? body "<div id=\"app\"><p>hello</p></div>"))
+      (is (not (str/includes? body "<!--app-->"))))
+
+    (testing "NONCE becomes the nonce the policy names"
+      (is (str/includes? body (str "nonce=\"" nonce "\"")))
+      (is (not (str/includes? body "NONCE"))))
+
+    (testing "the rest of the file is left alone"
+      (is (str/includes? body "<h1>mine</h1>")))))
+
+(deftest an-index-without-a-comment-is-still-served
+  (let [ui (handler/handler (index-spec "<html><body><div id=\"app\"></div></body></html>"))
+        {:keys [status body]} (ui {:uri "/"})]
+    (testing "the page arrives empty and the browser fills it in"
+      (is (= 200 status))
+      (is (str/includes? body "<div id=\"app\"></div>"))
+      (is (not (str/includes? body "hello"))))))
