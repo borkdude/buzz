@@ -6,8 +6,8 @@
  :tasks {
          test  {:doc "Run the tests"
                 :extra-paths ["test"]
-                :requires ([clojure.test :as t] [buzz.core-test])
-                :task (let [{:keys [fail error]} (t/run-tests 'buzz.core-test)]
+                :requires ([clojure.test :as t] [buzz.core-test] [buzz.handler-test])
+                :task (let [{:keys [fail error]} (t/run-tests 'buzz.core-test 'buzz.handler-test)]
                         (when (pos? (+ fail error)) (System/exit 1)))}
          serve {:doc "Start the demo on http://localhost:1341"
                 :requires ([buzz.app :as app])
