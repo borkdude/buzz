@@ -1,4 +1,4 @@
-# buzz
+# Buzz
 
 > ⚠️ **WARNING**: This project is highly experimental and the API will surely change. Use only for non-serious projects.
 
@@ -16,22 +16,75 @@ In this project, you can run:
     bb serve    # a demo on http://localhost:1341
     bb bench    # a benchmark, on http://localhost:1342
 
-Also take a look at [tube-pod](https://github.com/borkdude/tube-pod), a real application I wrote using buzz.
-buzz.
+Also take a look at [tube-pod](https://github.com/borkdude/tube-pod), a real application I wrote using Buzz.
 
-## A component
+## Quick start
+
+Three files. `deps.edn`:
 
 ```clojure
-(defui todos []
-  (let [items (server (vals @db))
-        draft (local-state "")]
-    [:div
-     [:input {:on-input (fn [e] (reset! draft (.. e -target -value)))}]
-     [:button {:on-click (fn [_] (server! (add! (client @draft))))} "add"]
-     [:ul (for [t items] [:li (:title t)])]]))
+{:paths ["src"]
+ :deps {io.github.borkdude/buzz
+        {:git/sha "533cc5d03fc525ea1bdaba4d84091ffde55b8c79"}}}
 ```
 
-The body is browser code. The four marks below say what is not.
+`public/index.html`:
+
+```html
+<!DOCTYPE html>
+<html>
+  <head><meta charset="utf-8"><title>counter</title></head>
+  <body>
+    <div id="app"><!--app--></div>
+    <script type="importmap" nonce="NONCE">
+      {"imports": {"squint-cljs/core.js": "https://esm.sh/squint-cljs@0.14.208/core.js"}}
+    </script>
+    <script type="module" src="/client.mjs"></script>
+  </body>
+</html>
+```
+
+Buzz puts the first render in place of the `<!--app-->` comment, and gives each
+`NONCE` the value from its Content-Security-Policy header.
+
+`src/counter.clj`:
+
+```clojure
+(ns counter
+  (:require [buzz.core :refer [client defui local-state server server!]]
+            [buzz.handler :as buzz]
+            [org.httpkit.server :as http]))
+
+(defonce clicks (atom 0))
+
+(defui counter []
+  (let [n    (server @clicks)
+        step (local-state 1)]
+    [:div
+     [:p "clicked " n " times"]
+     [:button {:on-click (fn [_] (server! (swap! clicks + (client @step))))} "add"]
+     [:button {:on-click (fn [_] (swap! step inc))} (str "step " @step)]]))
+
+(def ui
+  (buzz/handler {:index "public/index.html"
+                 :watch [clicks]
+                 :mounts [{:el "app" :component (fn [_] (counter))}]}))
+
+(defn -main [& _]
+  (http/run-server (fn [req] (or (ui req) {:status 404 :body "not found"}))
+                   {:port 1350})
+  (println "http://localhost:1350")
+  @(promise))
+```
+
+Then run it:
+
+    clojure -M -m counter
+
+The count comes from the server, so a second browser shows the same number. The
+step is browser state, so each browser has its own.
+
+The body of a component is browser code. The four marks below say what is not.
 
 ## The four marks
 
@@ -44,7 +97,7 @@ a promise.
 `(client expr)` is a browser value that crosses into a `server!` form. A plain
 symbol inside `server!` means the server, so a browser value says so.
 
-`(local-state init)` is an atom that the browser owns. buzz makes it once, when
+`(local-state init)` is an atom that the browser owns. Buzz makes it once, when
 the component mounts, and redraws when it changes. The server never sees it.
 
 Each mark has one place. Somewhere else is an error, not a different meaning.
@@ -77,27 +130,25 @@ use a `server` slot.
   [:li (:title item)])
 ```
 
-buzz splices a part into the component that uses it, so a `server!` inside a
+Buzz splices a part into the component that uses it, so a `server!` inside a
 part belongs to that component. Parts take browser values. Mark a parameter
 `^:server` to pass something that lives on the server.
 
 ## Mounting
 
-```clojure
-(def ui
-  (buzz/handler {:index "public/index.html"
-                 :watch [db]
-                 :mounts [{:el "app" :component (fn [_] (todos))}]}))
+`buzz/handler` returns a Ring handler. For a request that Buzz does not own, the
+handler returns nil. You choose the web server and the other routes:
 
+```clojure
 (defn app [req]
-  (or (ui req) (files req)))
+  (or (ui req) (my-other-routes req)))
 ```
 
-`buzz/handler` returns a Ring handler. For a request that buzz does not own, the
-handler returns nil. You choose the web server and the other routes.
-
-buzz watches each atom in `:watch`. When one changes, each browser with a
+Buzz watches each atom in `:watch`. When one changes, each browser with a
 changed value gets a patch.
+
+One mount holds one component at one element. A page can have more than one.
+Give each mount its own element and its own comment in the HTML.
 
 ## What crosses the network
 
