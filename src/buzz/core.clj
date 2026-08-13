@@ -45,12 +45,19 @@
   "A browser expression whose value crosses into a `server!` form. A bare symbol
   in there always means the server, so anything from the browser says so.
 
-    (server! (add! (client (.. e -target -value))))
-
-  In value position it is a slot the browser owns: an atom made from `init`,
-  watched, so setting it redraws without asking the server."
+    (server! (add! (client (.. e -target -value))))"
   [& _]
-  (throw (ex-info "(client ...) used outside defui" {})))
+  (throw (ex-info "(client ...) used outside a (server! ...)" {})))
+
+(defmacro local-state
+  "State the browser owns: an atom holding `init`. Made once when the component
+  mounts, not on every render, and watched, so changing it redraws without
+  asking the server anything.
+
+    (let [playing (local-state nil)]
+      [:button {:on-click (fn [_] (reset! playing id))} \"play\"])"
+  [& _]
+  (throw (ex-info "(local-state ...) used outside defui" {})))
 
 (defmacro defpart
   "A hiccup helper. Unlike a function, this is spliced into whichever component
@@ -212,13 +219,22 @@
         ;; `(client init)` in value position is a slot the browser owns: an atom
         ;; the runtime makes from `init` and redraws on. Inside a handler the
         ;; code is already the browser's, so it would say nothing.
-        (= 'client head) (if lambda?
-                           (throw (ex-info "(client ...) inside a handler only marks a value crossing into (server ...)"
-                                           {:form form}))
-                           (let [sym (gensym "local__")]
-                             (swap! acc update :locals conj
-                                    {:sym sym :init (conv (first args) scope false comp-id acc)})
-                             sym))
+        ;; `(local-state init)` is state the browser owns: an atom made once at
+        ;; mount, not per render, and watched.
+        (= 'local-state head)
+        (if lambda?
+          (throw (ex-info "(local-state ...) declares state, so it belongs in the body rather than a handler"
+                          {:form form}))
+          (let [sym (gensym "local__")]
+            (swap! acc update :locals conj
+                   {:sym sym :init (conv (first args) scope false comp-id acc)})
+            sym))
+
+        ;; Anything reaching here is a `client` outside a `server!`, since the
+        ;; ones inside are lifted out before the walk.
+        (= 'client head)
+        (throw (ex-info "(client ...) crosses a value into a (server! ...). Browser state is (local-state ...)"
+                        {:form form}))
         (= 'quote head)  form
         (lambda-heads head) (conv-fn form scope comp-id acc)
         (let-heads head)    (conv-let form scope lambda? comp-id acc)

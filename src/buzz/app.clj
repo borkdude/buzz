@@ -1,6 +1,6 @@
 (ns buzz.app
   (:require [babashka.nrepl.server :as nrepl]
-            [buzz.core :refer [client defpart defui reply server server!]]
+            [buzz.core :refer [client defpart defui local-state reply server server!]]
             [buzz.handler :as buzz]
             [clojure.string :as str]
             [org.httpkit.server :as http]))
@@ -65,7 +65,7 @@
         left  (server (count (remove :done (vals @db))))
         n     (server @clicks)
         ;; browser state, so what came back has somewhere to live
-        said  (client nil)]
+        said  (local-state nil)]
     [:div
      [:h1 "todos!"]
      ;; Deliberately not `:value`. The browser owns what is in this box and

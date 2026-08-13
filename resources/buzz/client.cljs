@@ -19,8 +19,8 @@
     (reagami/render (.-node entry)
                     (.concat #js [(.-f (component id))] (.-vals entry) (.-locals entry)))))
 
-;; `(client init)` becomes an atom here. Watching it is what makes setting one
-;; redraw without asking the server anything.
+;; `(local-state init)` becomes an atom here. Watching it is what makes setting
+;; one redraw without asking the server anything.
 ;;
 ;; A reconnect or a live reload mounts again. Browser state belongs to the
 ;; browser, so it is kept when the component still has the same number of
