@@ -132,8 +132,13 @@
   (doseq [[session {:keys [ch mounted]}] @conns]
     (let [rebuilt (mapv (fn [m] (assoc m :instance ((:component (:spec m)) (:state m)))) mounted)]
       (swap! conns assoc-in [session :mounted] rebuilt)
+      ;; A watch closes over the mount it was installed with, so the old ones
+      ;; still hold the old instance and would patch with the slots of code the
+      ;; browser has stopped running.
+      (unwatch-session! session mounted)
       ;; the slots may have changed shape, so this one always goes out
-      (doseq [{:keys [instance sent]} rebuilt]
+      (doseq [{:keys [instance sent] :as m} rebuilt]
+        (watch-session! ch session m)
         (let [vals ((:slots instance))]
           (reset! sent vals)
           (event! ch ["reload" rev (:id instance) vals]))))))
