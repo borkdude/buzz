@@ -26,9 +26,22 @@
     (catch java.net.SocketTimeoutException _ true)
     (finally (.setSoTimeout sock 5000))))
 
+(defn- open-events
+  "One browser on the page. Reading SSE by hand keeps the assertions on what the
+  browser is actually sent."
+  [port]
+  (let [sock (java.net.Socket. "127.0.0.1" (int port))]
+    (.setSoTimeout sock 5000)
+    (doto (.getOutputStream sock)
+      (.write (.getBytes "GET /events HTTP/1.1\r\nHost: localhost\r\n\r\n"))
+      (.flush))
+    (let [rdr (java.io.BufferedReader.
+               (java.io.InputStreamReader. (.getInputStream sock) "UTF-8"))
+          [_ session] (next-event rdr)]
+      {:sock sock :rdr rdr :session session :port port})))
+
 (defn- with-connection
-  "Serves `spec` on a free port and opens one raw /events connection. Reading
-  SSE by hand keeps the assertions on what the browser is actually sent."
+  "Serves `spec` on a free port and opens one connection to it."
   [spec f]
   (let [stop (http/run-server (fn [req] (or ((handler/handler spec) req)
                                              {:status 404 :body "no"}))
@@ -36,19 +49,12 @@
         ;; asking for port 0 and reading back what was bound leaves no window
         ;; for another process to take the port first
         port (:local-port (meta stop))
-        sock (java.net.Socket. "127.0.0.1" (int port))]
-    (.setSoTimeout sock 5000)
-    (doto (.getOutputStream sock)
-      (.write (.getBytes "GET /events HTTP/1.1\r\nHost: localhost\r\n\r\n"))
-      (.flush))
-    (let [rdr (java.io.BufferedReader.
-               (java.io.InputStreamReader. (.getInputStream sock) "UTF-8"))]
-      (try
-        (let [[_ session] (next-event rdr)]
-          (f {:sock sock :rdr rdr :session session :port port}))
-        (finally
-          (.close sock)
-          (stop))))))
+        {:keys [sock] :as conn} (open-events port)]
+    (try
+      (f conn)
+      (finally
+        (.close sock)
+        (stop)))))
 
 (defn- connection-state
   "The atoms one connection owns, which is what a REPL reaches for too."
@@ -323,3 +329,44 @@
         (is (= 1 @(:n (mount-state session "left"))))
         (is (= 99 @(:n (mount-state session "right"))))
         (is (= ["patch" "right-tally" [99]] (next-event rdr)))))))
+
+;; The headline the readme makes: state the server owns is the same for every
+;; browser, and state a browser owns is its own.
+(def ^:private shared (atom 0))
+
+(defui ticker [seen]
+  [:p (server @shared) (server @seen)])
+
+(def ^:private ticker-spec
+  {:title "ticker"
+   :watch [shared]
+   :mounts [{:el "app"
+             :state (fn [] {:seen (atom 0)})
+             :component (fn [st] (ticker (:seen st)))}]})
+
+(deftest a-watched-atom-reaches-every-connection
+  (reset! shared 0)
+  (with-connection ticker-spec
+    (fn [one]
+      (let [two (open-events (:port one))]
+        (try
+          (testing "each browser mounts with its own instance"
+            (is (not= (:session one) (:session two)))
+            (is (= ["mount" "ticker" "app" [0 0]] (next-event (:rdr one))))
+            (is (= ["mount" "ticker" "app" [0 0]] (next-event (:rdr two)))))
+
+          (testing "a write to watched state reaches both"
+            (swap! shared inc)
+            (is (= ["patch" "ticker" [1 0]] (next-event (:rdr one))))
+            (is (= ["patch" "ticker" [1 0]] (next-event (:rdr two)))))
+
+          (testing "a write to one browser's own state reaches only that browser"
+            (swap! (:seen (connection-state (:session two))) inc)
+            (is (= ["patch" "ticker" [1 1]] (next-event (:rdr two))))
+            (is (silent? (:sock one) (:rdr one) 300)))
+
+          (testing "so the two browsers hold different values"
+            (is (= 0 @(:seen (connection-state (:session one)))))
+            (is (= 1 @(:seen (connection-state (:session two))))))
+
+          (finally (.close (:sock two))))))))
