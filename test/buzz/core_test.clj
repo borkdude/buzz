@@ -36,3 +36,41 @@
       (is (= 2 @clicks))
       (testing "so the next render sends the new value"
         (is (= [2] ((:slots inst))))))))
+
+(defn- refusal
+  "The message a defui refuses a form with. A macro error arrives wrapped on the
+  JVM and bare under SCI, so this unwraps to the cause either way. The forms are
+  qualified because `eval` resolves in whichever namespace the runner is in."
+  [form]
+  (try
+    (eval form)
+    nil
+    (catch Throwable e
+      (loop [e e] (if-let [c (ex-cause e)] (recur c) (ex-message e))))))
+
+;; Each mark has one place. Somewhere else is an error rather than a second
+;; meaning, which is what stops a form quietly doing the wrong thing.
+(deftest a-mark-in-the-wrong-place-is-an-error
+  (testing "a value cannot be asked for from a handler"
+    (is (re-find #"is a value"
+                 (refusal '(buzz.core/defui a []
+                             [:p {:on-click (fn [_] (server (inc 1)))}])))))
+
+  (testing "an effect cannot happen during a render"
+    (is (re-find #"is an effect"
+                 (refusal '(buzz.core/defui b [] [:p (server! (prn 1))])))))
+
+  (testing "a reply is the answer, so it comes last"
+    (is (re-find #"must be the last form"
+                 (refusal '(buzz.core/defui c []
+                             [:p {:on-click (fn [_] (server!
+                                                     (reply 1) (prn 2)))}])))))
+
+  (testing "client marks a value crossing, not browser state"
+    (is (re-find #"crosses a value into"
+                 (refusal '(buzz.core/defui d [] [:p (client 1)])))))
+
+  (testing "browser state is declared in the body, not in a handler"
+    (is (re-find #"declares state"
+                 (refusal '(buzz.core/defui e []
+                             [:p {:on-click (fn [_] (local-state nil))}]))))))
