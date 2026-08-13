@@ -84,6 +84,14 @@
      [:p.local "clicks, counted on the server: "
       [:button {:on-click (fn [_] (server (swap! clicks inc)))} n]]]))
 
+;; A second component, mounted at its own element. It is a sibling of `todo-app`,
+;; not a child: separate trees, separate slots, separate patches.
+
+(defsplit stats []
+  (let [total (server (count @db))
+        done  (server (count (filter :done (vals @db))))]
+    [:p.stats total " total, " done " done"]))
+
 ;; `db` and `clicks` are shared, so a change patches every connection. `query`
 ;; belongs to one browser, so it is made per connection and patches only that
 ;; one.
@@ -95,4 +103,6 @@
                   :watch [db clicks]
                   :mounts [{:el "app"
                             :state (fn [] {:query (atom "")})
-                            :component (fn [{:keys [query]}] (todo-app query))}]}))
+                            :component (fn [{:keys [query]}] (todo-app query))}
+                           {:el "stats"
+                            :component (fn [_] (stats))}]}))
