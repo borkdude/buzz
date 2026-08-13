@@ -155,7 +155,11 @@
      :body (str "import * as SQ from \"squint-cljs/core.js\";\n"
                 "import { rpc_BANG_ } from \"/rpc.mjs\";\n"
                 "export const registry = {\n"
-                (str/join ",\n" (map #(str "  " (pr-str (:id %)) ": " (:js %)) insts))
+                (str/join ",\n"
+                          (map #(str "  " (pr-str (:id %)) ": {f: " (:js %)
+                                     ", init: " (:init %)
+                                     ", nlocals: " (:locals % 0) "}")
+                               insts))
                 "\n};\n")}))
 
 ;; Nothing here evaluates code the browser was handed, so the page can say so
@@ -180,10 +184,15 @@
 (defn- index []
   (let [nonce (str (random-uuid))
         html  (reduce (fn [page-html {:keys [el] :as spec}]
-                        (let [inst (:instance (build spec))]
+                        (let [inst (:instance (build spec))
+                              ;; a browser slot has no value yet, so the first
+                              ;; paint renders whatever the component makes of
+                              ;; an empty one
+                              locals (repeatedly (:locals inst 0) #(atom nil))]
                           (str/replace page-html
                                        (str "<!--" el "-->")
-                                       (ssr/render (into [(:ssr inst)] ((:slots inst)))))))
+                                       (ssr/render (into [(:ssr inst)]
+                                                         (concat ((:slots inst)) locals))))))
                       (slurp (fs/file (:index @page)))
                       (:mounts @page))]
     {:status 200

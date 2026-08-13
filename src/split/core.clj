@@ -164,6 +164,16 @@
                            (if lambda?
                              (handler! expr scope comp-id acc)
                              (slot! expr scope acc)))
+        ;; `(client init)` in value position is a slot the browser owns: an atom
+        ;; the runtime makes from `init` and redraws on. Inside a handler the
+        ;; code is already the browser's, so it would say nothing.
+        (= 'client head) (if lambda?
+                           (throw (ex-info "(client ...) inside a handler only marks a value crossing into (server ...)"
+                                           {:form form}))
+                           (let [sym (gensym "local__")]
+                             (swap! acc update :locals conj
+                                    {:sym sym :init (conv (first args) scope false comp-id acc)})
+                             sym))
         (= 'quote head)  form
         (lambda-heads head) (conv-fn form scope comp-id acc)
         (let-heads head)    (conv-let form scope lambda? comp-id acc)
@@ -250,16 +260,20 @@
                          {:context :expr :core-alias "SQ" :elide-imports true}))
 
 (defn split-body
-  "Returns {:js :ssr-forms :slot-exprs :handlers} for a component body."
+  "Returns the pieces a component is made of. Server slots come first in the
+  browser function's parameters, then the browser's own."
   [body comp-id]
-  (let [acc   (atom {:slots [] :handlers []})
+  (let [acc   (atom {:slots [] :handlers [] :locals []})
         forms (mapv #(conv % #{} false comp-id acc) body)
-        {:keys [slots handlers]} @acc]
-    {:js         (to-js (apply list 'fn (mapv :sym slots) forms))
+        {:keys [slots handlers locals]} @acc
+        params (into (mapv :sym slots) (mapv :sym locals))]
+    {:js         (to-js (apply list 'fn params forms))
+     :init-js    (to-js (list 'fn [] (mapv :init locals)))
+     :locals     (count locals)
      :ssr-forms  (mapv ssr-form forms)
      :slot-exprs (mapv :expr slots)
      :handlers   handlers
-     :slot-syms  (mapv :sym slots)}))
+     :slot-syms  params}))
 
 (defmacro defui
   "Defines a component. Calling it returns an instance:
@@ -271,11 +285,13 @@
      :handlers id -> fn, called when the browser sends an :rpc}"
   [nm argv & body]
   (let [comp-id (str nm)
-        {:keys [js ssr-forms slot-exprs slot-syms handlers]} (split-body body comp-id)]
+        {:keys [js init-js locals ssr-forms slot-exprs slot-syms handlers]} (split-body body comp-id)]
     `(do
        (defn ~nm ~argv
          {:id       ~comp-id
           :js       ~js
+          :init     ~init-js
+          :locals   ~locals
           :ssr      (fn ~slot-syms ~@ssr-forms)
           :slots    (fn [] ~(vec slot-exprs))
           :handlers ~(into {} (map (fn [[id h]] [id `(fn ~(:params h) ~(:expr h))])) handlers)})
