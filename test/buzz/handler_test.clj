@@ -29,19 +29,22 @@
 (defn- open-events
   "One browser on the page. Reading SSE by hand keeps the assertions on what the
   browser is actually sent."
-  [port]
-  (let [sock (java.net.Socket. "127.0.0.1" (int port))]
+  ([port] (open-events port {}))
+  ([port headers]
+   (let [sock (java.net.Socket. "127.0.0.1" (int port))]
     (.setSoTimeout sock 5000)
     (doto (.getOutputStream sock)
-      (.write (.getBytes "GET /events HTTP/1.1\r\nHost: localhost\r\n\r\n"))
+      (.write (.getBytes (str "GET /events HTTP/1.1\r\nHost: localhost\r\n"
+                              (apply str (for [[k v] headers] (str k ": " v "\r\n")))
+                              "\r\n")))
       (.flush))
     (let [rdr (java.io.BufferedReader.
                (java.io.InputStreamReader. (.getInputStream sock) "UTF-8"))
           [_ session] (next-event rdr)]
-      {:sock sock :rdr rdr :session session :port port})))
+      {:sock sock :rdr rdr :session session :port port}))))
 
 (defn- with-connection
-  "Serves `spec` on a free port and opens one connection to it."
+  "Serves `spec` on a free port and opens one connection to it, as user alice."
   [spec f]
   (let [stop (http/run-server (fn [req] (or ((handler/handler spec) req)
                                              {:status 404 :body "no"}))
@@ -49,7 +52,7 @@
         ;; asking for port 0 and reading back what was bound leaves no window
         ;; for another process to take the port first
         port (:local-port (meta stop))
-        {:keys [sock] :as conn} (open-events port)]
+        {:keys [sock] :as conn} (open-events port {"X-User" "alice"})]
     (try
       (f conn)
       (finally
@@ -99,7 +102,7 @@
 (def ^:private panel-spec
   {:title "panel"
    :mounts [{:el "app"
-             :state (fn [] {:q (atom 0)})
+             :state (fn [_req] {:q (atom 0)})
              :component (fn [state] (panel (:q state)))}]})
 
 ;; Re-evaluating a defui rebuilds every open connection. The instance a
@@ -138,7 +141,7 @@
 (def ^:private board-spec
   {:title "board"
    :mounts [{:el "app"
-             :state (fn [] {:board (atom {:shown 0 :hidden 0})})
+             :state (fn [_req] {:board (atom {:shown 0 :hidden 0})})
              :component (fn [state] (board (:board state)))}]})
 
 ;; A watched atom says something was written, not that this mount has anything
@@ -305,10 +308,10 @@
 (def ^:private two-mounts-spec
   {:title "two"
    :mounts [{:el "left"
-             :state (fn [] {:n (atom 0)})
+             :state (fn [_req] {:n (atom 0)})
              :component (fn [st] (left-tally (:n st)))}
             {:el "right"
-             :state (fn [] {:n (atom 100)})
+             :state (fn [_req] {:n (atom 100)})
              :component (fn [st] (right-tally (:n st)))}]})
 
 (deftest each-mount-is-its-own
@@ -341,7 +344,7 @@
   {:title "ticker"
    :watch [shared]
    :mounts [{:el "app"
-             :state (fn [] {:seen (atom 0)})
+             :state (fn [_req] {:seen (atom 0)})
              :component (fn [st] (ticker (:seen st)))}]})
 
 (deftest a-watched-atom-reaches-every-connection
@@ -388,7 +391,7 @@
 (def ^:private leaky-spec
   {:title "leaky"
    :mounts [{:el "app"
-             :state (fn [] {:q (atom 0)})
+             :state (fn [_req] {:q (atom 0)})
              :component (fn [st] (leaky (:q st)))}]})
 
 ;; A browser that goes away takes its instances and its watches with it.
@@ -428,7 +431,7 @@
 (def ^:private card-spec
   {:title "card"
    :mounts [{:el "app"
-             :state (fn [] {:q (atom 0)})
+             :state (fn [_req] {:q (atom 0)})
              :component (fn [st] (card (:q st)))}]})
 
 (deftest editing-a-part-reloads-the-components-that-use-it
@@ -462,7 +465,7 @@
 (def ^:private gauge-spec
   {:title "gauge"
    :mounts [{:el "app"
-             :state (fn [] {:q (atom 0)})
+             :state (fn [_req] {:q (atom 0)})
              :component (fn [st] (gauge (:q st)))}]})
 
 (deftest the-browser-is-served-the-modules-it-imports
@@ -489,3 +492,40 @@
 
     (testing "a module the page does not serve is declined"
       (is (nil? (ui {:uri "/nope.mjs"}))))))
+
+;; A handler is a closure over the state its component was built with, and never
+;; sees a request. So the request that opened the connection is the one chance to
+;; put an identity somewhere the component and its handlers can reach.
+(defui greeter [who]
+  [:p (server @who)
+   [:button {:on-click (fn [_] (server! (reply @who)))} "who am i"]])
+
+(def ^:private greeter-spec
+  {:title "greeter"
+   :mounts [{:el "app"
+             :state (fn [req] {:who (atom (get-in req [:headers "x-user"] "nobody"))})
+             :component (fn [st] (greeter (:who st)))}]})
+
+(deftest a-mount-builds-its-state-from-the-request
+  (with-connection greeter-spec
+    (fn [{:keys [rdr port] :as alice}]
+      (let [bob (open-events port {"X-User" "bob"})]
+        (try
+          (testing "the state fn reads whoever opened the connection"
+            (is (= ["mount" "greeter" "app" ["alice"]] (next-event rdr))))
+
+          (testing "and another browser gets its own"
+            (is (= ["mount" "greeter" "app" ["bob"]] (next-event (:rdr bob)))))
+
+          (testing "a handler acts as the identity its connection was built with"
+            (is (= [200 "\"alice\""] (rpc port (:session alice) "greeter/0" [])))
+            (is (= [200 "\"bob\""] (rpc port (:session bob) "greeter/0" []))))
+
+          (finally (.close (:sock bob))))))))
+
+(deftest the-first-paint-is-rendered-for-the-request-that-asked
+  (let [ui (handler/handler greeter-spec)
+        body (:body (ui {:uri "/" :headers {"x-user" "carol"}}))]
+    (testing "so a page arrives already showing who is looking at it"
+      (is (str/includes? body "<div id=\"app\"><p>carol"))
+      (is (not (str/includes? body "nobody"))))))

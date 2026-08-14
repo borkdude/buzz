@@ -119,7 +119,7 @@
   (buzz/handler {:index "public/index.html"
                    :watch [db clicks]
                    :mounts [{:el "app"
-                             :state (fn [] {:query (atom "")})
+                             :state (fn [_req] {:query (atom "")})
                              :component (fn [{:keys [query]}] (todo-app query))}
                             {:el "stats"
                              :component (fn [_] (stats))}]}))

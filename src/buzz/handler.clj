@@ -6,7 +6,7 @@
       (handler {:title \"todos\"
                 :watch [app/db]                              ; patch everyone on change
                 :mounts [{:el \"app\"
-                          :state (fn [] {:query (atom \"\")}) ; per connection, optional
+                          :state (fn [req] {:query (atom \"\")}) ; per connection, optional
                           :component (fn [state] (app/todo-app (:query state)))}]}))
 
     (defn app [req] (or (ui req) (my-static-files req)))
@@ -18,6 +18,11 @@
 
   Every atom in a mount's `:state` map is watched for that connection alone.
   Atoms in the top level `:watch` are watched for all of them.
+
+  A mount's `:state` is given the request that opened the connection, which is
+  where an identity comes from. Buzz authenticates nobody: what a `:state` fn
+  makes of a request, and whether the handler is wrapped in anything, is the
+  application's business.
 
   Requests the page does not own return nil, so the application composes."
   (:require [babashka.fs :as fs]
@@ -58,8 +63,11 @@
       (reset! sent vals)
       (event! ch ["patch" (:id instance) vals]))))
 
-(defn- build [{:keys [el state component] :as spec}]
-  (let [st (if state (state) {})]
+;; The request is what a connection knows about who opened it. Handing it to
+;; `:state` is the only place identity can enter, since a handler is a closure
+;; over the state its component was built with and never sees a request itself.
+(defn- build [{:keys [el state component] :as spec} req]
+  (let [st (if state (state req) {})]
     {:el el :state st :spec spec :sent (atom ::none) :instance (component st)}))
 
 (defn- watch-session! [ch session mount]
@@ -71,7 +79,7 @@
   (doseq [m mounted, a (vals (:state m))]
     (remove-watch a [::render session (:id (:instance m))])))
 
-(defn- open-stream [session ch]
+(defn- open-stream [session ch req]
   (http/send! ch {:status 200
                   :headers {"Content-Type" "text/event-stream"
                             "Cache-Control" "no-cache"
@@ -80,7 +88,7 @@
   ;; The session id is what an RPC arrives with, so it goes out only once there
   ;; is something here to find under it. Building the mounts renders every
   ;; component, which is long enough for a browser to have answered.
-  (let [mounted (mapv build (:mounts @page))]
+  (let [mounted (mapv #(build % req) (:mounts @page))]
     (swap! conns assoc session {:ch ch :mounted mounted})
     (event! ch ["session" session])
     (doseq [{:keys [el instance sent] :as m} mounted]
@@ -92,7 +100,7 @@
 (defn- events [req]
   (let [session (str (random-uuid))]
     (http/as-channel req
-                     {:on-open  (fn [ch] (open-stream session ch))
+                     {:on-open  (fn [ch] (open-stream session ch req))
                       :on-close (fn [_ _]
                                   (unwatch-session! session (:mounted (get @conns session)))
                                   (swap! conns dissoc session))})))
@@ -175,9 +183,10 @@
 ;; one to a JavaScript expression, so this only has to give them their imports
 ;; and a name. The browser imports the result and never evaluates a string.
 (defn- components-module []
-  ;; Only :js is read, and that does not depend on the arguments, so these
-  ;; instances are thrown away.
-  (let [insts (map (comp :instance build) (:mounts @page))]
+  ;; Only :js is read, and that does not depend on the arguments, so the
+  ;; components are called with no state at all rather than with a connection's.
+  ;; Building one here would run every `:state` fn for a module that ignores it.
+  (let [insts (map #((:component %) {}) (:mounts @page))]
     {:status 200
      :headers js-headers
      :body (str "import * as SQ from \"squint-cljs/core.js\";\n"
@@ -209,8 +218,8 @@
 ;; `on*` attribute by name anyway. Reagami adopts these nodes in the browser
 ;; instead of rebuilding them. There is no connection yet, so a mount's `:state`
 ;; starts empty for this render.
-(defn- first-paint [spec]
-  (let [inst (:instance (build spec))
+(defn- first-paint [spec req]
+  (let [inst (:instance (build spec req))
         ;; a browser slot has no value yet, so the first paint renders whatever
         ;; the component makes of an empty one
         locals (repeatedly (:locals inst 0) #(atom nil))]
@@ -231,32 +240,32 @@
 
 ;; Without an `:index` the page is boilerplate: a div per mount and the two
 ;; script tags. Buzz knows all of it, so it writes the page instead.
-(defn- generated-page [nonce]
+(defn- generated-page [nonce req]
   (let [{:keys [title head mounts]} @page]
     (str "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n"
          "<title>" (escape (or title "buzz")) "</title>\n"
          head
          "</head>\n<body>\n"
          (str/join (for [{:keys [el] :as spec} mounts]
-                     (str "<div id=\"" (escape el) "\">" (first-paint spec) "</div>\n")))
+                     (str "<div id=\"" (escape el) "\">" (first-paint spec req) "</div>\n")))
          (scripts nonce)
          "</body>\n</html>\n")))
 
 ;; With an `:index` the page is yours. Buzz fills each `<!--el-->` with the
 ;; first paint and every NONCE with the one in the header.
-(defn- rendered-page [nonce]
+(defn- rendered-page [nonce req]
   (-> (reduce (fn [html {:keys [el] :as spec}]
-                (str/replace html (str "<!--" el "-->") (first-paint spec)))
+                (str/replace html (str "<!--" el "-->") (first-paint spec req)))
               (slurp (fs/file (:index @page)))
               (:mounts @page))
       (str/replace "NONCE" nonce)))
 
-(defn- index []
+(defn- index [req]
   (let [nonce (str (random-uuid))]
     {:status 200
      :headers {"Content-Type" "text/html"
                "Content-Security-Policy" (csp nonce)}
-     :body (if (:index @page) (rendered-page nonce) (generated-page nonce))}))
+     :body (if (:index @page) (rendered-page nonce req) (generated-page nonce req))}))
 
 (defn handler
   "Returns a Ring handler for the page described by `spec`. Requests it does not
@@ -271,7 +280,7 @@
   (heartbeat!)
   (fn [req]
     (case (:uri req)
-      "/"               (index)
+      "/"               (index req)
       "/client.mjs"     (runtime-module "client.cljs")
       "/rpc.mjs"        (runtime-module "rpc.cljs")
       "/components.mjs" (components-module)
