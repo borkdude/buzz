@@ -503,7 +503,10 @@
 (def ^:private greeter-spec
   {:title "greeter"
    :mounts [{:el "app"
-             :state (fn [req] {:who (atom (get-in req [:headers "x-user"] "nobody"))})
+             ;; :name is a plain value, :who an atom. Both belong to the
+             ;; connection, and only one of them is watchable.
+             :state (fn [req] {:name (get-in req [:headers "x-user"] "nobody")
+                               :who (atom (get-in req [:headers "x-user"] "nobody"))})
              :component (fn [st] (greeter (:who st)))}]})
 
 (deftest a-mount-builds-its-state-from-the-request
@@ -516,6 +519,10 @@
 
           (testing "and another browser gets its own"
             (is (= ["mount" "greeter" "app" ["bob"]] (next-event (:rdr bob)))))
+
+          (testing "state that is not an atom is carried, not watched"
+            (is (= "alice" (:name (connection-state (:session alice)))))
+            (is (= "bob" (:name (connection-state (:session bob))))))
 
           (testing "a handler acts as the identity its connection was built with"
             (is (= [200 "\"alice\""] (rpc port (:session alice) "greeter/0" [])))

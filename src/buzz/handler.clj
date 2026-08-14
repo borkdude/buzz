@@ -70,13 +70,18 @@
   (let [st (if state (state req) {})]
     {:el el :state st :spec spec :sent (atom ::none) :instance (component st)}))
 
+;; What a connection owns is not all atoms. An identity read from the request is
+;; a plain value, and there is nothing to watch about it.
+(defn- refs [state]
+  (filter #(instance? clojure.lang.IRef %) (vals state)))
+
 (defn- watch-session! [ch session mount]
-  (doseq [a (vals (:state mount))]
+  (doseq [a (refs (:state mount))]
     (add-watch a [::render session (:id (:instance mount))]
                (fn [_ _ _ _] (patch! ch mount)))))
 
 (defn- unwatch-session! [session mounted]
-  (doseq [m mounted, a (vals (:state m))]
+  (doseq [m mounted, a (refs (:state m))]
     (remove-watch a [::render session (:id (:instance m))])))
 
 (defn- open-stream [session ch req]
