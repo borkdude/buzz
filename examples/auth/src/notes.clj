@@ -5,11 +5,10 @@
   Buzz authenticates nobody. An application has to decide who someone is, and
   keep everyone else away from the handler. What Buzz gives it is the request
   that opened the connection, so the answer has somewhere to live."
-  (:require [buzz.core :refer [client defui local-state server server!]]
+  (:require [buzz.core :refer [client defui local-state reply server server!]]
             [buzz.handler :as buzz]
             [clojure.string :as str]
-            [org.httpkit.server :as http]
-            [reagami.ssr :as ssr]))
+            [org.httpkit.server :as http]))
 
 ;; alice signs in with wonderland, bob with builder. Only the salt and the hash
 ;; are here, never the password. `password-hash` makes a new pair.
@@ -60,9 +59,26 @@
 (defn- whoami [req]
   (get @sessions (token req)))
 
+(defn- cookie [value]
+  (str "notes-session=" value "; Path=/; HttpOnly; SameSite=Strict"))
+
+;; Answers with the response that signs someone in, and refuses by throwing.
+;; The browser's promise rejects, which is all it needs to know.
+(defn sign-in! [user password]
+  (let [stored (get users user)]
+    (when-not (and stored (password-ok? password stored))
+      (throw (ex-info "no such name and password" {:user user})))
+    (let [t (encode (random-bytes 24))]
+      (swap! sessions assoc t user)
+      {:headers {"Set-Cookie" (cookie t)}})))
+
+(defn sign-out! [t]
+  (swap! sessions dissoc t)
+  {:headers {"Set-Cookie" (str (cookie "") " Max-Age=0")}})
+
 ;; `user` is a plain string the connection was built with, so it reaches the
 ;; browser through a slot like any other server value.
-(defui board [user]
+(defui board [user token]
   (let [draft (local-state "")]
     [:div
      [:h1 "notes for " (server user)]
@@ -82,9 +98,12 @@
                            (server! (swap! notes update user conj (client @draft)))
                            (reset! draft ""))}
       "add"]
-     [:p [:a {:href "/signout"} "sign out"]]]))
+     [:p [:button {:on-click (^:async fn [_]
+                              (await (server! (reply :ok (sign-out! token))))
+                              (set! js/window.location "/signin"))}
+          "sign out"]]]))
 
-(def ^:private ui
+(def ^:private notes-ui
   (buzz/handler
    {:title "notes"
     :watch [notes]
@@ -92,59 +111,46 @@
               ;; The one place an identity can enter. A handler is a closure over
               ;; this map and never sees a request, so it acts as whoever opened
               ;; the connection.
-              :state (fn [req] {:user (whoami req)})
-              :component (fn [{:keys [user]}] (board user))}]}))
-
-(defn- page [hiccup]
-  {:status 200
-   :headers {"Content-Type" "text/html; charset=utf-8"}
-   :body (str "<!DOCTYPE html>\n<html>\n<head><meta charset=\"utf-8\">"
-              "<title>sign in</title></head>\n<body>\n"
-              (ssr/render hiccup)
-              "\n</body>\n</html>\n")})
-
-(defn- signin-page [& [error]]
-  (page [:div
-         [:h1 "sign in"]
-         (when error [:p error])
-         [:form {:method "post" :action "/signin"}
-          [:p [:input {:name "user" :placeholder "alice or bob" :autofocus true}]]
-          [:p [:input {:name "password" :type "password" :placeholder "password"}]]
-          [:button "sign in"]]]))
-
-(defn- form-params [req]
-  (into {} (for [pair (some-> (:body req) slurp (str/split #"&"))
-                 :let [[k v] (str/split pair #"=" 2)]]
-             [k (java.net.URLDecoder/decode (or v "") "UTF-8")])))
-
-(defn- sign-in [req]
-  (let [{:strs [user password]} (form-params req)
-        stored (get users user)]
-    (if (and stored (password-ok? password stored))
-      (let [t (encode (random-bytes 24))]
-        (swap! sessions assoc t user)
-        {:status 303
-         :headers {"Location" "/"
-                   "Set-Cookie" (str "notes-session=" t "; Path=/; HttpOnly; SameSite=Strict")}})
-      (signin-page "that is not a name and password I know"))))
-
-(defn- sign-out [req]
-  (swap! sessions dissoc (token req))
-  {:status 303
-   :headers {"Location" "/signin"
-             "Set-Cookie" "notes-session=; Path=/; Max-Age=0"}})
+              :state (fn [req] {:user (whoami req) :token (token req)})
+              :component (fn [{:keys [user token]}] (board user token))}]}))
 
 ;; Requests Buzz does not own return nil, so the application decides what
 ;; reaches it. Everything Buzz serves sits behind the same check: the page, the
 ;; event stream and the rpc endpoint alike. Guarding only the page would leave
 ;; the handlers open, and a `server!` handler is an endpoint.
+;; The login page is a component too, on its own path so that its stream and its
+;; modules do not collide with the ones behind the gate.
+(defui doorbell []
+  (let [who (local-state "")
+        pw  (local-state "")
+        err (local-state nil)]
+    [:div
+     [:h1 "sign in"]
+     [:p [:input {:value @who :placeholder "alice or bob" :autofocus true
+                  :on-input (fn [e] (reset! who (.. e -target -value)))}]]
+     [:p [:input {:type "password" :value @pw :placeholder "password"
+                  :on-input (fn [e] (reset! pw (.. e -target -value)))}]]
+     ;; The reply carries the Set-Cookie, so the browser is signed in by the
+     ;; time this resolves. A wrong password throws on the server, which the
+     ;; browser sees as a rejected promise.
+     [:button {:on-click (^:async fn [_]
+                          (try
+                            (await (server! (reply :ok (sign-in! (client @who) (client @pw)))))
+                            (set! js/window.location "/")
+                            (catch :default _
+                              (reset! err "that is not a name and password I know"))))}
+      "sign in"]
+     (when @err [:p @err])]))
+
+(def ^:private signin-ui
+  (buzz/handler {:title "sign in"
+                 :path "/signin"
+                 :mounts [{:el "signin" :component (fn [_] (doorbell))}]}))
+
 (defn app [req]
-  (case (:uri req)
-    "/signin"  (if (= :post (:request-method req)) (sign-in req) (signin-page))
-    "/signout" (sign-out req)
-    (if (whoami req)
-      (or (ui req) {:status 404 :body "not found"})
-      {:status 303 :headers {"Location" "/signin"}})))
+  (or (signin-ui req)                       ; /signin and its stream, open to all
+      (when (whoami req) (notes-ui req))
+      {:status 303 :headers {"Location" "/signin"}}))
 
 (defn -main [& _]
   (http/run-server app {:port 1360 :ip "127.0.0.1"})
