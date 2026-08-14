@@ -121,26 +121,25 @@
 ;; The login page is a component too, on its own path so that its stream and its
 ;; modules do not collide with the ones behind the gate.
 (defui doorbell []
-  (let [who (local-state "")
-        pw  (local-state "")
-        err (local-state nil)]
+  (let [form (local-state {:who "" :pw "" :err nil})]
     [:div
      [:h1 "sign in"]
-     [:p [:input {:value @who :placeholder "alice or bob" :autofocus true
-                  :on-input (fn [e] (reset! who (.. e -target -value)))}]]
-     [:p [:input {:type "password" :value @pw :placeholder "password"
-                  :on-input (fn [e] (reset! pw (.. e -target -value)))}]]
+     [:p [:input {:value (:who @form) :placeholder "alice or bob" :autofocus true
+                  :on-input (fn [e] (swap! form assoc :who (.. e -target -value)))}]]
+     [:p [:input {:type "password" :value (:pw @form) :placeholder "password"
+                  :on-input (fn [e] (swap! form assoc :pw (.. e -target -value)))}]]
      ;; The reply carries the Set-Cookie, so the browser is signed in by the
      ;; time this resolves. A wrong password throws on the server, which the
      ;; browser sees as a rejected promise.
      [:button {:on-click (^:async fn [_]
                           (try
-                            (await (server! (reply :ok (sign-in! (client @who) (client @pw)))))
+                            (await (server! (reply :ok (sign-in! (client (:who @form))
+                                                                (client (:pw @form))))))
                             (set! js/window.location "/")
                             (catch :default _
-                              (reset! err "that is not a name and password I know"))))}
+                              (swap! form assoc :err "that is not a name and password I know"))))}
       "sign in"]
-     (when @err [:p @err])]))
+     (when (:err @form) [:p (:err @form)])]))
 
 (def ^:private signin-ui
   (buzz/handler {:title "sign in"
