@@ -536,3 +536,34 @@
     (testing "so a page arrives already showing who is looking at it"
       (is (str/includes? body "<div id=\"app\"><p>carol"))
       (is (not (str/includes? body "nobody"))))))
+
+;; The page belongs to the handler, not to the library. Two of them in one
+;; process used to share one global, so the second silently replaced the first.
+(defui doorway [] [:p "the doorway"])
+(defui parlour [] [:p "the parlour"])
+
+(def ^:private doorway-spec
+  {:title "doorway" :mounts [{:el "door" :component (fn [_] (doorway))}]})
+
+(def ^:private parlour-spec
+  {:title "parlour" :mounts [{:el "room" :component (fn [_] (parlour))}]})
+
+(deftest two-handlers-serve-two-pages
+  (let [door  (handler/handler doorway-spec)
+        room  (handler/handler parlour-spec)
+        page  (fn [ui] (:body (ui {:uri "/"})))]
+
+    (testing "each one keeps the title it was given"
+      (is (str/includes? (page door) "<title>doorway</title>"))
+      (is (str/includes? (page room) "<title>parlour</title>")))
+
+    (testing "and its own mount, rendered into its own element"
+      (is (str/includes? (page door) "<div id=\"door\"><p>the doorway</p></div>"))
+      (is (str/includes? (page room) "<div id=\"room\"><p>the parlour</p></div>")))
+
+    (testing "so does the module each browser imports"
+      (is (str/includes? (:body (door {:uri "/components.mjs"})) "\"doorway\": {f: "))
+      (is (not (str/includes? (:body (door {:uri "/components.mjs"})) "parlour"))))
+
+    (testing "the one built first is not the one that changed"
+      (is (str/includes? (page door) "the doorway")))))

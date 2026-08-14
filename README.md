@@ -99,6 +99,8 @@ To compose the handler with other routes, you can use `or` since the handler ret
 
 Buzz watches each atom in `:watch`. When one of them changes, it re-renders the component and sends a patch to each browser. One mount can hold one component at one element. A page can have more than one mount.
 
+The page belongs to the handler, so one application can serve more than one of them. Give each `buzz/handler` call its own spec, and route to whichever one you want.
+
 ## Per connection state
 
 Give a mount a `:state` function to make state that belongs to one browser. It is called with the request that opened the connection and returns a map. Buzz watches every atom in that map for that browser alone.
