@@ -1,10 +1,12 @@
 # Notes
 
-Two users, a note list each, and one page that knows which of them is looking at it.
+This example demonstrates how to use Buzz to build a simple note-taking application with user authentication. It shows how to manage user sessions, handle requests, and maintain state across different users.
+
+To run the example, use the following commands:
 
     bb dev     # http://localhost:1360
 
-Sign in as alice with the password wonderland, or as bob with builder. Open a second browser, sign in as the other one, and add a note in each.
+Sign in as alice with the password wonderland, or as bob with builder. Open a second (or igcognito) browser, sign in as the other one, and add a note in each.
 
 ## Where the identity lives
 
@@ -16,11 +18,11 @@ A mount's `:state` is called with the request that opened the connection:
  :component (fn [{:keys [user]}] (board user))}
 ```
 
-A handler is a closure over that map and never sees a request, so it acts as whoever opened the connection.
+Buzz builds the component with this map, so `board` is called with `"alice"` or with `"bob"`. A `server!` in the body of `board` uses the name it was built with.
 
-## Keeping everyone else out
+## Guarding the handlers
 
-Buzz authenticates nobody, and a `server!` handler is an endpoint. Buzz returns nil for requests it does not own, so the application says what reaches it:
+Buzz does not have a built-in authentication mechanism. It is up to the application to check the identity and return a 303 redirect to the sign-in page if the user is not signed in.
 
 ```clojure
 (defn app [req]
@@ -31,5 +33,3 @@ Buzz authenticates nobody, and a `server!` handler is an endpoint. Buzz returns 
       (or (ui req) {:status 404 :body "not found"})
       {:status 303 :headers {"Location" "/signin"}})))
 ```
-
-The check covers the page, the event stream and the rpc endpoint alike. Guarding only the page leaves the handlers open.

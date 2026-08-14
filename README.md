@@ -110,11 +110,7 @@ Give a mount a `:state` function to make state that belongs to one browser. It i
  :component (fn [state] (admin (:user state) (:query state)))}
 ```
 
-The request is where an identity comes from. A `server!` handler is a closure over the state its component was built with and never sees a request itself, so it acts as the user its connection was opened by.
-
-Buzz calls `:state` twice for one page: once to render the first paint, and again when the browser opens its event stream. Read the request rather than act on it.
-
-Buzz authenticates nobody. Every `server!` in a component is an endpoint that anyone who can reach the port can call, so put the handler behind your own middleware, or bind the server to `127.0.0.1` when the page is meant for you alone. See [examples/auth](examples/auth) for a page that signs two users in and gives each of them their own data.
+See [examples/auth](examples/auth) for a page that signs two users in and gives each of them their own data.
 
 ## The page
 
