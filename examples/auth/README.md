@@ -26,10 +26,20 @@ Buzz does not have a built-in authentication mechanism. It is up to the applicat
 
 ```clojure
 (defn app [req]
-  (case (:uri req)
-    "/signin"  (if (= :post (:request-method req)) (sign-in req) (signin-page))
-    "/signout" (sign-out req)
-    (if (whoami req)
-      (or (ui req) {:status 404 :body "not found"})
-      {:status 303 :headers {"Location" "/signin"}})))
+  (or (signin-ui req)                       ; /signin and its stream, open to all
+      (when (whoami req) (notes-ui req))
+      {:status 303 :headers {"Location" "/signin"}}))
 ```
+
+The check covers the page, the event stream and the rpc endpoint alike. Guarding only the page leaves the handlers open.
+
+## Signing in
+
+The sign in page is a component too, with its own `:path` so that its stream and its modules do not collide with the ones behind the gate.
+
+```clojure
+(await (server! (reply :ok (sign-in! (client @who) (client @pw)))))
+(set! js/window.location "/")
+```
+
+`sign-in!` returns `{:headers {"Set-Cookie" ...}}`, and the second argument to `reply` adds that to the http response. The cookie is `HttpOnly`, which a cookie set from JavaScript can never be. A wrong password throws on the server, so the browser sees a rejected promise and the page says so.
