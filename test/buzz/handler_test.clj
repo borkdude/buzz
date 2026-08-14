@@ -567,3 +567,41 @@
 
     (testing "the one built first is not the one that changed"
       (is (str/includes? (page door) "the doorway")))))
+
+;; A handler under a `:path` has to answer for its own stream and its own
+;; modules. The browser asks for whatever URLs the page it was served names, so
+;; the path goes into the compiled runtime rather than into a global.
+(def ^:private door-at-path
+  {:title "doorway" :path "/signin"
+   :mounts [{:el "door" :component (fn [_] (doorway))}]})
+
+(deftest a-handler-answers-under-its-own-path
+  (let [door (handler/handler door-at-path)
+        room (handler/handler parlour-spec)]
+
+    (testing "the page is served at the path, with or without a slash"
+      (is (= 200 (:status (door {:uri "/signin"}))))
+      (is (= 200 (:status (door {:uri "/signin/"})))))
+
+    (testing "and not at the root, which belongs to the other one"
+      (is (nil? (door {:uri "/"})))
+      (is (= 200 (:status (room {:uri "/"})))))
+
+    (testing "the page names its own runtime"
+      (is (str/includes? (:body (door {:uri "/signin"})) "src=\"/signin/client.mjs\"")))
+
+    (testing "which asks for its own stream and its own rpc"
+      (let [client (:body (door {:uri "/signin/client.mjs"}))
+            rpc-js (:body (door {:uri "/signin/rpc.mjs"}))]
+        (is (str/includes? client "EventSource(\"/signin/events\")"))
+        (is (str/includes? rpc-js "fetch(\"/signin/rpc\""))))
+
+    (testing "and its own components, importing its own rpc module"
+      (let [body (:body (door {:uri "/signin/components.mjs"}))]
+        (is (str/includes? body "\"doorway\": {f: "))
+        (is (str/includes? body "from \"/signin/rpc.mjs\""))
+        (is (not (str/includes? body "parlour")))))
+
+    (testing "a handler with no path is unchanged"
+      (is (str/includes? (:body (room {:uri "/"})) "src=\"/client.mjs\""))
+      (is (str/includes? (:body (room {:uri "/client.mjs"})) "EventSource(\"/events\")")))))

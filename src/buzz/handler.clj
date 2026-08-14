@@ -183,15 +183,27 @@
    ;; compiled per request, so never let a stale copy survive an edit
    "Cache-Control" "no-store"})
 
-(defn- runtime-module [n]
+;; A handler can be mounted under a path, and the browser has to ask the same
+;; handler for its stream and its modules rather than whichever one owns the
+;; root. The runtime is compiled per request anyway, so the path goes into it
+;; instead of being smuggled through a global on the page. Longest first, or
+;; "/rpc" would eat the start of "/rpc.mjs".
+(defn- at-path [src path]
+  (if (str/blank? path)
+    src
+    (reduce (fn [s u] (str/replace s (str \" u) (str \" path u)))
+            src
+            ["/components.mjs" "/rpc.mjs" "/events" "/rpc"])))
+
+(defn- runtime-module [n path]
   {:status 200
    :headers js-headers
-   :body (squint/compile-string (slurp (io/resource (str "buzz/" n))))})
+   :body (squint/compile-string (at-path (slurp (io/resource (str "buzz/" n))) path))})
 
 ;; The components are an ordinary module too. `defui` already compiled each
 ;; one to a JavaScript expression, so this only has to give them their imports
 ;; and a name. The browser imports the result and never evaluates a string.
-(defn- components-module [mounts]
+(defn- components-module [mounts path]
   ;; Only :js is read, and that does not depend on the arguments, so the
   ;; components are called with no state at all rather than with a connection's.
   ;; Building one here would run every `:state` fn for a module that ignores it.
@@ -199,7 +211,7 @@
     {:status 200
      :headers js-headers
      :body (str "import * as SQ from \"squint-cljs/core.js\";\n"
-                "import { rpc_BANG_ } from \"/rpc.mjs\";\n"
+                "import { rpc_BANG_ } from \"" path "/rpc.mjs\";\n"
                 "export const registry = {\n"
                 (str/join ",\n"
                           (map #(str "  " (pr-str (:id %)) ": {f: " (:js %)
@@ -238,25 +250,25 @@
 ;; map cannot drift away from the Squint that compiled the components.
 (def ^:private squint-core "https://esm.sh/squint-cljs@0.14.208/core.js")
 
-(defn- scripts [nonce]
+(defn- scripts [nonce path]
   (str "<script type=\"importmap\" nonce=\"" nonce "\">\n"
        "{\"imports\": {\"squint-cljs/core.js\": \"" squint-core "\"}}\n"
        "</script>\n"
-       "<script type=\"module\" src=\"/client.mjs\"></script>\n"))
+       "<script type=\"module\" src=\"" path "/client.mjs\"></script>\n"))
 
 (defn- escape [s]
   (str/escape (str s) {\& "&amp;" \< "&lt;" \> "&gt;" \" "&quot;"}))
 
 ;; Without an `:index` the page is boilerplate: a div per mount and the two
 ;; script tags. Buzz knows all of it, so it writes the page instead.
-(defn- generated-page [nonce req {:keys [title head mounts]}]
+(defn- generated-page [nonce req {:keys [title head mounts path]}]
   (str "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n"
        "<title>" (escape (or title "buzz")) "</title>\n"
        head
        "</head>\n<body>\n"
        (str/join (for [{:keys [el] :as mount} mounts]
                    (str "<div id=\"" (escape el) "\">" (first-paint mount req) "</div>\n")))
-       (scripts nonce)
+       (scripts nonce (or path ""))
        "</body>\n</html>\n"))
 
 ;; With an `:index` the page is yours. Buzz fills each `<!--el-->` with the
@@ -281,19 +293,31 @@
   run whichever server it likes.
 
   The page belongs to the handler this returns, so an application can serve more
-  than one of them, at whatever routes it likes.
+  than one of them. Give each one a `:path` and it answers under that, stream
+  and modules included:
+
+    (handler {:path \"/admin\" :mounts [...]})   ; the page is /admin
 
   Installs watches and starts the heartbeat as a side effect of being called."
-  [{:keys [watch mounts] :as spec}]
+  [{:keys [watch mounts path] :as spec}]
   (doseq [a watch]
     (add-watch a ::render broadcast-patch!))
   @heartbeat
-  (fn [req]
-    (case (:uri req)
-      "/"               (index-page req spec)
-      "/client.mjs"     (runtime-module "client.cljs")
-      "/rpc.mjs"        (runtime-module "rpc.cljs")
-      "/components.mjs" (components-module mounts)
-      "/events"         (events req mounts)
-      "/rpc"            (rpc req)
-      nil)))
+  (let [path   (or path "")
+        routes (cond-> {(str path "/")               :page
+                        (str path "/client.mjs")     :client
+                        (str path "/rpc.mjs")        :rpc-module
+                        (str path "/components.mjs") :components
+                        (str path "/events")         :events
+                        (str path "/rpc")            :rpc}
+                 ;; /admin and /admin/ are the same page
+                 (seq path) (assoc path :page))]
+    (fn [req]
+      (case (routes (:uri req))
+        :page       (index-page req spec)
+        :client     (runtime-module "client.cljs" path)
+        :rpc-module (runtime-module "rpc.cljs" path)
+        :components (components-module mounts path)
+        :events     (events req mounts)
+        :rpc        (rpc req)
+        nil))))
