@@ -605,3 +605,50 @@
     (testing "a handler with no path is unchanged"
       (is (str/includes? (:body (room {:uri "/"})) "src=\"/client.mjs\""))
       (is (str/includes? (:body (room {:uri "/client.mjs"})) "EventSource(\"/events\")")))))
+
+;; `(reply v resp)` answers with a value and adds to the http response it
+;; arrives in, which is how a handler sets a cookie.
+(defui gate []
+  [:div
+   [:button {:on-click (fn [_] (server! (reply :in {:headers {"Set-Cookie" "who=alice; HttpOnly"}})))} "in"]
+   [:button {:on-click (fn [_] (server! (reply :plain)))} "plain"]
+   [:button {:on-click (fn [_] (server! (reply :made {:status 201})))} "made"]])
+
+(def ^:private gate-spec
+  {:title "gate" :mounts [{:el "app" :component (fn [_] (gate))}]})
+
+(defn- rpc-raw
+  "The whole response, headers and all."
+  [port session handler-id]
+  (let [payload (.getBytes (json/generate-string [session handler-id []]) "UTF-8")]
+    (with-open [sock (java.net.Socket. "127.0.0.1" (int port))]
+      (.setSoTimeout sock 5000)
+      (doto (.getOutputStream sock)
+        (.write (.getBytes (str "POST /rpc HTTP/1.1\r\nHost: localhost\r\n"
+                                "Content-Length: " (alength payload) "\r\n"
+                                "Connection: close\r\n\r\n")))
+        (.write payload)
+        (.flush))
+      (slurp (.getInputStream sock)))))
+
+(deftest a-reply-can-add-to-its-response
+  (with-connection gate-spec
+    (fn [{:keys [port session]}]
+
+      (testing "the value still arrives as the body"
+        (let [raw (rpc-raw port session "gate/0")]
+          (is (str/includes? raw "\"in\""))
+
+          (testing "and the header is on the wire"
+            (is (str/includes? raw "Set-Cookie: who=alice; HttpOnly")))
+
+          (testing "beside the ones the response already had"
+            (is (str/includes? raw "Content-Type: application/json")))))
+
+      (testing "a reply with no response is unchanged"
+        (let [raw (rpc-raw port session "gate/1")]
+          (is (str/includes? raw "\"plain\""))
+          (is (not (str/includes? raw "Set-Cookie")))))
+
+      (testing "anything else in the map is part of the response too"
+        (is (str/includes? (rpc-raw port session "gate/2") "HTTP/1.1 201"))))))

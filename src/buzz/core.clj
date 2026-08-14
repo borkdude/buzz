@@ -37,7 +37,12 @@
 
 (defmacro reply
   "Marks what a `server!` answers with. Last form only. A reply is a snapshot,
-  not a subscription: use a `server` slot for anything that should stay live."
+  not a subscription: use a `server` slot for anything that should stay live.
+
+  A second argument adds to the http response the answer arrives in, which is
+  how a handler sets a cookie:
+
+    (reply :ok {:headers {\"Set-Cookie\" \"session=abc; HttpOnly; Path=/\"}})"
   [& _]
   (throw (ex-info "(reply ...) used outside (server! ...)" {})))
 
@@ -156,15 +161,21 @@
 (defn- handler!
   "`(server! ...)` in an event handler. Registers what the server does and
   returns the call the browser makes in its place, carrying the `(client ...)`
-  expressions as arguments. A trailing `(reply x)` says the response carries x."
+  expressions as arguments. A trailing `(reply x)` says the response carries x,
+  and `(reply x resp)` adds `resp` to the http response it arrives in."
   [forms scope comp-id acc]
   (let [tail    (last forms)
         answer? (reply-form? tail)
-        _       (when (and answer? (not= 2 (count tail)))
-                  (throw (ex-info "(reply ...) takes one expression" {:form tail})))
-        body    (if answer?
-                  (concat (butlast forms) [(second tail)])
-                  forms)
+        _       (when (and answer? (not (#{2 3} (count tail))))
+                  (throw (ex-info "(reply ...) takes a value and an optional response"
+                                  {:form tail})))
+        ;; Which shape of reply this is, is known here. A handler that asks for
+        ;; nothing from the response is left exactly as it was.
+        resp?   (and answer? (= 3 (count tail)))
+        body    (cond
+                  resp?   (concat (butlast forms) [(vec (rest tail))])
+                  answer? (concat (butlast forms) [(second tail)])
+                  :else   forms)
         expr    (if (= 1 (count body)) (first body) (cons 'do body))]
     (when (some reply-form? (tree-seq coll? seq expr))
       (throw (ex-info "(reply ...) must be the last form of a (server! ...)"
@@ -172,7 +183,8 @@
     (let [[server-expr pairs] (lift-client expr)
           id (str comp-id "/" (count (:handlers @acc)))]
       (swap! acc update :handlers conj
-             [id {:params (mapv first pairs) :expr server-expr :reply answer?}])
+             [id {:params (mapv first pairs) :expr server-expr
+                  :reply (if resp? :response answer?)}])
       (list 'rpc! id (mapv #(conv (second %) scope true comp-id acc) pairs)))))
 
 (defn- conv-bindings
@@ -387,8 +399,10 @@
           :ssr      (fn ~slot-syms ~@ssr-forms)
           :slots    (fn [] ~(vec slot-exprs))
           :handlers ~(into {} (map (fn [[id h]]
+                                     ;; false, true, or :response for a reply
+                                     ;; that also answers with an http response
                                      [id {:fn `(fn ~(:params h) ~(:expr h))
-                                          :reply (boolean (:reply h))}]))
+                                          :reply (:reply h)}]))
                            handlers)})
        (register! '~(symbol (str *ns*) (str nm))
                   {:ns '~(ns-name *ns*) :form '~&form})

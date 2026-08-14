@@ -126,8 +126,13 @@
                      (:mounted (get @conns session)))]
       (try
         (let [v (apply (:fn h) args)]
-          (if (:reply h)
-            (json-response 200 v)
+          (case (:reply h)
+            ;; `(reply v resp)`, so the handler answered with both
+            :response (let [[value resp] v]
+                        (-> (json-response 200 value)
+                            (update :headers merge (:headers resp))
+                            (merge (dissoc resp :headers))))
+            true      (json-response 200 v)
             {:status 204}))
         (catch Exception e
           (println "buzz:" handler-id "failed on" (pr-str args) "-" (ex-message e))

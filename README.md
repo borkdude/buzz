@@ -69,7 +69,11 @@ The body of a component is client side code. In the body you can use four marks 
 - `(server expr)` is a value from the server. The server runs the expression again
 after each change to an observed atom and the result is sent to the browser.
 
-- `(server! expr)` is way to make the server do something. It is a side effect, not a value. The return value is a promise. Using the special `reply` form, you can send a value back to the browser.
+- `(server! expr)` is way to make the server do something. It is a side effect, not a value. The return value is a promise. Using the special `reply` form, you can send a value back to the browser. Give `reply` a second argument to add to the http response the value arrives in, which is how a handler sets a cookie.
+
+```clojure
+(server! (reply :ok {:headers {"Set-Cookie" "session=abc; HttpOnly; Path=/"}}))
+```
 
 - `(client expr)` is a client value that crosses into a `server!` form.
 
