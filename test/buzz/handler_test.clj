@@ -1,6 +1,6 @@
 (ns buzz.handler-test
   (:require [babashka.fs :as fs]
-            [buzz.core :refer [defpart defui reply server server!]]
+            [buzz.core :refer [defpart defui local-state reply server server!]]
             [buzz.handler :as handler]
             [cheshire.core :as json]
             [clojure.string :as str]
@@ -451,3 +451,41 @@
             (is (= ["patch" "card" [1 2]] (next-event rdr))))
 
           (finally (redefine! narrow-badge)))))))
+
+;; What the browser imports. The registry entries are read by client.cljs as
+;; `.-f`, `.-init` and `.-nlocals`, so the names here are a contract between two
+;; files that nothing else holds together.
+(defui gauge [q]
+  (let [seen (local-state 0)]
+    [:p (server @q) @seen]))
+
+(def ^:private gauge-spec
+  {:title "gauge"
+   :mounts [{:el "app"
+             :state (fn [] {:q (atom 0)})
+             :component (fn [st] (gauge (:q st)))}]})
+
+(deftest the-browser-is-served-the-modules-it-imports
+  (let [ui (handler/handler gauge-spec)]
+
+    (testing "the runtime is compiled here and served as a module"
+      (doseq [uri ["/client.mjs" "/rpc.mjs" "/components.mjs"]]
+        (let [{:keys [status headers body]} (ui {:uri uri})]
+          (is (= 200 status) uri)
+          (is (= "text/javascript" (get headers "Content-Type")) uri)
+          (testing "and never cached, so an edit is never served stale"
+            (is (= "no-store" (get headers "Cache-Control")) uri))
+          (is (pos? (count body)) uri))))
+
+    (testing "the components module imports what it needs"
+      (let [body (:body (ui {:uri "/components.mjs"}))]
+        (is (str/includes? body "import * as SQ from \"squint-cljs/core.js\""))
+        (is (str/includes? body "from \"/rpc.mjs\""))
+
+        (testing "and holds one entry per component, named as the client reads it"
+          (is (str/includes? body "\"gauge\": {f: "))
+          (is (str/includes? body ", init: "))
+          (is (str/includes? body ", nlocals: 1}")))))
+
+    (testing "a module the page does not serve is declined"
+      (is (nil? (ui {:uri "/nope.mjs"}))))))
