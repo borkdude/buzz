@@ -24,6 +24,9 @@
   makes of a request, and whether the handler is wrapped in anything, is the
   application's business.
 
+  It is called once for the first paint and again when the connection opens, so
+  read the request rather than act on it.
+
   Requests the page does not own return nil, so the application composes."
   (:require [babashka.fs :as fs]
             [buzz.core :as core]
