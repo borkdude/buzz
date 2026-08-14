@@ -1,0 +1,6 @@
+{:paths ["src"]
+ :deps {io.github.borkdude/buzz {:local/root "../.."}}
+ :tasks {run {:override-builtin true
+              :doc "Start the example on http://localhost:1360"
+              :requires ([notes])
+              :task (notes/-main)}}}
