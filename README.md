@@ -69,7 +69,11 @@ The body of a component is client side code. In the body you can use four marks 
 - `(server expr)` is a value from the server. The server runs the expression again
 after each change to an observed atom and the result is sent to the browser.
 
-- `(server! expr)` is way to make the server do something. It is a side effect, not a value. The return value is a promise. Using the special `reply` form, you can send a value back to the browser.
+- `(server! expr)` is way to make the server do something. It is a side effect, not a value. The return value is a promise. Using the special `reply` form, you can send a value back to the browser. Give `reply` a second argument to add to the http response the value arrives in, which is how a handler sets a cookie.
+
+```clojure
+(server! (reply :ok {:headers {"Set-Cookie" "session=abc; HttpOnly; Path=/"}}))
+```
 
 - `(client expr)` is a client value that crosses into a `server!` form.
 
@@ -98,6 +102,28 @@ To compose the handler with other routes, you can use `or` since the handler ret
 ```
 
 Buzz watches each atom in `:watch`. When one of them changes, it re-renders the component and sends a patch to each browser. One mount can hold one component at one element. A page can have more than one mount.
+
+The page belongs to the handler, so one application can serve more than one of them. Give a handler a `:path` and it answers under that path, stream and modules included.
+
+```clojure
+(def admin (buzz/handler {:path "/admin" :mounts [...]}))   ; the page is /admin
+(def home  (buzz/handler {:mounts [...]}))                  ; the page is /
+
+(defn app [req] (or (admin req) (home req) {:status 404 :body "not found"}))
+```
+
+## Per connection state
+
+Give a mount a `:state` function to make state that belongs to one browser. It is called with the request that opened the connection and returns a map. Buzz watches every atom in that map for that browser alone.
+
+```clojure
+{:el "app"
+ :state (fn [req] {:user (whoami req)
+                   :query (atom "")})
+ :component (fn [state] (admin (:user state) (:query state)))}
+```
+
+See [examples/auth](examples/auth) for a page that signs two users in and gives each of them their own data.
 
 ## The page
 

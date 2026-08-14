@@ -6,7 +6,7 @@
       (handler {:title \"todos\"
                 :watch [app/db]                              ; patch everyone on change
                 :mounts [{:el \"app\"
-                          :state (fn [] {:query (atom \"\")}) ; per connection, optional
+                          :state (fn [req] {:query (atom \"\")}) ; per connection, optional
                           :component (fn [state] (app/todo-app (:query state)))}]}))
 
     (defn app [req] (or (ui req) (my-static-files req)))
@@ -19,6 +19,14 @@
   Every atom in a mount's `:state` map is watched for that connection alone.
   Atoms in the top level `:watch` are watched for all of them.
 
+  A mount's `:state` is given the request that opened the connection, which is
+  where an identity comes from. Buzz authenticates nobody: what a `:state` fn
+  makes of a request, and whether the handler is wrapped in anything, is the
+  application's business.
+
+  It is called once for the first paint and again when the connection opens, so
+  read the request rather than act on it.
+
   Requests the page does not own return nil, so the application composes."
   (:require [babashka.fs :as fs]
             [buzz.core :as core]
@@ -28,8 +36,6 @@
             [org.httpkit.server :as http]
             [reagami.ssr :as ssr]
             [squint.compiler :as squint]))
-
-(defonce ^:private page (atom nil))
 
 ;; Two endpoints. GET /events is one long-lived SSE stream per browser, POST
 ;; /rpc is a plain request. Nothing is bidirectional, so there is no upgrade to
@@ -58,20 +64,28 @@
       (reset! sent vals)
       (event! ch ["patch" (:id instance) vals]))))
 
-(defn- build [{:keys [el state component] :as spec}]
-  (let [st (if state (state) {})]
+;; The request is what a connection knows about who opened it. Handing it to
+;; `:state` is the only place identity can enter, since a handler is a closure
+;; over the state its component was built with and never sees a request itself.
+(defn- build [{:keys [el state component] :as spec} req]
+  (let [st (if state (state req) {})]
     {:el el :state st :spec spec :sent (atom ::none) :instance (component st)}))
 
+;; What a connection owns is not all atoms. An identity read from the request is
+;; a plain value, and there is nothing to watch about it.
+(defn- refs [state]
+  (filter #(instance? clojure.lang.IRef %) (vals state)))
+
 (defn- watch-session! [ch session mount]
-  (doseq [a (vals (:state mount))]
+  (doseq [a (refs (:state mount))]
     (add-watch a [::render session (:id (:instance mount))]
                (fn [_ _ _ _] (patch! ch mount)))))
 
 (defn- unwatch-session! [session mounted]
-  (doseq [m mounted, a (vals (:state m))]
+  (doseq [m mounted, a (refs (:state m))]
     (remove-watch a [::render session (:id (:instance m))])))
 
-(defn- open-stream [session ch]
+(defn- open-stream [session ch req mounts]
   (http/send! ch {:status 200
                   :headers {"Content-Type" "text/event-stream"
                             "Cache-Control" "no-cache"
@@ -80,7 +94,7 @@
   ;; The session id is what an RPC arrives with, so it goes out only once there
   ;; is something here to find under it. Building the mounts renders every
   ;; component, which is long enough for a browser to have answered.
-  (let [mounted (mapv build (:mounts @page))]
+  (let [mounted (mapv #(build % req) mounts)]
     (swap! conns assoc session {:ch ch :mounted mounted})
     (event! ch ["session" session])
     (doseq [{:keys [el instance sent] :as m} mounted]
@@ -89,10 +103,10 @@
         (reset! sent vals)
         (event! ch ["mount" (:id instance) el vals])))))
 
-(defn- events [req]
+(defn- events [req mounts]
   (let [session (str (random-uuid))]
     (http/as-channel req
-                     {:on-open  (fn [ch] (open-stream session ch))
+                     {:on-open  (fn [ch] (open-stream session ch req mounts))
                       :on-close (fn [_ _]
                                   (unwatch-session! session (:mounted (get @conns session)))
                                   (swap! conns dissoc session))})))
@@ -112,8 +126,13 @@
                      (:mounted (get @conns session)))]
       (try
         (let [v (apply (:fn h) args)]
-          (if (:reply h)
-            (json-response 200 v)
+          (case (:reply h)
+            ;; `(reply v resp)`, so the handler answered with both
+            :response (let [[value resp] v]
+                        (-> (json-response 200 value)
+                            (update :headers merge (:headers resp))
+                            (merge (dissoc resp :headers))))
+            true      (json-response 200 v)
             {:status 204}))
         (catch Exception e
           (println "buzz:" handler-id "failed on" (pr-str args) "-" (ex-message e))
@@ -150,13 +169,16 @@
 
 ;; Idle streams get dropped by proxies. A comment frame is ignored by
 ;; EventSource and keeps the connection accounted for.
-(defn- heartbeat! []
-  (future
-    (loop []
-      (Thread/sleep 25000)
-      (doseq [{:keys [ch]} (vals @conns)]
-        (http/send! ch ": ping\n\n" false))
-      (recur))))
+;; One for the whole process rather than one per page, since it walks every
+;; connection there is.
+(defonce ^:private heartbeat
+  (delay
+    (future
+      (loop []
+        (Thread/sleep 25000)
+        (doseq [{:keys [ch]} (vals @conns)]
+          (http/send! ch ": ping\n\n" false))
+        (recur)))))
 
 ;; The runtime is written in Clojure and compiled here. Nothing interprets
 ;; Clojure in the browser, so the page loads no interpreter at all. These two
@@ -166,22 +188,35 @@
    ;; compiled per request, so never let a stale copy survive an edit
    "Cache-Control" "no-store"})
 
-(defn- runtime-module [n]
+;; A handler can be mounted under a path, and the browser has to ask the same
+;; handler for its stream and its modules rather than whichever one owns the
+;; root. The runtime is compiled per request anyway, so the path goes into it
+;; instead of being smuggled through a global on the page. Longest first, or
+;; "/rpc" would eat the start of "/rpc.mjs".
+(defn- at-path [src path]
+  (if (str/blank? path)
+    src
+    (reduce (fn [s u] (str/replace s (str \" u) (str \" path u)))
+            src
+            ["/components.mjs" "/rpc.mjs" "/events" "/rpc"])))
+
+(defn- runtime-module [n path]
   {:status 200
    :headers js-headers
-   :body (squint/compile-string (slurp (io/resource (str "buzz/" n))))})
+   :body (squint/compile-string (at-path (slurp (io/resource (str "buzz/" n))) path))})
 
 ;; The components are an ordinary module too. `defui` already compiled each
 ;; one to a JavaScript expression, so this only has to give them their imports
 ;; and a name. The browser imports the result and never evaluates a string.
-(defn- components-module []
-  ;; Only :js is read, and that does not depend on the arguments, so these
-  ;; instances are thrown away.
-  (let [insts (map (comp :instance build) (:mounts @page))]
+(defn- components-module [mounts path]
+  ;; Only :js is read, and that does not depend on the arguments, so the
+  ;; components are called with no state at all rather than with a connection's.
+  ;; Building one here would run every `:state` fn for a module that ignores it.
+  (let [insts (map #((:component %) {}) mounts)]
     {:status 200
      :headers js-headers
      :body (str "import * as SQ from \"squint-cljs/core.js\";\n"
-                "import { rpc_BANG_ } from \"/rpc.mjs\";\n"
+                "import { rpc_BANG_ } from \"" path "/rpc.mjs\";\n"
                 "export const registry = {\n"
                 (str/join ",\n"
                           (map #(str "  " (pr-str (:id %)) ": {f: " (:js %)
@@ -209,8 +244,8 @@
 ;; `on*` attribute by name anyway. Reagami adopts these nodes in the browser
 ;; instead of rebuilding them. There is no connection yet, so a mount's `:state`
 ;; starts empty for this render.
-(defn- first-paint [spec]
-  (let [inst (:instance (build spec))
+(defn- first-paint [spec req]
+  (let [inst (:instance (build spec req))
         ;; a browser slot has no value yet, so the first paint renders whatever
         ;; the component makes of an empty one
         locals (repeatedly (:locals inst 0) #(atom nil))]
@@ -220,61 +255,74 @@
 ;; map cannot drift away from the Squint that compiled the components.
 (def ^:private squint-core "https://esm.sh/squint-cljs@0.14.208/core.js")
 
-(defn- scripts [nonce]
+(defn- scripts [nonce path]
   (str "<script type=\"importmap\" nonce=\"" nonce "\">\n"
        "{\"imports\": {\"squint-cljs/core.js\": \"" squint-core "\"}}\n"
        "</script>\n"
-       "<script type=\"module\" src=\"/client.mjs\"></script>\n"))
+       "<script type=\"module\" src=\"" path "/client.mjs\"></script>\n"))
 
 (defn- escape [s]
   (str/escape (str s) {\& "&amp;" \< "&lt;" \> "&gt;" \" "&quot;"}))
 
 ;; Without an `:index` the page is boilerplate: a div per mount and the two
 ;; script tags. Buzz knows all of it, so it writes the page instead.
-(defn- generated-page [nonce]
-  (let [{:keys [title head mounts]} @page]
-    (str "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n"
-         "<title>" (escape (or title "buzz")) "</title>\n"
-         head
-         "</head>\n<body>\n"
-         (str/join (for [{:keys [el] :as spec} mounts]
-                     (str "<div id=\"" (escape el) "\">" (first-paint spec) "</div>\n")))
-         (scripts nonce)
-         "</body>\n</html>\n")))
+(defn- generated-page [nonce req {:keys [title head mounts path]}]
+  (str "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n"
+       "<title>" (escape (or title "buzz")) "</title>\n"
+       head
+       "</head>\n<body>\n"
+       (str/join (for [{:keys [el] :as mount} mounts]
+                   (str "<div id=\"" (escape el) "\">" (first-paint mount req) "</div>\n")))
+       (scripts nonce (or path ""))
+       "</body>\n</html>\n"))
 
 ;; With an `:index` the page is yours. Buzz fills each `<!--el-->` with the
 ;; first paint and every NONCE with the one in the header.
-(defn- rendered-page [nonce]
-  (-> (reduce (fn [html {:keys [el] :as spec}]
-                (str/replace html (str "<!--" el "-->") (first-paint spec)))
-              (slurp (fs/file (:index @page)))
-              (:mounts @page))
+(defn- rendered-page [nonce req {:keys [index mounts]}]
+  (-> (reduce (fn [html {:keys [el] :as mount}]
+                (str/replace html (str "<!--" el "-->") (first-paint mount req)))
+              (slurp (fs/file index))
+              mounts)
       (str/replace "NONCE" nonce)))
 
-(defn- index []
+(defn- index-page [req spec]
   (let [nonce (str (random-uuid))]
     {:status 200
      :headers {"Content-Type" "text/html"
                "Content-Security-Policy" (csp nonce)}
-     :body (if (:index @page) (rendered-page nonce) (generated-page nonce))}))
+     :body (if (:index spec) (rendered-page nonce req spec) (generated-page nonce req spec))}))
 
 (defn handler
   "Returns a Ring handler for the page described by `spec`. Requests it does not
   own get nil, so an application can compose it with whatever else it serves and
   run whichever server it likes.
 
+  The page belongs to the handler this returns, so an application can serve more
+  than one of them. Give each one a `:path` and it answers under that, stream
+  and modules included:
+
+    (handler {:path \"/admin\" :mounts [...]})   ; the page is /admin
+
   Installs watches and starts the heartbeat as a side effect of being called."
-  [{:keys [watch] :as spec}]
-  (reset! page spec)
+  [{:keys [watch mounts path] :as spec}]
   (doseq [a watch]
     (add-watch a ::render broadcast-patch!))
-  (heartbeat!)
-  (fn [req]
-    (case (:uri req)
-      "/"               (index)
-      "/client.mjs"     (runtime-module "client.cljs")
-      "/rpc.mjs"        (runtime-module "rpc.cljs")
-      "/components.mjs" (components-module)
-      "/events"         (events req)
-      "/rpc"            (rpc req)
-      nil)))
+  @heartbeat
+  (let [path   (or path "")
+        routes (cond-> {(str path "/")               :page
+                        (str path "/client.mjs")     :client
+                        (str path "/rpc.mjs")        :rpc-module
+                        (str path "/components.mjs") :components
+                        (str path "/events")         :events
+                        (str path "/rpc")            :rpc}
+                 ;; /admin and /admin/ are the same page
+                 (seq path) (assoc path :page))]
+    (fn [req]
+      (case (routes (:uri req))
+        :page       (index-page req spec)
+        :client     (runtime-module "client.cljs" path)
+        :rpc-module (runtime-module "rpc.cljs" path)
+        :components (components-module mounts path)
+        :events     (events req mounts)
+        :rpc        (rpc req)
+        nil))))

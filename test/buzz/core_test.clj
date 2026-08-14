@@ -71,6 +71,11 @@
     (is (re-find #"crosses a value into"
                  (refusal '(buzz.core/defui d [] [:p (client 1)])))))
 
+  (testing "a reply takes a value and at most a response"
+    (is (re-find #"takes a value and an optional response"
+                 (refusal '(buzz.core/defui f []
+                             [:p {:on-click (fn [_] (server! (reply 1 2 3)))}])))))
+
   (testing "browser state is declared in the body, not in a handler"
     (is (re-find #"declares state"
                  (refusal '(buzz.core/defui e []
