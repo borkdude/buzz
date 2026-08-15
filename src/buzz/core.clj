@@ -81,33 +81,80 @@
     (or (bare-marks head)
         (marks (try (resolve head) (catch Exception _ nil))))))
 
-(defmacro defpart
-  "A hiccup helper. Unlike a function, this is spliced into whichever component
-  uses it, before the body is walked, so `(server ...)` inside one is seen and
-  its handlers belong to the enclosing component.
+(def ^:private ^:dynamic *self*
+  "The part being defined, while its own body converts. Its var is not there
+  yet, so `defpart` says here what the name is about to mean."
+  nil)
 
-  Parameters carry browser values. Mark one `^:server` to pass something that
+(def ^:private ^:dynamic *splicing*
+  "The parts currently being spliced, outermost first. What turns a part that
+  splices itself into an error instead of an expansion that never ends."
+  [])
+
+(declare ^:private split-part-body)
+(declare ^:private handlers-form)
+
+(defmacro defpart
+  "A hiccup helper: a function the browser calls, so a part can call itself
+  and a tree can draw a tree.
+
+    (defpart node [n]
+      [:li (:label n)
+       [:ul (for [c (:children n)] (node c))]])
+
+  The body sees its parameters and globals. A `(server! ...)` works, and its
+  handlers belong to the part, so a component that uses one is not renumbered
+  by it. Server data enters as an argument: the caller writes `(server ...)`
+  where it calls the part.
+
+  A part that needs its caller is spliced into it instead, the way every part
+  used to be. A `^:server` parameter asks for that, to pass something that
   only exists here, such as an atom a component was given:
 
     (defpart row [item ^:server store]
-      [:li {:on-click (fn [_] (server (swap! store conj item)))} item])
+      [:li {:on-click (fn [_] (server! (swap! store conj (client item))))} item])
+
+  A value position `(server ...)` or a `(local-state ...)` in the body also
+  splices, since a slot and a local belong to a component. A spliced part
+  cannot call itself: the splice would never end, and trying is an error.
 
   It is an ordinary `def`, so it resolves like anything else and a stale
-  reference fails loudly. Evaluating one expands every component again, so a
-  change reaches the browser without touching the components themselves."
+  reference fails loudly."
   [nm argv & body]
-  `(do (def ~nm {::part true :params '~argv :body '~body})
-       (recompile!)
-       (var ~nm)))
+  (let [qualified (symbol (str *ns*) (str nm))
+        splice?   (some #(:server (meta %)) argv)
+        split     (when-not splice?
+                    (binding [*self* {:name nm :qualified qualified :arity (count argv)}]
+                      (split-part-body nm argv body)))]
+    (if-not split
+      `(do (def ~nm {::part true :params '~argv :body '~body})
+           (recompile!)
+           (var ~nm))
+      (let [{:keys [js ssr-forms handlers parts]} split]
+        `(do (let [was# (when-let [v# (resolve '~nm)] (when (bound? v#) @v#))]
+               (def ~nm (with-meta (fn ~argv ~@ssr-forms)
+                          {::fn-part true
+                           :buzz/name '~qualified
+                           :buzz/arity ~(count argv)
+                           :buzz/js ~js
+                           :buzz/parts '~(vec parts)
+                           :buzz/handlers ~(handlers-form handlers)}))
+               ;; Splicing copied the old body into every user, and a changed
+               ;; arity invalidates every call, so both expand the components
+               ;; again. Otherwise the callers hold a name, and the name still
+               ;; means this part.
+               (if (or (and (map? was#) (::part was#))
+                       (and (fn? was#) (not= ~(count argv) (:buzz/arity (meta was#)))))
+                 (recompile!)
+                 (touch!)))
+             (var ~nm))))))
 
-(defn- part
-  "The part a head symbol names, if it names one and is not shadowed."
+(defn- part-var
+  "The var a head symbol names, if it names one and is not shadowed."
   [head scope]
   (when (and (symbol? head) (not (scope head)))
     (when-let [v (try (resolve head) (catch Exception _ nil))]
-      (when (and (var? v) (bound? v))
-        (let [value @v]
-          (when (and (map? value) (::part value)) value))))))
+      (when (and (var? v) (bound? v)) v))))
 
 (def ^:private lambda-heads '#{fn fn*})
 (def ^:private let-heads '#{let let* loop loop* when-let if-let when-some if-some})
@@ -220,6 +267,25 @@
         [scope' bvec'] (conv-bindings bvec scope lambda? comp-id acc)]
     (apply list head bvec' (mapv #(conv % scope' lambda? comp-id acc) body))))
 
+(defn- js-part-sym
+  "The symbol a part call compiles to. Munged the way the compiler munges a
+  reference, so the call sites and the module definition agree."
+  [nm]
+  (symbol (munge (name nm))))
+
+(defn- fn-part-call
+  "A call to a function part: converted arguments around the module name. The
+  qualified name is kept as well, so the ssr form can put it back and reach
+  the var."
+  [{:keys [qualified arity simple]} args scope lambda? comp-id acc]
+  (when-not (= arity (count args))
+    (throw (ex-info (str simple " takes " arity " arguments, given " (count args))
+                    {:part qualified :args (vec args)})))
+  (swap! acc update :parts conj qualified)
+  (swap! acc update :part-syms assoc (js-part-sym simple) qualified)
+  (apply list (js-part-sym simple)
+         (mapv #(conv % scope lambda? comp-id acc) args)))
+
 (defn- conv
   "Rewrites `form` into the form the browser evaluates, recording slots and
   handlers in `acc` along the way."
@@ -270,26 +336,53 @@
         (let-heads head)    (conv-let form scope lambda? comp-id acc)
         (seq-heads head)    (conv-let form scope lambda? comp-id acc)
         :else
-        ;; A part becomes a `let` binding its parameters to the forms it was
-        ;; called with, then is walked like anything else. Destructuring and
-        ;; scope tracking come for free that way.
-        ;;
-        ;; A `^:server` parameter is substituted into the body instead of bound,
-        ;; so it never enters browser scope and a `(server ...)` using it keeps
-        ;; resolving where the part was called from.
-        (if-let [p (part head scope)]
-          (let [params (:params p)]
-            (when-not (= (count params) (count args))
-              (throw (ex-info (str head " takes " (count params) " arguments, given " (count args))
-                              {:part head :params params :args (vec args)})))
-            (let [pairs  (map vector params args)
-                  server? #(:server (meta (first %)))
-                  subs   (into {} (map (fn [[p a]] [p a])) (filter server? pairs))
-                  binds  (vec (mapcat identity (remove server? pairs)))
-                  body   (cond->> (:body p)
-                           (seq subs) (walk/postwalk-replace subs))]
-              (conv (apply list 'let binds body) scope lambda? comp-id acc)))
-          (apply list (mapv #(conv % scope lambda? comp-id acc) form)))))
+        (let [v     (part-var head scope)
+              value (when v @v)]
+          (cond
+            ;; The part being defined calls itself. Its var is not there yet,
+            ;; so `defpart` said what the name is about to mean.
+            (and *self* (= head (:name *self*)) (not (scope head)))
+            (fn-part-call {:qualified (:qualified *self*) :arity (:arity *self*)
+                           :simple (:name *self*)}
+                          args scope lambda? comp-id acc)
+
+            ;; A function part is called rather than spliced, so it can
+            ;; recurse and its handlers keep its own name.
+            (and (fn? value) (::fn-part (meta value)))
+            (let [m (meta value)]
+              (fn-part-call {:qualified (:buzz/name m) :arity (:buzz/arity m)
+                             :simple (symbol (name (:buzz/name m)))}
+                            args scope lambda? comp-id acc))
+
+            ;; A spliced part becomes a `let` binding its parameters to the
+            ;; forms it was called with, then is walked like anything else.
+            ;; Destructuring and scope tracking come for free that way.
+            ;;
+            ;; A `^:server` parameter is substituted into the body instead of
+            ;; bound, so it never enters browser scope and a `(server ...)`
+            ;; using it keeps resolving where the part was called from.
+            (and (map? value) (::part value))
+            (let [params (:params value)
+                  m      (meta v)
+                  qual   (symbol (str (:ns m)) (str (:name m)))]
+              (when (some #{qual} *splicing*)
+                (throw (ex-info (str head " is spliced into itself: "
+                                     (str/join " -> " (conj *splicing* qual)))
+                                {:part qual :chain *splicing*})))
+              (when-not (= (count params) (count args))
+                (throw (ex-info (str head " takes " (count params) " arguments, given " (count args))
+                                {:part head :params params :args (vec args)})))
+              (let [pairs  (map vector params args)
+                    server? #(:server (meta (first %)))
+                    subs   (into {} (map (fn [[p a]] [p a])) (filter server? pairs))
+                    binds  (vec (mapcat identity (remove server? pairs)))
+                    body   (cond->> (:body value)
+                             (seq subs) (walk/postwalk-replace subs))]
+                (binding [*splicing* (conj *splicing* qual)]
+                  (conv (apply list 'let binds body) scope lambda? comp-id acc))))
+
+            :else
+            (apply list (mapv #(conv % scope lambda? comp-id acc) form))))))
 
     (vector? form) (mapv #(conv % scope lambda? comp-id acc) form)
     (map? form)    (into {} (mapv (fn [[k v]] [(conv k scope lambda? comp-id acc)
@@ -361,22 +454,80 @@
   (:body (squint/compile* [form]
                           {:context :expr :core-alias "SQ" :elide-imports true})))
 
+(defn- handlers-form
+  "The handler map as a form the definition embeds: id -> what the server
+  does. `:reply` is false, true, or :response for a reply that also answers
+  with an http response."
+  [handlers]
+  (into {} (map (fn [[id h]]
+                  [id {:fn `(fn ~(:params h) ~(:expr h)) :reply (:reply h)}]))
+        handlers))
+
+(defn- split-part-body
+  "The pieces a function part is made of, or nil when the body needs a caller:
+  a slot or a local belongs to the component a part is spliced into."
+  [nm argv body]
+  (let [acc   (atom {:slots [] :handlers [] :locals [] :parts #{} :part-syms {}})
+        forms (mapv #(conv % (binder-syms argv) false (str nm) acc) body)
+        {:keys [slots handlers locals parts part-syms]} @acc]
+    (when (and (empty? slots) (empty? locals))
+      {:js        (to-js (apply list 'fn argv forms))
+       ;; the browser form names parts by their module name, and the same form
+       ;; runs here for the first paint, so the name goes back to the var
+       :ssr-forms (mapv ssr-form (walk/postwalk-replace part-syms forms))
+       :handlers  handlers
+       :parts     parts})))
+
+(defn touch!
+  "Bumps the revision without expanding anything. Editing a function part is
+  enough: its callers hold a name, and the module is compiled per request.
+  Public because `defpart` expands into a call to it."
+  []
+  (swap! revision inc))
+
+(defn js-name
+  "The name a part has in the compiled module."
+  [sym]
+  (munge (name sym)))
+
+(defn parts-closure
+  "Every function part reachable from `syms`: its qualified name and its
+  definition. Walks what each part uses, so a part a part calls is included."
+  [syms]
+  (loop [todo (seq syms) seen {}]
+    (if-let [[s & more] todo]
+      (if (contains? seen s)
+        (recur more seen)
+        (let [m (some-> (try (resolve s) (catch Exception _ nil)) deref meta)]
+          (if (::fn-part m)
+            (recur (concat more (:buzz/parts m)) (assoc seen s m))
+            (recur more seen))))
+      seen)))
+
+(defn part-handlers
+  "The handlers of every part in `syms`, one map. Read when a component is
+  called, so an edited part answers with its new code without touching its
+  callers."
+  [syms]
+  (into {} (mapcat (comp :buzz/handlers val)) (parts-closure syms)))
+
 (defn split-body
   "Returns the pieces a component is made of. Server slots come first in the
   browser function's parameters, then the browser's own."
   [body comp-id]
-  (let [acc   (atom {:slots [] :handlers [] :locals []})
+  (let [acc   (atom {:slots [] :handlers [] :locals [] :parts #{} :part-syms {}})
         forms (mapv #(conv % #{} false comp-id acc) body)
-        {:keys [slots handlers locals]} @acc
+        {:keys [slots handlers locals parts part-syms]} @acc
         params (into (mapv :sym slots) (mapv :sym locals))]
     {:js         (to-js (apply list 'fn params forms))
      ;; the initial values take the slots, so a local can start from what the
      ;; server sent rather than only from a literal
      :init-js    (to-js (list 'fn (mapv :sym slots) (mapv :init locals)))
      :locals     (count locals)
-     :ssr-forms  (mapv ssr-form forms)
+     :ssr-forms  (mapv ssr-form (walk/postwalk-replace part-syms forms))
      :slot-exprs (mapv :expr slots)
      :handlers   handlers
+     :parts      parts
      :slot-syms  params}))
 
 (defmacro defui
@@ -389,21 +540,20 @@
      :handlers id -> fn, called when the browser sends an :rpc}"
   [nm argv & body]
   (let [comp-id (str nm)
-        {:keys [js init-js locals ssr-forms slot-exprs slot-syms handlers]} (split-body body comp-id)]
+        {:keys [js init-js locals ssr-forms slot-exprs slot-syms handlers parts]} (split-body body comp-id)]
     `(do
        (defn ~nm ~argv
          {:id       ~comp-id
           :js       ~js
           :init     ~init-js
           :locals   ~locals
+          :parts    '~(vec parts)
           :ssr      (fn ~slot-syms ~@ssr-forms)
           :slots    (fn [] ~(vec slot-exprs))
-          :handlers ~(into {} (map (fn [[id h]]
-                                     ;; false, true, or :response for a reply
-                                     ;; that also answers with an http response
-                                     [id {:fn `(fn ~(:params h) ~(:expr h))
-                                          :reply (:reply h)}]))
-                           handlers)})
+          ;; the parts are read here, at each call, so an edited part answers
+          ;; with its new handlers without this component being expanded again
+          :handlers (merge (part-handlers '~(vec parts))
+                           ~(handlers-form handlers))})
        (register! '~(symbol (str *ns*) (str nm))
                   {:ns '~(ns-name *ns*) :form '~&form})
        (var ~nm))))

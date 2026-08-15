@@ -188,3 +188,105 @@
             params (second (re-find #"function \(([^)]*)\)" (:init inst)))]
         (is (some? slot))
         (is (str/includes? params slot))))))
+
+;; A part with no server needs of its own is a function the browser calls.
+;; Its handlers keep its name, so a component that uses it is not renumbered.
+(def basket (atom []))
+
+(defpart fruit-row [item]
+  [:li.fruit item
+   [:button {:on-click (fn [_] (server! (swap! basket conj (client item))))} "add"]])
+
+(defui fruit-list []
+  [:ul (fruit-row "apple") (fruit-row "pear")])
+
+(deftest a-function-part-is-called-rather-than-spliced
+  (reset! basket [])
+  (let [inst (fruit-list)]
+
+    (testing "the component calls the part by name"
+      (is (re-find #"fruit_row\(\"apple\"\)" (:js inst)))
+      (is (not (str/includes? (:js inst) "swap"))))
+
+    (testing "and records that it uses it"
+      (is (= ['buzz.core-test/fruit-row] (:parts inst))))
+
+    (testing "the handler belongs to the part, not the component"
+      (is (= ["fruit-row/0"] (keys (:handlers inst))))
+      ((:fn (get (:handlers inst) "fruit-row/0")) "apple")
+      (is (= ["apple"] @basket)))
+
+    (testing "the part contributes no slots"
+      (is (= [] ((:slots inst)))))
+
+    (testing "the first paint renders through the part"
+      (is (str/includes? (pr-str ((:ssr inst))) "apple")))
+
+    (testing "the wrong number of arguments is an error"
+      (is (re-find #"takes 1 arguments, given 2"
+                   (refusal '(buzz.core/defui bad-call []
+                               [:ul (buzz.core-test/fruit-row "a" "b")])))))))
+
+;; The reason parts became functions. A spliced part inlining itself would
+;; expand forever, and a function calling itself is a Tuesday.
+(def forest-data
+  (atom {:label "root"
+         :children [{:label "a" :children [{:label "a1" :children []}]}
+                    {:label "b" :children []}]}))
+
+(defpart branch [n]
+  [:li (:label n)
+   (when (seq (:children n))
+     [:ul (for [c (:children n)] (branch c))])])
+
+(defui forest []
+  [:ul.forest (branch (server @forest-data))])
+
+(deftest a-function-part-can-call-itself
+  (let [inst (forest)]
+
+    (testing "the component passes the tree through one slot"
+      (is (re-find #"branch\(slot__\d+\)" (:js inst))))
+
+    (testing "the part's own code calls itself"
+      (is (str/includes? (:buzz/js (meta branch)) "branch(")))
+
+    (testing "the first paint walks the whole tree"
+      (is (str/includes? (pr-str (apply (:ssr inst) ((:slots inst)))) "a1")))))
+
+(deftest a-spliced-part-cannot-splice-itself
+  (is (re-find #"spliced into itself"
+               (refusal '(do (buzz.core/defpart loopy [^:server q]
+                               [:li (loopy q)])
+                             (buzz.core/defui uses-loopy [q] [:ul (loopy q)]))))))
+
+;; Editing a function part reaches the page through the module and the merged
+;; handler map, both read per request, so the components are left alone.
+(defpart tally-button []
+  [:button {:on-click (fn [_] (server! (swap! clicks inc)))} "+"])
+
+(defui tally-panel []
+  [:div (tally-button)])
+
+(defn- redefine! [form]
+  (binding [*ns* (the-ns 'buzz.core-test)]
+    (eval form)))
+
+(deftest an-edited-function-part-reaches-through-its-callers
+  (let [before (:js (tally-panel))
+        rev    @b/revision]
+    (try
+      (redefine! '(buzz.core/defpart tally-button []
+                    [:button {:on-click (fn [_] (server! (swap! clicks + 2)))} "+2"]))
+      (let [inst (tally-panel)]
+        (testing "the component was not expanded again"
+          (is (= before (:js inst))))
+        (testing "but the revision moved, so the browsers fetch the module again"
+          (is (= (inc rev) @b/revision)))
+        (testing "and the handler map answers with the new code"
+          (reset! clicks 0)
+          ((:fn (get (:handlers inst) "tally-button/0")))
+          (is (= 2 @clicks))))
+      (finally
+        (redefine! '(buzz.core/defpart tally-button []
+                      [:button {:on-click (fn [_] (server! (swap! clicks inc)))} "+"]))))))

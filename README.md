@@ -87,8 +87,11 @@ You can define a part of a component with `defpart`. A part is like a component,
 (defpart row [item]
   [:li (:title item)])
 ```
-Buzz splices a part into the component that uses it, so a `server!` inside a
-part belongs to that component.
+
+A part is a function the browser calls, so it can call itself and a tree can
+draw a tree. A `server!` inside one registers handlers under the part's own
+name. A part that needs the caller, such as one with a `^:server` parameter,
+is spliced into the component instead. See [doc/parts.md](doc/parts.md).
 
 ## Mounting
 

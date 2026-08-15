@@ -467,6 +467,39 @@
 
           (finally (redefine! narrow-badge)))))))
 
+;; A function part rides along: the module defines it once, the component
+;; calls it by name, and its handler is dispatched through the mount that
+;; merged it in.
+(def ^:private steps (atom 0))
+
+(defpart step-button [label]
+  [:button {:on-click (fn [_] (server! (swap! steps inc)))} label])
+
+(defui stepped-panel []
+  [:div (server @steps) (step-button "go")])
+
+(def ^:private stepped-spec
+  {:title "stepped"
+   :watch [steps]
+   :mounts [{:el "app" :component (fn [_] (stepped-panel))}]})
+
+(deftest a-function-part-serves-and-answers-through-its-component
+  (reset! steps 0)
+  (with-connection stepped-spec
+    (fn [{:keys [rdr] :as conn}]
+      (testing "the mount carries the component's slot"
+        (is (= ["mount" "stepped-panel" "app" [0]] (next-event rdr))))
+
+      (testing "the module defines the part the component calls"
+        (let [body (:body ((handler/handler stepped-spec) {:uri "/components.mjs"}))]
+          (is (str/includes? body "const step_button = "))
+          (is (str/includes? body "step_button("))))
+
+      (testing "an rpc reaches the part's handler through the mount"
+        (is (= 204 (first (rpc conn "step-button/0" []))))
+        (is (= 1 @steps))
+        (is (= ["patch" "stepped-panel" [1]] (next-event rdr)))))))
+
 ;; What the browser imports. The registry entries are read by client.cljs as
 ;; `.-f`, `.-init` and `.-nlocals`, so the names here are a contract between two
 ;; files that nothing else holds together.

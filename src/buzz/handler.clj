@@ -262,11 +262,16 @@
   ;; Only :js is read, and that does not depend on the arguments, so the
   ;; components are called with no state at all rather than with a connection's.
   ;; Building one here would run every `:state` fn for a module that ignores it.
-  (let [insts (map #((:component %) {}) mounts)]
+  (let [insts (map #((:component %) {}) mounts)
+        ;; read per request like everything else here, so an edited part is
+        ;; served fresh without its callers being expanded again
+        parts (core/parts-closure (mapcat :parts insts))]
     {:status 200
      :headers js-headers
      :body (str "import * as SQ from \"squint-cljs/core.js\";\n"
                 "import { rpc_BANG_ } from \"" path "/rpc.mjs\";\n"
+                (str/join (for [[sym m] parts]
+                            (str "const " (core/js-name sym) " = " (:buzz/js m) ";\n")))
                 "export const registry = {\n"
                 (str/join ",\n"
                           (map #(str "  " (pr-str (:id %)) ": {f: " (:js %)
