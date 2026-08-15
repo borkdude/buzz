@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>taps</title>
+    <style nonce="NONCE">
+      body { font: 15px/1.5 system-ui, sans-serif; max-width: 52rem; margin: 2rem auto; padding: 0 1rem; }
+      h1 { font-size: 1.3rem; margin-bottom: .25rem; }
+      code, .row, .preview { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+      .hint, .count, .said { color: #666; font-size: .85rem; }
+      .samples button { font: inherit; margin-right: .4rem; }
+      .entries { list-style: none; padding: 0; }
+      .entries > li { border-top: 1px solid #eee; padding: .35rem 0; }
+      .head { display: flex; align-items: baseline; gap: .5rem; }
+      .head .preview { flex: 1; font-size: .85rem; color: #333; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .time { color: #999; font-size: .8rem; }
+      .toggle, .copy, .fold { font: inherit; border: 0; background: none; cursor: pointer; color: #666; }
+      .toggle { width: 1.5rem; }
+      .tree { padding: .25rem 0 .5rem; font-size: .85rem; }
+      .row { display: flex; gap: .35rem; }
+      .fold { width: 1rem; padding: 0; text-align: left; }
+      .k, .t-kw { color: #7a3e9d; }
+      .t-str { color: #0a7d3e; }
+      .t-num { color: #b35c00; }
+      .t-nil, .t-bool { color: #999; }
+      .t-more { color: #bbb; }
+      .d1 { margin-left: 1rem; }
+      .d2 { margin-left: 2rem; }
+      .d3 { margin-left: 3rem; }
+      .d4 { margin-left: 4rem; }
+      .d5 { margin-left: 5rem; }
+    </style>
+  </head>
+  <body>
+    <div id="app"><!--app--></div>
+    <script type="importmap" nonce="NONCE">
+      {"imports": {"squint-cljs/core.js": "https://esm.sh/squint-cljs@0.14.208/core.js"}}
+    </script>
+    <script type="module" src="/client.mjs"></script>
+  </body>
+</html>

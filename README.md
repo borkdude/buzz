@@ -152,6 +152,13 @@ the Content-Security-Policy header:
 Leave out the comment and the page still works. It arrives empty and the browser
 fills it in.
 
+## Examples
+
+- [examples/auth](examples/auth) signs two users in and gives each of them
+  their own data.
+- [examples/tap](examples/tap) shows everything the process taps, with a tree
+  the browser folds by itself.
+
 ## Development
 
     bb dev    # the demo, plus an nrepl on 1667
