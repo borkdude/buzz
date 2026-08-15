@@ -13,8 +13,20 @@
 ;; alice signs in with wonderland, bob with builder. Only the salt and the hash
 ;; are here, never the password. `password-hash` makes a new pair.
 (def ^:private users
-  {"alice" "6IjuyNF3OzL2emdkA486AA==$dUpGnuLro04li0/jAnZW2tPtPyQdEFGDjvGeDSa6fnk="
-   "bob"   "6WTtNcPfhUki/5jxwLgUkg==$ilGAY2ddxwfRGMngcVy7RpFhVWs2k3a7IhxTquZrwxc="})
+  {"alice" {:role :admin
+            :password "6IjuyNF3OzL2emdkA486AA==$dUpGnuLro04li0/jAnZW2tPtPyQdEFGDjvGeDSa6fnk="}
+   "bob"   {:role :user
+            :password "6WTtNcPfhUki/5jxwLgUkg==$ilGAY2ddxwfRGMngcVy7RpFhVWs2k3a7IhxTquZrwxc="}})
+
+(defn- role-of [user] (:role (get users user)))
+
+;; Refuses by throwing, so the browser sees a rejected promise. Every guarded
+;; handler calls this itself. A component that draws no admin control still
+;; registers its handler, because the handler map is built once for the
+;; component rather than once per render.
+(defn- admin! [role]
+  (when-not (= :admin role)
+    (throw (ex-info "not allowed" {:role role}))))
 
 ;; State the server owns, per user.
 (defonce notes (atom {"alice" ["water the plants"]
@@ -65,7 +77,7 @@
 ;; Answers with the response that signs someone in, and refuses by throwing.
 ;; The browser's promise rejects, which is all it needs to know.
 (defn sign-in! [user password]
-  (let [stored (get users user)]
+  (let [stored (:password (get users user))]
     (when-not (and stored (password-ok? password stored))
       (throw (ex-info "no such name and password" {:user user})))
     (let [t (encode (random-bytes 24))]
@@ -78,7 +90,7 @@
 
 ;; `user` is a plain string the connection was built with, so it reaches the
 ;; browser through a slot like any other server value.
-(defui board [user token]
+(defui board [user role token]
   (let [draft (local-state "")]
     [:div
      [:h1 "notes for " (server user)]
@@ -98,6 +110,16 @@
                            (server! (swap! notes update user conj (client @draft)))
                            (reset! draft ""))}
       "add"]
+     ;; Drawn for an admin only. The slot decides what the page shows. It does
+     ;; not decide what the handler does, so the handler checks the role itself.
+     ;; A boolean rather than the role, because a keyword arrives as a string.
+     (when (server (= :admin role))
+       [:p [:a {:href "/admin"} "everyone's notes"] " "
+        [:button {:on-click (fn [_]
+                              (server! (do (admin! role)
+                                           (swap! notes update-vals
+                                                  #(conj % "remember the milk")))))}
+         "remind everyone"]])
      [:p [:button {:on-click (^:async fn [_]
                               (await (server! (reply :ok (sign-out! token))))
                               (set! js/window.location "/signin"))}
@@ -111,8 +133,9 @@
               ;; The one place an identity can enter. A handler is a closure over
               ;; this map and never sees a request, so it acts as whoever opened
               ;; the connection.
-              :state (fn [req] {:user (whoami req) :token (token req)})
-              :component (fn [{:keys [user token]}] (board user token))}]}))
+              :state (fn [req] (let [user (whoami req)]
+                                 {:user user :role (role-of user) :token (token req)}))
+              :component (fn [{:keys [user role token]}] (board user role token))}]}))
 
 ;; Requests Buzz does not own return nil, so the application decides what
 ;; reaches it. Everything Buzz serves sits behind the same check: the page, the
@@ -134,7 +157,7 @@
      [:button {:on-click (^:async fn [_]
                           (try
                             (await (server! (reply :ok (sign-in! (client (:who @form))
-                                                                (client (:pw @form))))))
+                                                                 (client (:pw @form))))))
                             (set! js/window.location "/")
                             (catch :default _
                               (swap! form assoc :err "that is not a name and password I know"))))}
@@ -146,10 +169,50 @@
                  :path "/signin"
                  :mounts [{:el "signin" :component (fn [_] (doorbell))}]}))
 
+;; Only an admin gets past the check in `app`, so only an admin opens this
+;; stream. That is worth having, but it is not what makes `clear!` safe: the
+;; handler checks the role itself, the way every handler that does something
+;; only some people may do has to.
+;;
+;; The role is read when the stream opens. Taking it away reaches an open
+;; connection when it next reconnects, so the gate alone would go on trusting a
+;; role that has been withdrawn.
+(defn- clear! [role who]
+  (admin! role)
+  ;; the browser says which list to empty, so only a name that exists may be one
+  (when (contains? users who)
+    (swap! notes assoc who [])))
+
+(defui console [role]
+  [:div
+   [:h1 "everyone's notes"]
+   [:ul
+    ;; joined here rather than in the browser, so the body stays free of
+    ;; anything the page would have to import
+    (for [row (server (mapv (fn [[who ns]] {:who who :notes (str/join ", " ns)})
+                            (sort @notes)))]
+      [:li {:key (:who row)}
+       [:strong (:who row)] " " (:notes row) " "
+       [:button {:on-click (fn [_] (server! (clear! role (client (:who row)))))}
+        "clear"]])]
+   [:p [:a {:href "/"} "back"]]])
+
+(def ^:private admin-ui
+  (buzz/handler {:title "everyone's notes"
+                 :path "/admin"
+                 :watch [notes]
+                 :mounts [{:el "admin"
+                           :state (fn [req] {:role (role-of (whoami req))})
+                           :component (fn [{:keys [role]}] (console role))}]}))
+
 (defn app [req]
   (or (signin-ui req)                       ; /signin and its stream, open to all
+      (when (= :admin (role-of (whoami req))) (admin-ui req))
       (when (whoami req) (notes-ui req))
-      {:status 303 :headers {"Location" "/signin"}}))
+      ;; Signed in but not allowed here, rather than not signed in at all.
+      (if (whoami req)
+        {:status 303 :headers {"Location" "/"}}
+        {:status 303 :headers {"Location" "/signin"}})))
 
 (defn -main [& _]
   (http/run-server app {:port 1360 :ip "127.0.0.1"})
