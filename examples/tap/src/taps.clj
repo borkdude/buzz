@@ -1,7 +1,8 @@
 (ns taps
   "View `tap>` values in a browser."
-  (:require [buzz.core :refer [client defpart defui local-state reply server server!]]
+  (:require [buzz.core :refer [client defui local-state reply server server!]]
             [buzz.handler :as buzz]
+            [cheshire.core :as json]
             [org.httpkit.server :as http]))
 
 (def ^:private port 1370)
@@ -27,55 +28,21 @@
   (binding [*print-length* 10 *print-level* 3]
     (pr-str v)))
 
-(defn- kind [v]
-  (cond (nil? v)     "nil"
-        (boolean? v) "bool"
-        (number? v)  "num"
-        (string? v)  "str"
-        (keyword? v) "kw"
-        (map? v)     "map"
-        (set? v)     "set"
-        (vector? v)  "vec"
-        (seq? v)     "seq"
-        :else        "other"))
-
-(defn- summary [v]
-  (let [[open close] (cond (map? v)    ["{" "}"]
-                           (set? v)    ["#{" "}"]
-                           (vector? v) ["[" "]"]
-                           :else       ["(" ")"])]
-    (str open (if (counted? v) (count v) "…") close)))
-
-(defn- children [v]
-  (if (map? v)
-    (map (fn [e] [(pr-str (key e)) (val e)]) (take max-children v))
-    (map (fn [x] [nil x]) (take max-children v))))
-
-;; Rows are flat, so each one carries its depth and the paths above it.
-(defn- add-rows [acc v path depth ancestors label]
-  (let [branch? (and (coll? v) (seq v) (< depth max-depth))
-        acc     (conj acc {:path path
-                           :depth depth
-                           :ancestors ancestors
-                           :key label
-                           :kind (kind v)
-                           :branch branch?
-                           :text (if (coll? v) (summary v) (clip (pr-str v) max-text))})]
-    (if-not branch?
-      acc
-      (let [under (conj ancestors path)
-            acc   (reduce (fn [a [i [k child]]]
-                            (add-rows a child (str path "." i) (inc depth) under k))
-                          acc
-                          (map-indexed vector (children v)))]
-        ;; Do not count a lazy sequence.
-        (if (seq (drop max-children v))
-          (conj acc {:path (str path ".more") :depth (inc depth) :ancestors under
-                     :key nil :kind "more" :branch false :text "…"})
-          acc)))))
-
-(defn- rows [v id]
-  (add-rows [] v (str id) 0 [] nil))
+(defn- jsonable
+  "A value as json, bounded in depth and width. A set arrives as an array and
+  anything json has no word for is printed, so a keyword keeps its colon."
+  [v depth]
+  (cond
+    (or (nil? v) (boolean? v) (number? v) (string? v)) v
+    (> depth max-depth) (clip (preview-str v) max-text)
+    (map? v)  (cond-> (into {} (map (fn [e] [(let [k (key e)] (if (string? k) k (pr-str k)))
+                                             (jsonable (val e) (inc depth))]))
+                            (take max-children v))
+                (seq (drop max-children v)) (assoc "…" "…"))
+    ;; `drop` rather than `count`, so an infinite sequence answers this too
+    (coll? v) (cond-> (mapv #(jsonable % (inc depth)) (take max-children v))
+                (seq (drop max-children v)) (conj "…"))
+    :else (clip (pr-str v) max-text)))
 
 (defn record! [v]
   (let [id (swap! counter inc)]
@@ -84,7 +51,7 @@
                          :at (now)
                          :value v
                          :preview (clip (preview-str v) 200)
-                         :rows (rows v id)}]
+                         :data (json/generate-string (jsonable v 0))}]
                        (take (dec keep-n))
                        l)))))
 
@@ -122,23 +89,12 @@
 
 ;; Keep tapped values on the server.
 (defn- shown [entries]
-  (mapv #(select-keys % [:id :at :preview :rows]) entries))
-
-(defpart tree-row [r folded]
-  [:div {:key (:path r) :class (str "row d" (:depth r))}
-   (if (:branch r)
-     [:button.fold {:on-click (fn [_] (swap! folded (fn [m] (assoc m (:path r)
-                                                                  (not (get m (:path r)))))))}
-      (if (get @folded (:path r)) "▸" "▾")]
-     [:span.fold "·"])
-   (when (:key r) [:span.k (:key r)])
-   [:span {:class (str "v t-" (:kind r))} (:text r)]])
+  (mapv #(select-keys % [:id :at :preview :data]) entries))
 
 (defui viewer []
   (let [items  (server (shown @log))
         n      (server (count @log))
         open   (local-state {})
-        folded (local-state {})
         said   (local-state nil)]
     [:div
      [:h1 "taps"]
@@ -164,11 +120,11 @@
                                       (reset! said (str "copied " (count edn)
                                                         " characters and set @taps/copied"))))}
            "copy"]]
+         ;; The whole tree is one attribute. Reagami sets every attribute but
+         ;; innerHTML on a custom element, and the component reads its data
+         ;; from there, so a patch redraws it.
          (when (get @open (:id e))
-           [:div.tree
-            (for [r (:rows e)
-                  :when (not (some (fn [a] (get @folded a)) (:ancestors r)))]
-              (tree-row r folded))])])]
+           [:json-viewer.tree {:data (:data e)}])])]
      [:p.said (or @said "")]]))
 
 (def ui

@@ -15,3 +15,7 @@ on port 1670:
 ```
 
 Click `copy` to copy the EDN and put the original value in `@taps/copied`.
+
+The tree is [@alenaksu/json-viewer](https://github.com/alenaksu/json-viewer),
+loaded from esm.sh. It takes the value as a JSON string in one attribute, so a
+set arrives as an array. Keywords keep their colon.
