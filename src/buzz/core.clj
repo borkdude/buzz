@@ -257,7 +257,9 @@
 (defn js-name
   "The name a part has in the compiled module: its qualified name, munged.
   The dot is munged here as well, since a flat const has no namespace
-  objects, so two parts collide only when their qualified names do."
+  objects, so two parts collide only when their qualified names do. The
+  namespace also keeps the name from being a bare JavaScript reserved word,
+  which `munge` does not rename and the compiler reads as an operator."
   [sym]
   (str/replace (munge (str sym)) "." "_DOT_"))
 

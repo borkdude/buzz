@@ -296,3 +296,17 @@
       (finally
         (redefine! '(buzz.core/defpart tally-button []
                       [:button {:on-click (fn [_] (server! (swap! clicks inc)))} "+"]))))))
+
+;; A JavaScript reserved word is a fine part name. The module name carries the
+;; namespace, so it is never bare `delete`, which munge would not rename and
+;; the compiler reads as an operator.
+(defpart delete [x]
+  [:li.trash x])
+
+(defui trash-list []
+  [:ul (delete "old")])
+
+(deftest a-part-may-be-named-after-a-reserved-word
+  (let [inst (trash-list)]
+    (is (re-find #"buzz_DOT_core_test_SLASH_delete\(\"old\"\)" (:js inst)))
+    (is (str/includes? (pr-str ((:ssr inst))) "old"))))
