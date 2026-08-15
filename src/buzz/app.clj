@@ -41,8 +41,8 @@
 ;; browser gets an `rpc!` call carrying `id` — which is a binding the browser
 ;; itself introduced, in the `for`.
 
-;; Spliced into `todo-app`, so `id` here is a binding the browser made and the
-;; handlers below belong to the enclosing component.
+;; A function the browser calls once per row. The handlers belong to it, so
+;; the wire names them todo-row/0 and todo-row/1 wherever it is used.
 
 (defpart todo-row [{:keys [id title done]}]
   [:li {:key id}

@@ -108,40 +108,52 @@
     (testing "b/reply says the response carries the value"
       (is (true? (:reply h))))))
 
-;; A part is not called. It is spliced into whichever component uses it, so what
-;; is inside belongs to that component. `item` is a browser value. `store` is
-;; marked ^:server, so it is substituted rather than bound and keeps meaning
-;; what it means where the part was used.
-(defpart row [item ^:server store]
-  [:li {:on-click (fn [_] (server! (swap! store conj (client item))))}
-   item " of " (server (count @store))])
+;; A part is a function of browser values. What the server owns enters at the
+;; call site: the component writes the slot, and the handler, and passes both
+;; down. So the component's head is the whole list of what crosses the wire.
+(defpart row [item n add!]
+  [:li {:on-click add!} item " of " n])
 
 (defui shelf [store]
-  [:ul (row "a" store) (row "b" store)])
+  [:ul (row "a" (server (count @store))
+            (fn [_] (server! (swap! store conj (client "a")))))
+       (row "b" (server (count @store))
+            (fn [_] (server! (swap! store conj (client "b")))))])
 
-(deftest a-part-is-spliced-into-the-component-that-uses-it
+(deftest a-part-takes-server-values-as-arguments
   (let [store (atom [])
         inst  (shelf store)]
 
-    (testing "the handlers are named after the component, not the part"
-      (is (= ["shelf/0" "shelf/1"] (sort (keys (:handlers inst))))))
-
-    (testing "each use of the part brings its own slot"
+    (testing "the slots belong to the component that wrote them"
       (is (= [0 0] ((:slots inst)))))
 
-    (testing "a ^:server parameter reads the atom the component was given"
+    (testing "so do the handlers it passed down"
+      (is (= ["shelf/0" "shelf/1"] (sort (keys (:handlers inst))))))
+
+    (testing "a passed handler closes over what the component was given"
       ((:fn (get (:handlers inst) "shelf/0")) "a")
       (is (= ["a"] @store))
       (is (= [1 1] ((:slots inst)))))
 
-    (testing "an ordinary parameter stays a browser value"
-      (is (re-find #"\"a\"" (:js inst)))
-      (is (not (some #{"a"} ((:slots inst))))))
-
     (testing "the wrong number of arguments is an error"
-      (is (re-find #"takes 2 arguments, given 1"
+      (is (re-find #"takes 3 arguments, given 1"
                    (refusal '(buzz.core/defui bad []
                                [:ul (buzz.core-test/row "a")])))))))
+
+;; A mark that makes a value or state names the component that owns it, so a
+;; part asking for one is told where it goes.
+(deftest a-mark-that-needs-a-component-is-refused-in-a-part
+  (testing "a slot belongs to a component"
+    (is (re-find #"value the component owns"
+                 (refusal '(buzz.core/defpart p1 [] [:li (server 1)])))))
+
+  (testing "so does a local"
+    (is (re-find #"state the component owns"
+                 (refusal '(buzz.core/defpart p2 [] [:li @(local-state 0)])))))
+
+  (testing "and there are no server parameters"
+    (is (re-find #"pass the value, or the handler"
+                 (refusal '(buzz.core/defpart p3 [^:server q] [:li q]))))))
 
 ;; The one mark the server never sees. A local is an atom the browser makes at
 ;; mount, so nothing about it travels except the code that builds it.
@@ -189,8 +201,8 @@
         (is (some? slot))
         (is (str/includes? params slot))))))
 
-;; A part with no server needs of its own is a function the browser calls.
-;; Its handlers keep its name, so a component that uses it is not renumbered.
+;; A part's own handlers keep its name, so a component that uses one is not
+;; renumbered by it.
 (def basket (atom []))
 
 (defpart fruit-row [item]
@@ -227,7 +239,7 @@
                    (refusal '(buzz.core/defui bad-call []
                                [:ul (buzz.core-test/fruit-row "a" "b")])))))))
 
-;; The reason parts became functions. A spliced part inlining itself would
+;; The reason parts are functions. An inlined part calling itself would
 ;; expand forever, and a function calling itself is a Tuesday.
 (def forest-data
   (atom {:label "root"
@@ -253,12 +265,6 @@
 
     (testing "the first paint walks the whole tree"
       (is (str/includes? (pr-str (apply (:ssr inst) ((:slots inst)))) "a1")))))
-
-(deftest a-spliced-part-cannot-splice-itself
-  (is (re-find #"spliced into itself"
-               (refusal '(do (buzz.core/defpart loopy [^:server q]
-                               [:li (loopy q)])
-                             (buzz.core/defui uses-loopy [q] [:ul (loopy q)]))))))
 
 ;; Editing a function part reaches the page through the module and the merged
 ;; handler map, both read per request, so the components are left alone.

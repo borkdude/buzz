@@ -90,8 +90,9 @@ You can define a part of a component with `defpart`. A part is like a component,
 
 A part is a function the browser calls, so it can call itself and a tree can
 draw a tree. A `server!` inside one registers handlers under the part's own
-name. A part that needs the caller, such as one with a `^:server` parameter,
-is spliced into the component instead. See [doc/parts.md](doc/parts.md).
+name. Server values and local state belong to the component: write them in
+the `defui` and pass them down as arguments, so the component's head is the
+whole list of what crosses the wire. See [doc/parts.md](doc/parts.md).
 
 ## Mounting
 

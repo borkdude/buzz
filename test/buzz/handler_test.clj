@@ -425,20 +425,17 @@
         (testing "and the watches on its state go with it"
           (is (until 3000 #(empty? (.getWatches q)))))))))
 
-;; A part leaves no trace at runtime: it is spliced in when the component that
-;; uses it expands. Editing one has to expand those components again, or they
-;; keep running the JavaScript the old part produced.
-(defpart badge [^:server q]
-  [:em (server @q)])
+;; A part is compiled once and the module is compiled per request, so editing
+;; one reaches every open page without the components that call it being
+;; expanded again.
+(defpart badge [n]
+  [:em n])
 
 (defui card [q]
-  [:p (badge q)])
+  [:p (badge (server @q))])
 
-(def ^:private wider-badge
-  '(defpart badge [^:server q] [:em (server @q) (server (inc @q))]))
-
-(def ^:private narrow-badge
-  '(defpart badge [^:server q] [:em (server @q)]))
+(def ^:private louder-badge '(defpart badge [n] [:em n "!"]))
+(def ^:private plain-badge  '(defpart badge [n] [:em n]))
 
 (def ^:private card-spec
   {:title "card"
@@ -446,26 +443,25 @@
              :state (fn [_req] {:q (atom 0)})
              :component (fn [st] (card (:q st)))}]})
 
-(deftest editing-a-part-reloads-the-components-that-use-it
+(deftest editing-a-part-reloads-the-pages-that-show-it
   (with-connection card-spec
-    (fn [{:keys [rdr session]}]
-      (let [q (:q (connection-state session))]
-        (try
-          (testing "the part contributes its slot to the component"
-            (is (= ["mount" "card" "app" [0]] (next-event rdr))))
+    (fn [{:keys [rdr]}]
+      (try
+        (testing "the component passes its slot through the part"
+          (is (= ["mount" "card" "app" [0]] (next-event rdr))))
 
-          (testing "editing the part reloads the component, which was not touched"
-            (redefine! wider-badge)
-            (let [[kind _rev id vals] (next-event rdr)]
-              (is (= "reload" kind))
-              (is (= "card" id))
-              (is (= [0 1] vals))))
+        (testing "editing the part tells the page to fetch the module again"
+          (redefine! louder-badge)
+          (let [[kind _rev id vals] (next-event rdr)]
+            (is (= "reload" kind))
+            (is (= "card" id))
+            (is (= [0] vals))))
 
-          (testing "and the component now runs what the new part produced"
-            (swap! q inc)
-            (is (= ["patch" "card" [1 2]] (next-event rdr))))
+        (testing "and the module serves what the part says now"
+          (is (str/includes? (:body ((handler/handler card-spec) {:uri "/components.mjs"}))
+                             "\"!\"")))
 
-          (finally (redefine! narrow-badge)))))))
+        (finally (redefine! plain-badge))))))
 
 ;; A function part rides along: the module defines it once, the component
 ;; calls it by name, and its handler is dispatched through the mount that
