@@ -146,6 +146,18 @@ are where several of them naturally live. A review of the auth example found the
 same gaps from the other direction: an open stream endpoint with no cap, and no
 rate limit on the one endpoint that runs a key derivation per attempt.
 
+Two cookie attributes belong here too, on the browser token. `Secure` needs no
+setting, since `X-Forwarded-Proto` says whether the request arrived over https.
+`__Host-` would stop a neighbouring subdomain overwriting the token, which
+denies service to whoever holds the real one rather than granting anything: the
+token unlocks nothing on its own, since acting on a connection also needs a
+session id from that browser's own stream and whatever the application
+authenticates with. Both are close to free, and neither is urgent for the same
+reason.
+
+Disconnecting a connection whose authority has been withdrawn is a related but
+separate question, in [0003](0003-revocation-and-open-connections.md).
+
 ## 6. A clustering story
 
 Server closures cannot migrate between processes, so the honest answer is sticky
