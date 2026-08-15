@@ -47,9 +47,9 @@ goes:
 ## Handlers in the part
 
 A `(server! ...)` over global state works in the body itself. Its handlers
-are registered under the part's own name, `node/0` above, so using a part
-does not renumber a component and reordering calls changes nothing on the
-wire. Such a handler closes over globals and receives `(client ...)`
+are registered under the part's qualified name, `myapp/node/0` above, so
+using a part does not renumber a component and reordering calls changes
+nothing on the wire. Such a handler closes over globals and receives `(client ...)`
 arguments. It never sees a mount's `:state`: the part is compiled once, not
 once per connection, which is what the passed handler above is for.
 
@@ -78,8 +78,6 @@ longer fits fails loudly.
 
 - Mutual recursion needs the callee to exist first. Define `b` before `a`, or
   evaluate `a` again once `b` exists, so the dependency is recorded.
-- Part names share one module scope. Two parts with the same name in
-  different namespaces collide there.
 - A handler passed down as an argument is blanked for the first paint by the
   `rpc!` call inside it. A passed function that touches `js/` or `await`
   outside one does not compile on the server yet.

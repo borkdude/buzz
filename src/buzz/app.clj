@@ -42,7 +42,7 @@
 ;; itself introduced, in the `for`.
 
 ;; A function the browser calls once per row. The handlers belong to it, so
-;; the wire names them todo-row/0 and todo-row/1 wherever it is used.
+;; the wire names them buzz.app/todo-row/0 and /1 wherever it is used.
 
 (defpart todo-row [{:keys [id title done]}]
   [:li {:key id}

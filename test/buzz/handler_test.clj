@@ -488,11 +488,11 @@
 
       (testing "the module defines the part the component calls"
         (let [body (:body ((handler/handler stepped-spec) {:uri "/components.mjs"}))]
-          (is (str/includes? body "const step_button = "))
-          (is (str/includes? body "step_button("))))
+          (is (str/includes? body "const buzz_DOT_handler_test_SLASH_step_button = "))
+          (is (str/includes? body "buzz_DOT_handler_test_SLASH_step_button("))))
 
       (testing "an rpc reaches the part's handler through the mount"
-        (is (= 204 (first (rpc conn "step-button/0" []))))
+        (is (= 204 (first (rpc conn "buzz.handler-test/step-button/0" []))))
         (is (= 1 @steps))
         (is (= ["patch" "stepped-panel" [1]] (next-event rdr)))))))
 

@@ -217,15 +217,15 @@
   (let [inst (fruit-list)]
 
     (testing "the component calls the part by name"
-      (is (re-find #"fruit_row\(\"apple\"\)" (:js inst)))
+      (is (re-find #"buzz_DOT_core_test_SLASH_fruit_row\(\"apple\"\)" (:js inst)))
       (is (not (str/includes? (:js inst) "swap"))))
 
     (testing "and records that it uses it"
       (is (= ['buzz.core-test/fruit-row] (:parts inst))))
 
     (testing "the handler belongs to the part, not the component"
-      (is (= ["fruit-row/0"] (keys (:handlers inst))))
-      ((:fn (get (:handlers inst) "fruit-row/0")) "apple")
+      (is (= ["buzz.core-test/fruit-row/0"] (keys (:handlers inst))))
+      ((:fn (get (:handlers inst) "buzz.core-test/fruit-row/0")) "apple")
       (is (= ["apple"] @basket)))
 
     (testing "the part contributes no slots"
@@ -258,10 +258,10 @@
   (let [inst (forest)]
 
     (testing "the component passes the tree through one slot"
-      (is (re-find #"branch\(slot__\d+\)" (:js inst))))
+      (is (re-find #"buzz_DOT_core_test_SLASH_branch\(slot__\d+\)" (:js inst))))
 
     (testing "the part's own code calls itself"
-      (is (str/includes? (:buzz/js (meta branch)) "branch(")))
+      (is (str/includes? (:buzz/js (meta branch)) "buzz_DOT_core_test_SLASH_branch(")))
 
     (testing "the first paint walks the whole tree"
       (is (str/includes? (pr-str (apply (:ssr inst) ((:slots inst)))) "a1")))))
@@ -291,7 +291,7 @@
           (is (= (inc rev) @b/revision)))
         (testing "and the handler map answers with the new code"
           (reset! clicks 0)
-          ((:fn (get (:handlers inst) "tally-button/0")))
+          ((:fn (get (:handlers inst) "buzz.core-test/tally-button/0")))
           (is (= 2 @clicks))))
       (finally
         (redefine! '(buzz.core/defpart tally-button []

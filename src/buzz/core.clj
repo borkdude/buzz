@@ -118,7 +118,7 @@
   (let [qualified (symbol (str *ns*) (str nm))
         {:keys [js ssr-forms handlers parts]}
         (binding [*self* {:name nm :qualified qualified :arity (count argv)}]
-          (split-part-body nm argv body))]
+          (split-part-body qualified argv body))]
     `(do (let [was# (when-let [v# (resolve '~nm)] (when (bound? v#) @v#))]
            (def ~nm (with-meta (fn ~argv ~@ssr-forms)
                       {::fn-part true
@@ -254,11 +254,18 @@
         [scope' bvec'] (conv-bindings bvec scope lambda? comp-id acc)]
     (apply list head bvec' (mapv #(conv % scope' lambda? comp-id acc) body))))
 
+(defn js-name
+  "The name a part has in the compiled module: its qualified name, munged.
+  The dot is munged here as well, since a flat const has no namespace
+  objects, so two parts collide only when their qualified names do."
+  [sym]
+  (str/replace (munge (str sym)) "." "_DOT_"))
+
 (defn- js-part-sym
   "The symbol a part call compiles to. Munged the way the compiler munges a
   reference, so the call sites and the module definition agree."
-  [nm]
-  (symbol (munge (name nm))))
+  [qualified]
+  (symbol (js-name qualified)))
 
 (defn- fn-part-call
   "A call to a function part: converted arguments around the module name. The
@@ -269,8 +276,8 @@
     (throw (ex-info (str simple " takes " arity " arguments, given " (count args))
                     {:part qualified :args (vec args)})))
   (swap! acc update :parts conj qualified)
-  (swap! acc update :part-syms assoc (js-part-sym simple) qualified)
-  (apply list (js-part-sym simple)
+  (swap! acc update :part-syms assoc (js-part-sym qualified) qualified)
+  (apply list (js-part-sym qualified)
          (mapv #(conv % scope lambda? comp-id acc) args)))
 
 (defn- conv
@@ -430,18 +437,21 @@
 (defn- split-part-body
   "The pieces a part is made of. A slot and a local belong to a component, so
   a part asking for one is told where it goes instead."
-  [nm argv body]
+  [qualified argv body]
   (let [acc   (atom {:slots [] :handlers [] :locals [] :parts #{} :part-syms {}})
-        forms (mapv #(conv % (binder-syms argv) false (str nm) acc) body)
-        {:keys [slots handlers locals parts part-syms]} @acc]
+        ;; handler ids carry the qualified name, so two parts collide only
+        ;; when their qualified names do
+        forms (mapv #(conv % (binder-syms argv) false (str qualified) acc) body)
+        {:keys [slots handlers locals parts part-syms]} @acc
+        nm    (name qualified)]
     (when (seq slots)
       (throw (ex-info (str "(server ...) in " nm " is a value the component owns. "
                            "Pass it as an argument: (" nm " (server ...))")
-                      {:part nm :expr (:expr (first slots))})))
+                      {:part qualified :expr (:expr (first slots))})))
     (when (seq locals)
       (throw (ex-info (str "(local-state ...) in " nm " is state the component owns. "
                            "Make it there and pass the atom")
-                      {:part nm})))
+                      {:part qualified})))
     {:js        (to-js (apply list 'fn argv forms))
      ;; the browser form names parts by their module name, and the same form
      ;; runs here for the first paint, so the name goes back to the var
@@ -455,11 +465,6 @@
   Public because `defpart` expands into a call to it."
   []
   (swap! revision inc))
-
-(defn js-name
-  "The name a part has in the compiled module."
-  [sym]
-  (munge (name sym)))
 
 (defn parts-closure
   "Every function part reachable from `syms`: its qualified name and its
