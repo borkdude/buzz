@@ -41,11 +41,46 @@
 ;; /rpc is a plain request. Nothing is bidirectional, so there is no upgrade to
 ;; negotiate and no socket to nurse: EventSource reconnects on its own.
 ;;
-;; session -> {:ch channel :mounted [{:el :state :instance :spec}]}. A connection
-;; needs its own instances because a handler closes over the arguments its
-;; component was called with, and it needs a session id because the RPC arrives
-;; on a separate request that has to find them again.
+;; session -> {:ch channel :owner browser token :page the handler that built it
+;;             :mounted [{:el :state :instance :spec}]}. A connection needs its
+;; own instances because a handler closes over the arguments its component was
+;; called with, and it needs a session id because the RPC arrives on a separate
+;; request that has to find them again.
 (defonce conns (atom {}))
+
+;; A session id arrives in the rpc body, so on its own it lets anyone who learns
+;; one act as the connection it belongs to, whatever they signed in as. Buzz
+;; gives a browser a token of its own and wants it back with every rpc.
+;;
+;; Its own, rather than whatever the application already sets, because those
+;; cookies change for reasons that have nothing to do with a connection and a
+;; stream that quietly stopped answering when an unrelated one was written would
+;; be very hard to explain.
+;;
+;; The browser rather than the connection, because a cookie belongs to an origin
+;; and two tabs of one page would otherwise take the token away from each other.
+;;
+;; Lax rather than Strict, because Strict is withheld on a cross site
+;; navigation, so arriving from a link elsewhere would look like a browser with
+;; no token and mint a second one over the first. Lax is still withheld from a
+;; cross site post, which is the half that guards the rpc.
+(def ^:private token-cookie "buzz-browser")
+
+;; Built once. Every rpc reads the cookies, and compiling this per call cost
+;; about as much as parsing the request body.
+(def ^:private token-re
+  (re-pattern (str "(?:^|;\\s*)" token-cookie "=([^;]+)")))
+
+(defn- browser-token [req]
+  (some->> (get-in req [:headers "cookie"])
+           (re-find token-re)
+           second))
+
+(defn- token-headers
+  "What gives a browser a token. HttpOnly, so nothing on the page can read it
+  and carry it elsewhere."
+  [token]
+  {"Set-Cookie" (str token-cookie "=" token "; Path=/; HttpOnly; SameSite=Lax")})
 
 (defn- event!
   "One SSE frame. JSON escapes newlines inside strings, so a value can never
@@ -85,28 +120,31 @@
   (doseq [m mounted, a (refs (:state m))]
     (remove-watch a [::render session (:id (:instance m))])))
 
-(defn- open-stream [session ch req mounts]
-  (http/send! ch {:status 200
-                  :headers {"Content-Type" "text/event-stream"
-                            "Cache-Control" "no-cache"
-                            "X-Accel-Buffering" "no"}}
-              false)
-  ;; The session id is what an RPC arrives with, so it goes out only once there
-  ;; is something here to find under it. Building the mounts renders every
-  ;; component, which is long enough for a browser to have answered.
-  (let [mounted (mapv #(build % req) mounts)]
-    (swap! conns assoc session {:ch ch :mounted mounted})
-    (event! ch ["session" session])
-    (doseq [{:keys [el instance sent] :as m} mounted]
-      (watch-session! ch session m)
-      (let [vals ((:slots instance))]
-        (reset! sent vals)
-        (event! ch ["mount" (:id instance) el vals])))))
+(defn- open-stream [session ch req mounts page]
+  (let [held  (browser-token req)
+        token (or held (str (random-uuid)))]
+    (http/send! ch {:status 200
+                    :headers (cond-> {"Content-Type" "text/event-stream"
+                                      "Cache-Control" "no-cache"
+                                      "X-Accel-Buffering" "no"}
+                               (nil? held) (merge (token-headers token)))}
+                false)
+    ;; The session id is what an RPC arrives with, so it goes out only once there
+    ;; is something here to find under it. Building the mounts renders every
+    ;; component, which is long enough for a browser to have answered.
+    (let [mounted (mapv #(build % req) mounts)]
+      (swap! conns assoc session {:ch ch :mounted mounted :owner token :page page})
+      (event! ch ["session" session])
+      (doseq [{:keys [el instance sent] :as m} mounted]
+        (watch-session! ch session m)
+        (let [vals ((:slots instance))]
+          (reset! sent vals)
+          (event! ch ["mount" (:id instance) el vals]))))))
 
-(defn- events [req mounts]
+(defn- events [req mounts page]
   (let [session (str (random-uuid))]
     (http/as-channel req
-                     {:on-open  (fn [ch] (open-stream session ch req mounts))
+                     {:on-open  (fn [ch] (open-stream session ch req mounts page))
                       :on-close (fn [_ _]
                                   (unwatch-session! session (:mounted (get @conns session)))
                                   (swap! conns dissoc session))})))
@@ -120,10 +158,22 @@
 ;; and the log said nothing about which handler it was. Now it answers and the
 ;; browser's promise rejects. The detail stays here: an exception message can
 ;; carry more than a browser should be told.
-(defn- rpc [req]
-  (let [[session handler-id args] (json/parse-string (slurp (:body req)))]
-    (if-let [h (some #(get (:handlers (:instance %)) handler-id)
-                     (:mounted (get @conns session)))]
+;;
+;; Three things have to agree before a handler runs. The header, because a
+;; request that carries one is not a form a page elsewhere can post: it needs a
+;; preflight, and Buzz answers none. Same site is not the same as same origin,
+;; so a neighbouring subdomain would otherwise be allowed to try. The page,
+;; because `conns` is one map for every handler in the process and an id from
+;; one page would otherwise be answered by another one's endpoint. The token,
+;; because a session id on its own says nothing about who is asking.
+(defn- rpc [req page]
+  (let [[session handler-id args] (json/parse-string (slurp (:body req)))
+        conn (get @conns session)]
+    (if-let [h (and (get-in req [:headers "x-buzz-rpc"])
+                    (= (:page conn) page)
+                    (= (:owner conn) (browser-token req))
+                    (some #(get (:handlers (:instance %)) handler-id)
+                          (:mounted conn)))]
       (try
         (let [v (apply (:fn h) args)]
           (case (:reply h)
@@ -285,11 +335,15 @@
               mounts)
       (str/replace "NONCE" nonce)))
 
+;; The token is handed out here as well as at the stream, so that a browser
+;; opening two tabs at once already has one before either stream asks.
 (defn- index-page [req spec]
   (let [nonce (str (random-uuid))]
     {:status 200
-     :headers {"Content-Type" "text/html"
-               "Content-Security-Policy" (csp nonce)}
+     :headers (cond-> {"Content-Type" "text/html"
+                       "Content-Security-Policy" (csp nonce)}
+                (nil? (browser-token req))
+                (merge (token-headers (str (random-uuid)))))
      :body (if (:index spec) (rendered-page nonce req spec) (generated-page nonce req spec))}))
 
 (defn handler
@@ -309,6 +363,10 @@
     (add-watch a ::render broadcast-patch!))
   @heartbeat
   (let [path   (or path "")
+        ;; what tells one handler's connections from another's. The path rather
+        ;; than something minted here, so that building the same handler twice
+        ;; still owns the connections it opened the first time.
+        page   path
         routes (cond-> {(str path "/")               :page
                         (str path "/client.mjs")     :client
                         (str path "/rpc.mjs")        :rpc-module
@@ -323,6 +381,6 @@
         :client     (runtime-module "client.cljs" path)
         :rpc-module (runtime-module "rpc.cljs" path)
         :components (components-module mounts path)
-        :events     (events req mounts)
-        :rpc        (rpc req)
+        :events     (events req mounts page)
+        :rpc        (rpc req page)
         nil))))

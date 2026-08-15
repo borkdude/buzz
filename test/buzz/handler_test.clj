@@ -30,18 +30,27 @@
   "One browser on the page. Reading SSE by hand keeps the assertions on what the
   browser is actually sent."
   ([port] (open-events port {}))
-  ([port headers]
+  ([port headers] (open-events port headers "/events"))
+  ([port headers uri]
    (let [sock (java.net.Socket. "127.0.0.1" (int port))]
     (.setSoTimeout sock 5000)
     (doto (.getOutputStream sock)
-      (.write (.getBytes (str "GET /events HTTP/1.1\r\nHost: localhost\r\n"
+      (.write (.getBytes (str "GET " uri " HTTP/1.1\r\nHost: localhost\r\n"
                               (apply str (for [[k v] headers] (str k ": " v "\r\n")))
                               "\r\n")))
       (.flush))
     (let [rdr (java.io.BufferedReader.
                (java.io.InputStreamReader. (.getInputStream sock) "UTF-8"))
+          ;; the token Buzz hands out, which an rpc has to come back with
+          token (loop [tok nil]
+                  (let [line (.readLine rdr)]
+                    (cond
+                      (or (nil? line) (str/blank? line)) tok
+                      (str/starts-with? (str/lower-case line) "set-cookie:")
+                      (recur (second (re-find #"buzz-browser=([^;]+)" line)))
+                      :else (recur tok))))
           [_ session] (next-event rdr)]
-      {:sock sock :rdr rdr :session session :port port}))))
+      {:sock sock :rdr rdr :session session :token token :port port}))))
 
 (defn- with-connection
   "Serves `spec` on a free port and opens one connection to it, as user alice."
@@ -65,17 +74,20 @@
   (:state (first (:mounted (get @handler/conns session)))))
 
 (defn- rpc
-  "One POST to /rpc, the way the browser makes it. Returns [status body]."
-  [port session handler-id args]
+  "One POST to /rpc, the way the browser makes it, carrying the token the stream
+  handed out. Returns [status body]."
+  [{:keys [port session token uri no-header] :or {uri "/rpc"}} handler-id args]
   (let [payload (.getBytes (json/generate-string [session handler-id args]) "UTF-8")]
     (with-open [sock (java.net.Socket. "127.0.0.1" (int port))]
       (.setSoTimeout sock 5000)
       (doto (.getOutputStream sock)
         ;; asking to close lets the body be read to the end of the stream,
         ;; without a length to parse first
-        (.write (.getBytes (str "POST /rpc HTTP/1.1\r\n"
+        (.write (.getBytes (str "POST " uri " HTTP/1.1\r\n"
                                 "Host: localhost\r\n"
                                 "Content-Type: application/json\r\n"
+                                (when-not no-header "X-Buzz-RPC: 1\r\n")
+                                (when token (str "Cookie: buzz-browser=" token "\r\n"))
                                 "Content-Length: " (alength payload) "\r\n"
                                 "Connection: close\r\n\r\n")
                            "UTF-8"))
@@ -184,17 +196,17 @@
 (deftest a-handler-answers-over-rpc
   (reset! log [])
   (with-connection desk-spec
-    (fn [{:keys [port session]}]
+    (fn [conn]
 
       (testing "a handler with no reply says so rather than sending a body"
-        (is (= [204 ""] (rpc port session "desk/0" [])))
+        (is (= [204 ""] (rpc conn "desk/0" [])))
         (is (= [:quiet] @log)))
 
       (testing "a reply carries the value back"
-        (is (= [200 "1"] (rpc port session "desk/1" []))))
+        (is (= [200 "1"] (rpc conn "desk/1" []))))
 
       (testing "a handler that throws fails the browser's promise"
-        (let [[status body] (rpc port session "desk/2" [])]
+        (let [[status body] (rpc conn "desk/2" [])]
           (is (= 500 status))
           (is (= {"error" "handler failed"} (json/parse-string body)))
           (testing "and says nothing about why"
@@ -202,10 +214,10 @@
 
       (testing "an unknown handler is not found"
         (is (= [404 "{\"error\":\"no such handler\"}"]
-               (rpc port session "desk/9" []))))
+               (rpc conn "desk/9" []))))
 
       (testing "a handler cannot be reached without a session"
-        (is (= 404 (first (rpc port "made-up" "desk/0" []))))))))
+        (is (= 404 (first (rpc (assoc conn :session "made-up") "desk/0" []))))))))
 
 ;; No slots and no handlers. This one is only here to be rendered into a page.
 (defui greeting []
@@ -316,7 +328,7 @@
 
 (deftest each-mount-is-its-own
   (with-connection two-mounts-spec
-    (fn [{:keys [sock rdr session port]}]
+    (fn [{:keys [sock rdr session] :as conn}]
 
       (testing "every mount arrives with the value it was built with"
         (is (= ["mount" "left-tally" "left" [0]] (next-event rdr)))
@@ -328,7 +340,7 @@
         (is (silent? sock rdr 300)))
 
       (testing "a handler belongs to the mount it came from"
-        (is (= 204 (first (rpc port session "right-tally/0" []))))
+        (is (= 204 (first (rpc conn "right-tally/0" []))))
         (is (= 1 @(:n (mount-state session "left"))))
         (is (= 99 @(:n (mount-state session "right"))))
         (is (= ["patch" "right-tally" [99]] (next-event rdr)))))))
@@ -525,10 +537,56 @@
             (is (= "bob" (:name (connection-state (:session bob))))))
 
           (testing "a handler acts as the identity its connection was built with"
-            (is (= [200 "\"alice\""] (rpc port (:session alice) "greeter/0" [])))
-            (is (= [200 "\"bob\""] (rpc port (:session bob) "greeter/0" []))))
+            (is (= [200 "\"alice\""] (rpc alice "greeter/0" [])))
+            (is (= [200 "\"bob\""] (rpc bob "greeter/0" []))))
 
           (finally (.close (:sock bob))))))))
+
+;; A handler acts as the identity its connection was built with, so a session id
+;; on its own would be a second way to be someone: learn one, send it with
+;; whatever you signed in as, and the handler answers as the connection rather
+;; than as you. The token Buzz hands a browser is what ties the two together.
+(deftest a-connection-answers-only-the-browser-that-opened-it
+  (with-connection greeter-spec
+    (fn [{:keys [port] :as alice}]
+      (let [bob (open-events port {"X-User" "bob"})]
+        (try
+          (testing "another browser cannot drive a connection by its session id"
+            (is (= 404 (first (rpc (assoc bob :token (:token alice))
+                                   "greeter/0" [])))))
+
+          (testing "and neither can a browser carrying no token at all"
+            (is (= 404 (first (rpc (dissoc bob :token) "greeter/0" [])))))
+
+          (testing "the browser that opened it still gets through"
+            (is (= [200 "\"bob\""] (rpc bob "greeter/0" []))))
+
+          (testing "and only when it asks the way the runtime does"
+            (is (= 404 (first (rpc (assoc bob :no-header true) "greeter/0" [])))))
+
+          (finally (.close (:sock bob))))))))
+
+;; `conns` is one map for the whole process, so without this a page could be
+;; asked to run a handler belonging to another one. Two handlers on one server
+;; is the ordinary arrangement: a sign in page and the page behind it.
+(deftest a-connection-answers-only-through-the-page-that-built-it
+  (let [main  (handler/handler greeter-spec)
+        other (handler/handler (assoc greeter-spec :path "/other"))
+        stop  (http/run-server (fn [req] (or (other req) (main req) {:status 404 :body "no"}))
+                               {:port 0})
+        port  (:local-port (meta stop))]
+    (try
+      (let [conn (open-events port {"X-User" "alice"} "/other/events")]
+        (try
+          (testing "the page that built the connection answers it"
+            (is (= [200 "\"alice\""]
+                   (rpc (assoc conn :uri "/other/rpc") "greeter/0" []))))
+
+          (testing "another page's rpc endpoint does not, though the id is the same"
+            (is (= 404 (first (rpc (assoc conn :uri "/rpc") "greeter/0" [])))))
+
+          (finally (.close (:sock conn)))))
+      (finally (stop)))))
 
 (deftest the-first-paint-is-rendered-for-the-request-that-asked
   (let [ui (handler/handler greeter-spec)
@@ -619,12 +677,14 @@
 
 (defn- rpc-raw
   "The whole response, headers and all."
-  [port session handler-id]
+  [{:keys [port session token]} handler-id]
   (let [payload (.getBytes (json/generate-string [session handler-id []]) "UTF-8")]
     (with-open [sock (java.net.Socket. "127.0.0.1" (int port))]
       (.setSoTimeout sock 5000)
       (doto (.getOutputStream sock)
         (.write (.getBytes (str "POST /rpc HTTP/1.1\r\nHost: localhost\r\n"
+                                "X-Buzz-RPC: 1\r\n"
+                                (when token (str "Cookie: buzz-browser=" token "\r\n"))
                                 "Content-Length: " (alength payload) "\r\n"
                                 "Connection: close\r\n\r\n")))
         (.write payload)
@@ -633,10 +693,10 @@
 
 (deftest a-reply-can-add-to-its-response
   (with-connection gate-spec
-    (fn [{:keys [port session]}]
+    (fn [conn]
 
       (testing "the value still arrives as the body"
-        (let [raw (rpc-raw port session "gate/0")]
+        (let [raw (rpc-raw conn "gate/0")]
           (is (str/includes? raw "\"in\""))
 
           (testing "and the header is on the wire"
@@ -646,9 +706,9 @@
             (is (str/includes? raw "Content-Type: application/json")))))
 
       (testing "a reply with no response is unchanged"
-        (let [raw (rpc-raw port session "gate/1")]
+        (let [raw (rpc-raw conn "gate/1")]
           (is (str/includes? raw "\"plain\""))
           (is (not (str/includes? raw "Set-Cookie")))))
 
       (testing "anything else in the map is part of the response too"
-        (is (str/includes? (rpc-raw port session "gate/2") "HTTP/1.1 201"))))))
+        (is (str/includes? (rpc-raw conn "gate/2") "HTTP/1.1 201"))))))
