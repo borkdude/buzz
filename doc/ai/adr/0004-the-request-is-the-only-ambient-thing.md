@@ -74,10 +74,10 @@ User and browser keyed maps outlive any connection and want app side TTLs.
 
 ## Consequences
 
-`:state` and per connection instances are no longer load bearing. Instances
-can collapse to one per mount, `conns` to channel, token and sent-diff, and
-`reload-all!` stops rebuilding per connection. Not done in the prototype:
-`:state` still works, and nothing uses it in the examples.
+`:state` and per connection instances are no longer load bearing. A `:ui`
+mount names its component by var, and one instance serves every connection,
+cached per revision. `:component` and `:state` still work, instantiated per
+connection as before, and nothing uses them in the examples.
 
 ## References
 

@@ -55,8 +55,8 @@
 (defn- with-connection
   "Serves `spec` on a free port and opens one connection to it, as user alice."
   [spec f]
-  (let [stop (http/run-server (fn [req] (or ((handler/handler spec) req)
-                                             {:status 404 :body "no"}))
+  (let [ui   (handler/handler spec)
+        stop (http/run-server (fn [req] (or (ui req) {:status 404 :body "no"}))
                               {:port 0})
         ;; asking for port 0 and reading back what was bound leaves no window
         ;; for another process to take the port first
@@ -527,6 +527,46 @@
       (testing "closing the stream tells the app which connection ended"
         (.close sock)
         (is (until 3000 #(= session @closed)))))))
+
+;; A `:ui` mount names its component by var. Nothing closes over a
+;; connection, so one instance serves them all, and the request keeps their
+;; renders apart.
+(defui shared-ui []
+  [:p (server (get-in (request) [:headers "x-user"] "nobody"))])
+
+(def ^:private shared-spec
+  {:title "shared"
+   :mounts [{:el "app" :ui #'shared-ui}]})
+
+(def ^:private louder-shared
+  '(defui shared-ui [] [:p (server (get-in (request) [:headers "x-user"] "nobody")) "!"]))
+
+(def ^:private plain-shared
+  '(defui shared-ui [] [:p (server (get-in (request) [:headers "x-user"] "nobody"))]))
+
+(deftest a-ui-var-names-one-instance-for-every-connection
+  (with-connection shared-spec
+    (fn [{:keys [rdr session port]}]
+      (is (= ["mount" "shared-ui" "app" ["alice"]] (next-event rdr)))
+      (let [bob (open-events port {"X-User" "bob"})]
+        (try
+          (testing "each connection renders from its own request"
+            (is (= ["mount" "shared-ui" "app" ["bob"]] (next-event (:rdr bob)))))
+
+          (testing "through one shared instance"
+            (is (identical? (:instance (first (:mounted (get @handler/conns session))))
+                            (:instance (first (:mounted (get @handler/conns (:session bob))))))))
+
+          (testing "a reload builds the next instance, once, for both"
+            (try
+              (redefine! louder-shared)
+              (is (= "reload" (first (next-event rdr))))
+              (is (= "reload" (first (next-event (:rdr bob)))))
+              (is (identical? (:instance (first (:mounted (get @handler/conns session))))
+                              (:instance (first (:mounted (get @handler/conns (:session bob)))))))
+              (finally (redefine! plain-shared))))
+
+          (finally (.close (:sock bob))))))))
 
 ;; What the browser imports. The registry entries are read by client.cljs as
 ;; `.-f`, `.-init` and `.-nlocals`, so the names here are a contract between two

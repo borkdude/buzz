@@ -4,10 +4,14 @@
 
     (def ui
       (handler {:title \"todos\"
-                :watch [app/db]                              ; patch everyone on change
-                :mounts [{:el \"app\"
-                          :state (fn [req] {:query (atom \"\")}) ; per connection, optional
-                          :component (fn [state] (app/todo-app (:query state)))}]}))
+                :watch [app/db]                       ; patch everyone on change
+                :mounts [{:el \"app\" :ui #'app/todo-app}]}))
+
+  A `:ui` mount names its component by var (or thunk), called with no
+  arguments: nothing closes over a connection, so one instance serves them
+  all and per connection facts come from `(request)`. A `:component` mount is
+  the older form, a fn of the mount's `:state` map, instantiated per
+  connection.
 
     (defn app [req] (or (ui req) (my-static-files req)))
 
@@ -121,10 +125,27 @@
 ;; The request is what a connection knows about who opened it. Handing it to
 ;; `:state` is the only place identity can enter, since a handler is a closure
 ;; over the state its component was built with and never sees a request itself.
-(defn- build [{:keys [el state component] :as spec} req]
+;; A `:ui` mount names its component by var (or thunk), so nothing closes over
+;; a connection and one instance can serve them all. Cached per revision: a
+;; reload builds the next one, and every connection sees it.
+(defn- shared-instance [ui]
+  (let [cache (atom nil)]
+    (fn []
+      (let [rev @core/revision c @cache]
+        (if (and c (= rev (:rev c)))
+          (:inst c)
+          (:inst (reset! cache {:rev rev :inst (if (var? ui) ((deref ui)) (ui))})))))))
+
+(defn- instance-of
+  "The instance a mount shows: the shared one for a `:ui` mount, a fresh one
+  over `state` for a legacy `:component` mount."
+  [spec state]
+  (if-let [f (::instance spec)] (f) ((:component spec) state)))
+
+(defn- build [{:keys [el state] :as spec} req]
   (let [st (if state (state req) {})]
     {:el el :state st :spec spec :sent (atom ::none) :req req
-     :instance (component st)}))
+     :instance (instance-of spec st)}))
 
 ;; What a connection owns is not all atoms. An identity read from the request is
 ;; a plain value, and there is nothing to watch about it.
@@ -227,7 +248,7 @@
 ;; state is kept, so a reload does not clear what someone had typed.
 (defn- reload-all! [_ _ _ rev]
   (doseq [[session {:keys [ch mounted]}] @conns]
-    (let [rebuilt (mapv (fn [m] (assoc m :instance ((:component (:spec m)) (:state m)))) mounted)]
+    (let [rebuilt (mapv (fn [m] (assoc m :instance (instance-of (:spec m) (:state m)))) mounted)]
       (swap! conns assoc-in [session :mounted] rebuilt)
       ;; A watch closes over the mount it was installed with, so the old ones
       ;; still hold the old instance and would patch with the slots of code the
@@ -287,7 +308,7 @@
   ;; Only :js is read, and that does not depend on the arguments, so the
   ;; components are called with no state at all rather than with a connection's.
   ;; Building one here would run every `:state` fn for a module that ignores it.
-  (let [insts (map #((:component %) {}) mounts)
+  (let [insts (map #(instance-of % {}) mounts)
         ;; Resolve parts per request so edits do not require recompiling callers.
         parts (core/parts-closure (mapcat :parts insts))]
     {:status 200
@@ -392,7 +413,12 @@
   (doseq [a watch]
     (add-watch a ::render broadcast-patch!))
   @heartbeat
-  (let [path   (or path "")
+  (let [mounts (mapv (fn [m] (if-let [ui (:ui m)]
+                               (assoc m ::instance (shared-instance ui))
+                               m))
+                     mounts)
+        spec   (assoc spec :mounts mounts)
+        path   (or path "")
         ;; what tells one handler's connections from another's. The path rather
         ;; than something minted here, so that building the same handler twice
         ;; still owns the connections it opened the first time.
