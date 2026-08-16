@@ -71,7 +71,7 @@
 (def ui
   (buzz/handler {:index "public/bench.html"
                  :watch [rows]
-                 :mounts [{:el "app" :component (fn [_] (table))}]}))
+                 :mounts [{:el "app" :ui #'table}]}))
 
 (defn app [req]
   (or (routes req) (ui req) {:status 404 :body "not found"}))

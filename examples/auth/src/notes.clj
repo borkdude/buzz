@@ -3,9 +3,10 @@
   looking at it.
 
   Buzz authenticates nobody. An application has to decide who someone is, and
-  keep everyone else away from the handler. What Buzz gives it is the request
-  that opened the connection, so the answer has somewhere to live."
-  (:require [buzz.core :refer [client defui local-state reply server server!]]
+  keep everyone else away from the handler. What Buzz gives it is `(request)`:
+  in a slot the request that opened the stream, in a handler the rpc itself,
+  so authority is read where it is used and checked again on every action."
+  (:require [buzz.core :refer [client defui local-state reply request server server!]]
             [buzz.handler :as buzz]
             [clojure.string :as str]
             [org.httpkit.server :as http]))
@@ -88,18 +89,20 @@
   (swap! sessions dissoc t)
   {:headers {"Set-Cookie" (str (cookie "") " Max-Age=0")}})
 
-;; `user` is a plain string the connection was built with, so it reaches the
-;; browser through a slot like any other server value.
-(defui board [user role token]
+;; Nothing is passed in: every mark derives the user from the request that
+;; brought it to run. A slot reads the one that opened the stream, a handler
+;; the rpc, so a handler acts as whoever is asking now.
+(defui board []
   (let [draft (local-state "")]
     [:div
-     [:h1 "notes for " (server user)]
+     [:h1 "notes for " (server (whoami (request)))]
      [:ul
-      (for [[i note] (map-indexed vector (server (get @notes user)))]
+      (for [[i note] (map-indexed vector (server (get @notes (whoami (request)))))]
         [:li {:key i}
          note
-         [:button {:on-click (fn [_] (server! (let [n (client i)]
-                                                (swap! notes update user
+         [:button {:on-click (fn [_] (server! (let [u (whoami (request))
+                                                    n (client i)]
+                                                (swap! notes update u
                                                        #(vec (concat (subvec % 0 n)
                                                                      (subvec % (inc n))))))))}
           "delete"]])]
@@ -107,35 +110,34 @@
               :placeholder "a new note"
               :on-input (fn [e] (reset! draft (.. e -target -value)))}]
      [:button {:on-click (fn [_]
-                           (server! (swap! notes update user conj (client @draft)))
+                           (server! (swap! notes update (whoami (request))
+                                           conj (client @draft)))
                            (reset! draft ""))}
       "add"]
      ;; Drawn for an admin only. The slot decides what the page shows. It does
-     ;; not decide what the handler does, so the handler checks the role itself.
+     ;; not decide what the handler does, so the handler reads the role from
+     ;; its own rpc: a role withdrawn between draw and click is refused.
      ;; A boolean rather than the role, because a keyword arrives as a string.
-     (when (server (= :admin role))
+     (when (server (= :admin (role-of (whoami (request)))))
        [:p [:a {:href "/admin"} "everyone's notes"] " "
         [:button {:on-click (fn [_]
-                              (server! (do (admin! role)
+                              (server! (do (admin! (role-of (whoami (request))))
                                            (swap! notes update-vals
                                                   #(conj % "remember the milk")))))}
          "remind everyone"]])
      [:p [:button {:on-click (^:async fn [_]
-                              (await (server! (reply :ok (sign-out! token))))
+                              (await (server! (reply :ok (sign-out! (token (request))))))
                               (set! js/window.location "/signin"))}
           "sign out"]]]))
 
+;; `sessions` is watched as well: signing out deletes the session a slot's
+;; cookie points to, so every open page of that user redraws signed out on the
+;; next patch rather than on its next reconnect.
 (def ^:private notes-ui
   (buzz/handler
    {:title "notes"
-    :watch [notes]
-    :mounts [{:el "app"
-              ;; The one place an identity can enter. A handler is a closure over
-              ;; this map and never sees a request, so it acts as whoever opened
-              ;; the connection.
-              :state (fn [req] (let [user (whoami req)]
-                                 {:user user :role (role-of user) :token (token req)}))
-              :component (fn [{:keys [user role token]}] (board user role token))}]}))
+    :watch [notes sessions]
+    :mounts [{:el "app" :ui #'board}]}))
 
 ;; Requests Buzz does not own return nil, so the application decides what
 ;; reaches it. Everything Buzz serves sits behind the same check: the page, the
@@ -167,23 +169,22 @@
 (def ^:private signin-ui
   (buzz/handler {:title "sign in"
                  :path "/signin"
-                 :mounts [{:el "signin" :component (fn [_] (doorbell))}]}))
+                 :mounts [{:el "signin" :ui #'doorbell}]}))
 
 ;; Only an admin gets past the check in `app`, so only an admin opens this
 ;; stream. That is worth having, but it is not what makes `clear!` safe: the
 ;; handler checks the role itself, the way every handler that does something
 ;; only some people may do has to.
 ;;
-;; The role is read when the stream opens. Taking it away reaches an open
-;; connection when it next reconnects, so the gate alone would go on trusting a
-;; role that has been withdrawn.
+;; The role comes from the rpc that carries the click, so taking it away is
+;; refused on the very next action, open connection or not.
 (defn- clear! [role who]
   (admin! role)
   ;; the browser says which list to empty, so only a name that exists may be one
   (when (contains? users who)
     (swap! notes assoc who [])))
 
-(defui console [role]
+(defui console []
   [:div
    [:h1 "everyone's notes"]
    [:ul
@@ -193,17 +194,16 @@
                             (sort @notes)))]
       [:li {:key (:who row)}
        [:strong (:who row)] " " (:notes row) " "
-       [:button {:on-click (fn [_] (server! (clear! role (client (:who row)))))}
+       [:button {:on-click (fn [_] (server! (clear! (role-of (whoami (request)))
+                                                     (client (:who row)))))}
         "clear"]])]
    [:p [:a {:href "/"} "back"]]])
 
 (def ^:private admin-ui
   (buzz/handler {:title "everyone's notes"
                  :path "/admin"
-                 :watch [notes]
-                 :mounts [{:el "admin"
-                           :state (fn [req] {:role (role-of (whoami req))})
-                           :component (fn [{:keys [role]}] (console role))}]}))
+                 :watch [notes sessions]
+                 :mounts [{:el "admin" :ui #'console}]}))
 
 (defn app [req]
   (or (signin-ui req)                       ; /signin and its stream, open to all

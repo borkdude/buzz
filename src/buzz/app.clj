@@ -1,6 +1,6 @@
 (ns buzz.app
   (:require [babashka.nrepl.server :as nrepl]
-            [buzz.core :refer [client defpart defui local-state reply server server!]]
+            [buzz.core :refer [client defpart defui local-state reply request server server!]]
             [buzz.handler :as buzz]
             [clojure.string :as str]
             [org.httpkit.server :as http]))
@@ -54,14 +54,19 @@
 
 #_(todo-row {:id 1 :title "ship code, not JSON" :done false})
 
-;; `query` is an atom the server makes per connection, so the search box is not
-;; shared between windows the way `clicks` is. It has to live here because a
-;; value-position `(server ...)` cannot see anything the browser bound.
+;; What each tab is searching for, keyed by its connection, so the box is not
+;; shared between windows the way `clicks` is. It lives here because the
+;; matching runs here, and it is a plain watched atom: the app owns it, and
+;; the close hook below lets go of a tab that went away.
 
 (defn refuse! [] (throw (ex-info "the server said no" {})))
 
-(defui todo-app [query]
-  (let [todos (server (matching @query))
+(defonce queries (atom {}))
+
+(defn- my-query [req] (get @queries (buzz/connection req) ""))
+
+(defui todo-app []
+  (let [todos (server (matching (my-query (request))))
         left  (server (count (remove :done (vals @db))))
         n     (server @clicks)
         ;; browser state, so what came back has somewhere to live
@@ -73,7 +78,8 @@
      ;; overwrite what was typed while the round trip was still in the air.
      [:input.search {:placeholder "search"
                      :on-input (fn [e]
-                                 (server! (reset! query (client (.. e -target -value)))))}]
+                                 (server! (swap! queries assoc (buzz/connection (request))
+                                                 (client (.. e -target -value)))))}]
      [:input.new {:placeholder (str "what needs doing, " (server (System/getProperty "user.name"))
                                     "?")
                   :autofocus true
@@ -111,18 +117,17 @@
         done  (server (count (filter :done (vals @db))))]
     [:p.stats total " total, " done " done"]))
 
-;; `db` and `clicks` are shared, so a change patches every connection. `query`
-;; belongs to one browser, so it is made per connection and patches only that
-;; one.
+;; `db` and `clicks` are shared, so a change patches every connection.
+;; `queries` is shared too, but each connection reads its own key, so a
+;; keystroke changes one connection's slot values and the diff spares the
+;; rest.
 
 (def ui
   (buzz/handler {:index "public/index.html"
-                   :watch [db clicks]
-                   :mounts [{:el "app"
-                             :state (fn [_req] {:query (atom "")})
-                             :component (fn [{:keys [query]}] (todo-app query))}
-                            {:el "stats"
-                             :component (fn [_] (stats))}]}))
+                 :watch [db clicks queries]
+                 :mounts [{:el "app" :ui #'todo-app}
+                          {:el "stats" :ui #'stats}]
+                 :on-close (fn [conn] (swap! queries dissoc conn))}))
 
 (defn app [req]
   (or (ui req) {:status 404 :body "not found"}))

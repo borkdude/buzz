@@ -10,15 +10,15 @@ Sign in as alice with the password wonderland, or as bob with builder. Open a se
 
 ## Where the identity lives
 
-A mount's `:state` is called with the request that opened the connection:
+Nowhere. Identity is derived from `(request)` in the mark that needs it:
 
 ```clojure
-{:el "app"
- :state (fn [req] {:user (whoami req)})
- :component (fn [{:keys [user]}] (board user))}
+[:h1 "notes for " (server (whoami (request)))]
 ```
 
-Buzz builds the component with this map, so `board` is called with `"alice"` or with `"bob"`. A `server!` in the body of `board` uses the name it was built with.
+In a slot, `(request)` is the request that opened the stream. In a
+`server!` handler it is the rpc carrying the call, so a handler acts as
+whoever is asking now, not whoever opened the page.
 
 ## Guarding the handlers
 
@@ -35,11 +35,11 @@ The check covers the page, the event stream and the rpc endpoint alike. Guarding
 
 ## Roles
 
-A role reaches a component the way an identity does, through the mount's `:state`:
+A role is derived the way an identity is, from the request in the mark that
+needs it:
 
 ```clojure
-:state (fn [req] (let [user (whoami req)]
-                   {:user user :role (role-of user) :token (token req)}))
+(role-of (whoami (request)))
 ```
 
 alice is an admin and bob is not.
@@ -52,7 +52,9 @@ An admin only page gets its own handler and its own `:path`, checked in `app`:
 
 That handler owns its page, stream, modules and rpc endpoint, so a browser that does not pass the check never opens the stream. Signed in as bob, a POST to `/admin/rpc` is turned away with a 303 before the page sees it.
 
-That is worth having, but do not treat it as the boundary. The role is read once, when the stream opens, so taking a role away only reaches an open connection when it next reconnects, and until then the gate goes on admitting a role that has been withdrawn. Every handler that does something only some people may do checks the role itself:
+That is worth having, but do not treat it as the boundary. Every handler that
+does something only some people may do checks the role itself, against its own
+rpc, so a role withdrawn between the draw and the click is refused:
 
 ```clojure
 (defn- clear! [role who]
@@ -68,8 +70,9 @@ The second line matters as much as the first. The browser says which list to emp
 The same rule from the other direction. `:handlers` is built once for the component rather than once per render, so a control drawn for an admin alone is still registered for everyone. The handler checks the role itself:
 
 ```clojure
-(when (server (= :admin role))
-  [:button {:on-click (fn [_] (server! (do (admin! role) ...)))} "remind everyone"])
+(when (server (= :admin (role-of (whoami (request)))))
+  [:button {:on-click (fn [_] (server! (do (admin! (role-of (whoami (request)))) ...)))}
+   "remind everyone"])
 ```
 
 The slot decides what the page draws. Signed in as bob, `board/2` is registered and a POST to `/rpc` reaches it:
@@ -78,6 +81,14 @@ The slot decides what the page draws. Signed in as bob, `board/2` is registered 
     buzz: board/2 failed on [] - not allowed
 
 The slot sends a boolean rather than the role, because a keyword arrives in the browser as a string.
+
+## Signing out reaches open pages
+
+`sessions` is in `:watch`, and the slots derive the user per render, so
+deleting a session redraws every open page of that user on the next patch:
+the heading empties, the notes disappear and the admin link goes with them.
+No reconnect and no closed stream, just a render that no longer finds a
+session behind the cookie.
 
 ## Signing in
 

@@ -20,8 +20,10 @@
                 :task (bench/-main "--nrepl")}
          split {:doc "Print what the splitter makes of the demo component"
                 :requires ([buzz.app :as app])
-                :task (let [inst (app/todo-app (atom ""))]
+                :task (let [inst (app/todo-app)]
                         (println "id      " (:id inst))
                         (println "js      " (:js inst))
-                        (println "slots   " ((:slots inst)))
+                        (println "slots   " (if (:request inst)
+                                              ((:slots inst) {})
+                                              ((:slots inst))))
                         (println "handlers" (sort (keys (:handlers inst)))))}}}

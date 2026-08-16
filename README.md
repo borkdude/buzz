@@ -106,6 +106,13 @@ To compose the handler with other routes, you can use `or` since the handler ret
 
 Buzz watches each atom in `:watch`. When one of them changes, it re-renders the component and sends a patch to each browser. One mount can hold one component at one element. A page can have more than one mount.
 
+A mount names its component by var, so re-evaluating the component reaches
+the open pages:
+
+```clojure
+:mounts [{:el "app" :ui #'todo-app}]
+```
+
 The page belongs to the handler, so one application can serve more than one of them. Give a handler a `:path` and it answers under that path, stream and modules included.
 
 ```clojure
@@ -115,18 +122,36 @@ The page belongs to the handler, so one application can serve more than one of t
 (defn app [req] (or (admin req) (home req) {:status 404 :body "not found"}))
 ```
 
-## Per connection state
+## The request
 
-Give a mount a `:state` function to make state that belongs to one browser. It is called with the request that opened the connection and returns a map. Buzz watches every atom in that map for that browser alone.
+Inside a `(server ...)` or a `(server! ...)`, `(request)` is the request that
+caused that code to run: the one that opened the stream for a slot, the rpc
+itself for a handler. Identity and scope derive from it, and state lives in
+your own atoms:
 
 ```clojure
-{:el "app"
- :state (fn [req] {:user (whoami req)
-                   :query (atom "")})
- :component (fn [state] (admin (:user state) (:query state)))}
+(defonce queries (atom {}))   ; connection id -> search text
+
+(defui todo-app []
+  (let [todos (server (matching (get @queries (buzz/connection (request)) "")))]
+    [:div
+     [:input {:on-input (fn [e] (server! (swap! queries assoc
+                                                (buzz/connection (request))
+                                                (client (.. e -target -value)))))}]
+     ...]))
 ```
 
-See [examples/auth](examples/auth) for a page that signs two users in and gives each of them their own data.
+Key by `(whoami (request))` for state a user owns, `(buzz/token (request))`
+for state a browser owns, and `(buzz/connection (request))` for state a tab
+owns. Connections end, so a handler takes `:on-close`, called with the
+connection id, to let go of what a tab held:
+
+```clojure
+(buzz/handler {:on-close (fn [conn] (swap! queries dissoc conn)) ...})
+```
+
+See [examples/auth](examples/auth) for a page that signs two users in and
+gives each of them their own data, checked again on every action.
 
 ## The page
 
