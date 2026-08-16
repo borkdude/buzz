@@ -9,8 +9,11 @@
          test  {:doc "Run the tests"
                 :extra-paths ["test"]
                 :requires ([clojure.test :as t] [buzz.core-test] [buzz.handler-test])
+                ;; Exit explicitly, the way the JVM runner does: capra leaves
+                ;; non-daemon threads parked after a died stream, and waiting
+                ;; on those is not what a test run means.
                 :task (let [{:keys [fail error]} (t/run-tests 'buzz.core-test 'buzz.handler-test)]
-                        (when (pos? (+ fail error)) (System/exit 1)))}
+                        (System/exit (if (pos? (+ fail error)) 1 0)))}
          serve {:doc "Start the demo on http://localhost:1341"
                 :requires ([buzz.app :as app])
                 :task (app/-main)}
