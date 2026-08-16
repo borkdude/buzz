@@ -97,22 +97,17 @@
   [& _]
   (throw (ex-info "(request) used outside (server ...) or (server! ...)" {})))
 
-(def ^:private bare-marks
-  '{server :server, server! :server!, reply :reply,
-    client :client, local-state :local-state, request :request})
-
 (def ^:private marks
   {#'server :server, #'server! :server!, #'reply :reply,
    #'client :client, #'local-state :local-state, #'request :request})
 
 (defn- mark
-  "Which mark a head symbol names, if any. A bare name matches by name, so a
-  part keeps its marks wherever it is spliced. Anything else resolves, so an
-  alias or a rename means what it names rather than nothing at all."
+  "Which mark a head symbol names, if any. Resolution rather than the name: a
+  mark is a var like anything else, so an alias means it and a rename or a
+  local shadow frees the name."
   [head]
   (when (symbol? head)
-    (or (bare-marks head)
-        (marks (try (resolve head) (catch Exception _ nil))))))
+    (marks (try (resolve head) (catch Exception _ nil)))))
 
 (def ^:private ^:dynamic *self*
   "Metadata for the part being compiled. Used for self-recursion before its
@@ -176,21 +171,16 @@
 
 (defn- lift-request
   "Replaces every `(request)` in `expr` with `sym`. Returns the expression and
-  whether it asked. A call with arguments is left alone unless it names the
-  mark's var, so a function that happens to be called request keeps working."
+  whether it asked. Marks resolve, so a function that happens to be called
+  request is someone else's var and stays untouched."
   [expr sym]
   (let [used (atom false)
         out  (walk/postwalk
               (fn [x]
                 (if (and (seq? x) (= :request (mark (first x))))
-                  (cond
-                    (= 1 (count x))
+                  (if (= 1 (count x))
                     (do (reset! used true) sym)
-
-                    (marks (try (resolve (first x)) (catch Exception _ nil)))
-                    (throw (ex-info "(request) takes no arguments" {:form x}))
-
-                    :else x)
+                    (throw (ex-info "(request) takes no arguments" {:form x})))
                   x))
               expr)]
     [out @used]))
@@ -323,7 +313,8 @@
     (and (seq? form) (seq form))
     (let [head (first form)
           args (rest form)
-          mk   (mark head)]
+          mk   (when-not (and (simple-symbol? head) (scope head))
+                 (mark head))]
       (cond
         ;; Each marker has one legal place. Somewhere else is an error, never a
         ;; different meaning.

@@ -50,36 +50,38 @@
       (loop [e e] (if-let [c (ex-cause e)] (recur c) (ex-message e))))))
 
 ;; Each mark has one place. Somewhere else is an error rather than a second
-;; meaning, which is what stops a form quietly doing the wrong thing.
+;; meaning, which is what stops a form quietly doing the wrong thing. The
+;; marks are qualified: they resolve like any var, and the runner's namespace
+;; refers none of them.
 (deftest a-mark-in-the-wrong-place-is-an-error
   (testing "a value cannot be asked for from a handler"
     (is (re-find #"is a value"
                  (refusal '(buzz.core/defui a []
-                             [:p {:on-click (fn [_] (server (inc 1)))}])))))
+                             [:p {:on-click (fn [_] (buzz.core/server (inc 1)))}])))))
 
   (testing "an effect cannot happen during a render"
     (is (re-find #"is an effect"
-                 (refusal '(buzz.core/defui b [] [:p (server! (prn 1))])))))
+                 (refusal '(buzz.core/defui b [] [:p (buzz.core/server! (prn 1))])))))
 
   (testing "a reply is the answer, so it comes last"
     (is (re-find #"must be the last form"
                  (refusal '(buzz.core/defui c []
-                             [:p {:on-click (fn [_] (server!
-                                                     (reply 1) (prn 2)))}])))))
+                             [:p {:on-click (fn [_] (buzz.core/server!
+                                                     (buzz.core/reply 1) (prn 2)))}])))))
 
   (testing "client marks a value crossing, not browser state"
     (is (re-find #"crosses a value into"
-                 (refusal '(buzz.core/defui d [] [:p (client 1)])))))
+                 (refusal '(buzz.core/defui d [] [:p (buzz.core/client 1)])))))
 
   (testing "a reply takes a value and at most a response"
     (is (re-find #"takes a value and an optional response"
                  (refusal '(buzz.core/defui f []
-                             [:p {:on-click (fn [_] (server! (reply 1 2 3)))}])))))
+                             [:p {:on-click (fn [_] (buzz.core/server! (buzz.core/reply 1 2 3)))}])))))
 
   (testing "browser state is declared in the body, not in a handler"
     (is (re-find #"declares state"
                  (refusal '(buzz.core/defui e []
-                             [:p {:on-click (fn [_] (local-state nil))}]))))))
+                             [:p {:on-click (fn [_] (buzz.core/local-state nil))}]))))))
 
 ;; A mark names a var, so it means the same whether it was referred or reached
 ;; through an alias.
@@ -140,11 +142,11 @@
 (deftest a-mark-that-needs-a-component-is-refused-in-a-part
   (testing "server is rejected"
     (is (re-find #"must be passed from defui"
-                 (refusal '(buzz.core/defpart p1 [] [:li (server 1)])))))
+                 (refusal '(buzz.core/defpart p1 [] [:li (buzz.core/server 1)])))))
 
   (testing "local-state is rejected"
     (is (re-find #"must be created in defui"
-                 (refusal '(buzz.core/defpart p2 [] [:li @(local-state 0)])))))
+                 (refusal '(buzz.core/defpart p2 [] [:li @(buzz.core/local-state 0)])))))
 
   (testing "server parameters are rejected"
     (is (re-find #"Pass the value or handler from defui"
@@ -354,3 +356,15 @@
     (is (re-find #"server value"
                  (refusal '(buzz.core/defui r2 []
                              (let [q (buzz.core/local-state (buzz.core/request))] [:p @q])))))))
+
+;; Marks resolve like any var, so a local shadow frees the name: this server
+;; is a browser function, not a slot.
+(defui shadowed []
+  (let [server (fn [x] [:em x])]
+    [:p (server 1)]))
+
+(deftest a-shadowed-mark-name-is-browser-code
+  (let [inst (shadowed)]
+    (is (= [] ((:slots inst))))
+    (is (empty? (:handlers inst)))
+    (is (str/includes? (:js inst) "(1)"))))
