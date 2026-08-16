@@ -1,12 +1,6 @@
 (ns notes
-  "Two users, a note list each, and one page that knows which of them is
-  looking at it.
-
-  Buzz authenticates nobody. An application has to decide who someone is, and
-  keep everyone else away from the handler. What Buzz gives it is the request
-  that opened the connection, so the answer has somewhere to live."
-  (:require [buzz.core :refer [client defui local-state reply server server!]]
-            [buzz.handler :as buzz]
+  "Example note app with request-based authentication and per-user state."
+  (:require [buzz.core :as buzz :refer [client defui local-state reply server server!]]
             [clojure.string :as str]
             [org.httpkit.server :as http]))
 
@@ -20,10 +14,8 @@
 
 (defn- role-of [user] (:role (get users user)))
 
-;; Refuses by throwing, so the browser sees a rejected promise. Every guarded
-;; handler calls this itself. A component that draws no admin control still
-;; registers its handler, because the handler map is built once for the
-;; component rather than once per render.
+;; Conditional rendering does not authorize an RPC, so privileged handlers
+;; call this directly.
 (defn- admin! [role]
   (when-not (= :admin role)
     (throw (ex-info "not allowed" {:role role}))))
@@ -88,18 +80,19 @@
   (swap! sessions dissoc t)
   {:headers {"Set-Cookie" (str (cookie "") " Max-Age=0")}})
 
-;; `user` is a plain string the connection was built with, so it reaches the
-;; browser through a slot like any other server value.
-(defui board [user role token]
+;; Resolve identity from the stream request for slots and the RPC request for
+;; handlers.
+(defui board []
   (let [draft (local-state "")]
     [:div
-     [:h1 "notes for " (server user)]
+     [:h1 "notes for " (server (whoami (buzz/request)))]
      [:ul
-      (for [[i note] (map-indexed vector (server (get @notes user)))]
+      (for [[i note] (map-indexed vector (server (get @notes (whoami (buzz/request)))))]
         [:li {:key i}
          note
-         [:button {:on-click (fn [_] (server! (let [n (client i)]
-                                                (swap! notes update user
+         [:button {:on-click (fn [_] (server! (let [u (whoami (buzz/request))
+                                                    n (client i)]
+                                                (swap! notes update u
                                                        #(vec (concat (subvec % 0 n)
                                                                      (subvec % (inc n))))))))}
           "delete"]])]
@@ -107,42 +100,31 @@
               :placeholder "a new note"
               :on-input (fn [e] (reset! draft (.. e -target -value)))}]
      [:button {:on-click (fn [_]
-                           (server! (swap! notes update user conj (client @draft)))
+                           (server! (swap! notes update (whoami (buzz/request))
+                                           conj (client @draft)))
                            (reset! draft ""))}
       "add"]
-     ;; Drawn for an admin only. The slot decides what the page shows. It does
-     ;; not decide what the handler does, so the handler checks the role itself.
-     ;; A boolean rather than the role, because a keyword arrives as a string.
-     (when (server (= :admin role))
+     ;; Check the current role in the handler as well as during rendering.
+     (when (server (= :admin (role-of (whoami (buzz/request)))))
        [:p [:a {:href "/admin"} "everyone's notes"] " "
         [:button {:on-click (fn [_]
-                              (server! (do (admin! role)
+                              (server! (do (admin! (role-of (whoami (buzz/request))))
                                            (swap! notes update-vals
                                                   #(conj % "remember the milk")))))}
          "remind everyone"]])
      [:p [:button {:on-click (^:async fn [_]
-                              (await (server! (reply :ok (sign-out! token))))
+                              (await (server! (reply :ok (sign-out! (token (buzz/request))))))
                               (set! js/window.location "/signin"))}
           "sign out"]]]))
 
+;; Watching sessions redraws open pages after signout.
 (def ^:private notes-ui
   (buzz/handler
    {:title "notes"
-    :watch [notes]
-    :mounts [{:el "app"
-              ;; The one place an identity can enter. A handler is a closure over
-              ;; this map and never sees a request, so it acts as whoever opened
-              ;; the connection.
-              :state (fn [req] (let [user (whoami req)]
-                                 {:user user :role (role-of user) :token (token req)}))
-              :component (fn [{:keys [user role token]}] (board user role token))}]}))
+    :watch [notes sessions]
+    :mounts [{:el "app" :ui #'board}]}))
 
-;; Requests Buzz does not own return nil, so the application decides what
-;; reaches it. Everything Buzz serves sits behind the same check: the page, the
-;; event stream and the rpc endpoint alike. Guarding only the page would leave
-;; the handlers open, and a `server!` handler is an endpoint.
-;; The login page is a component too, on its own path so that its stream and its
-;; modules do not collide with the ones behind the gate.
+;; Route checks protect the page, event stream, and RPC endpoint.
 (defui doorbell []
   (let [form (local-state {:who "" :pw "" :err nil})]
     [:div
@@ -151,9 +133,7 @@
                   :on-input (fn [e] (swap! form assoc :who (.. e -target -value)))}]]
      [:p [:input {:type "password" :value (:pw @form) :placeholder "password"
                   :on-input (fn [e] (swap! form assoc :pw (.. e -target -value)))}]]
-     ;; The reply carries the Set-Cookie, so the browser is signed in by the
-     ;; time this resolves. A wrong password throws on the server, which the
-     ;; browser sees as a rejected promise.
+     ;; Wait for the Set-Cookie response before redirecting.
      [:button {:on-click (^:async fn [_]
                           (try
                             (await (server! (reply :ok (sign-in! (client (:who @form))
@@ -167,43 +147,32 @@
 (def ^:private signin-ui
   (buzz/handler {:title "sign in"
                  :path "/signin"
-                 :mounts [{:el "signin" :component (fn [_] (doorbell))}]}))
+                 :mounts [{:el "signin" :ui #'doorbell}]}))
 
-;; Only an admin gets past the check in `app`, so only an admin opens this
-;; stream. That is worth having, but it is not what makes `clear!` safe: the
-;; handler checks the role itself, the way every handler that does something
-;; only some people may do has to.
-;;
-;; The role is read when the stream opens. Taking it away reaches an open
-;; connection when it next reconnects, so the gate alone would go on trusting a
-;; role that has been withdrawn.
+;; Check the current RPC role and the browser-supplied user.
 (defn- clear! [role who]
   (admin! role)
-  ;; the browser says which list to empty, so only a name that exists may be one
   (when (contains? users who)
     (swap! notes assoc who [])))
 
-(defui console [role]
+(defui console []
   [:div
    [:h1 "everyone's notes"]
    [:ul
-    ;; joined here rather than in the browser, so the body stays free of
-    ;; anything the page would have to import
     (for [row (server (mapv (fn [[who ns]] {:who who :notes (str/join ", " ns)})
                             (sort @notes)))]
       [:li {:key (:who row)}
        [:strong (:who row)] " " (:notes row) " "
-       [:button {:on-click (fn [_] (server! (clear! role (client (:who row)))))}
+       [:button {:on-click (fn [_] (server! (clear! (role-of (whoami (buzz/request)))
+                                                     (client (:who row)))))}
         "clear"]])]
    [:p [:a {:href "/"} "back"]]])
 
 (def ^:private admin-ui
   (buzz/handler {:title "everyone's notes"
                  :path "/admin"
-                 :watch [notes]
-                 :mounts [{:el "admin"
-                           :state (fn [req] {:role (role-of (whoami req))})
-                           :component (fn [{:keys [role]}] (console role))}]}))
+                 :watch [notes sessions]
+                 :mounts [{:el "admin" :ui #'console}]}))
 
 (defn app [req]
   (or (signin-ui req)                       ; /signin and its stream, open to all

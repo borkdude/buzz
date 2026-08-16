@@ -99,6 +99,10 @@ vector, which `mount` and `reload` already send.
 
 ## 4. Handler local connection registries
 
+Completed by [0004](0004-the-request-is-the-only-ambient-thing.md). Each handler
+now owns a connection registry. Patches and RPC lookup use only that registry.
+`:on-close` replaces direct access to the former global registry.
+
 Each handler owns its connections and its watches.
 
 **This is not only tidiness.** `broadcast-patch!` walks every connection in the
@@ -192,7 +196,7 @@ small.
 
 ## References
 
-- `patch!`, `broadcast-patch!`, `conns` in `src/buzz/handler.clj`
+- `patch!`, `broadcast-patch!`, the registries in `src/buzz/core.clj`
 - `split-body` in `src/buzz/core.clj`, for what 2 could decide statically
 - `handle` in `resources/buzz/client.cljs`, which 3 changes
 - multi-snake `src/snake/main.clj`, for the `conns` watch that 4 breaks

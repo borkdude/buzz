@@ -1,7 +1,7 @@
 (ns buzz.handler-test
   (:require [babashka.fs :as fs]
-            [buzz.core :refer [defpart defui local-state reply server server!]]
-            [buzz.handler :as handler]
+            [buzz.core :as handler :refer [defpart defui local-state reply request server server!]]
+            [buzz.stream :as stream]
             [cheshire.core :as json]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
@@ -55,23 +55,23 @@
 (defn- with-connection
   "Serves `spec` on a free port and opens one connection to it, as user alice."
   [spec f]
-  (let [stop (http/run-server (fn [req] (or ((handler/handler spec) req)
-                                             {:status 404 :body "no"}))
+  (let [ui   (handler/handler spec)
+        stop (http/run-server (fn [req] (or (ui req) {:status 404 :body "no"}))
                               {:port 0})
         ;; asking for port 0 and reading back what was bound leaves no window
         ;; for another process to take the port first
         port (:local-port (meta stop))
         {:keys [sock] :as conn} (open-events port {"X-User" "alice"})]
     (try
-      (f conn)
+      (f (assoc conn :ui ui))
       (finally
         (.close sock)
         (stop)))))
 
-(defn- connection-state
-  "The atoms one connection owns, which is what a REPL reaches for too."
-  [session]
-  (:state (first (:mounted (get @handler/conns session)))))
+(defn- registry-of
+  "The handler's own connections, riding on its meta for tests to look at."
+  [ui]
+  @(::handler/registry (meta ui)))
 
 (defn- rpc
   "One POST to /rpc, the way the browser makes it, carrying the token the stream
@@ -97,12 +97,14 @@
             status (second (str/split (first (str/split-lines head)) #" "))]
         [(Integer/parseInt status) (or body "")]))))
 
-;; Two slots over an atom the connection owns. Redefining this is the reload.
-(defui panel [q]
-  [:p (server @q) (server (inc @q))])
+;; Two slots over a watched atom. Redefining this is the reload.
+(def ^:private panel-q (atom 0))
 
-(def ^:private two-slots '(defui panel [q] [:p (server @q) (server (inc @q))]))
-(def ^:private one-slot '(defui panel [q] [:p (server @q)]))
+(defui panel []
+  [:p (server @panel-q) (server (inc @panel-q))])
+
+(def ^:private two-slots '(defui panel [] [:p (server @panel-q) (server (inc @panel-q))]))
+(def ^:private one-slot '(defui panel [] [:p (server @panel-q)]))
 
 (defn- redefine!
   "Re-evaluates a defui here, which is what a REPL does. The runner is in
@@ -113,71 +115,71 @@
 
 (def ^:private panel-spec
   {:title "panel"
-   :mounts [{:el "app"
-             :state (fn [_req] {:q (atom 0)})
-             :component (fn [state] (panel (:q state)))}]})
+   :watch [panel-q]
+   :mounts [{:el "app" :ui #'panel}]})
 
 ;; Re-evaluating a defui rebuilds every open connection. The instance a
 ;; connection holds and the watches feeding it have to be replaced together, or
 ;; a later patch carries the slots of code the browser has stopped running.
 (deftest a-reload-replaces-what-a-connection-watches
+  (reset! panel-q 0)
   (with-connection panel-spec
-    (fn [{:keys [rdr session]}]
-      (let [q (:q (connection-state session))]
-        (try
-          (testing "a connection is mounted with the slots of the current code"
-            (is (= ["mount" "panel" "app" [0 1]] (next-event rdr))))
+    (fn [{:keys [rdr]}]
+      (try
+        (testing "a connection is mounted with the slots of the current code"
+          (is (= ["mount" "panel" "app" [0 1]] (next-event rdr))))
 
-          (testing "changing state the connection owns patches that connection"
-            (swap! q inc)
-            (is (= ["patch" "panel" [1 2]] (next-event rdr))))
+        (testing "changing watched state patches the connection"
+          (swap! panel-q inc)
+          (is (= ["patch" "panel" [1 2]] (next-event rdr))))
 
-          (testing "redefining the component sends the new shape"
-            (redefine! one-slot)
-            (let [[kind _rev id vals] (next-event rdr)]
-              (is (= "reload" kind))
-              (is (= "panel" id))
-              (is (= [1] vals))))
+        (testing "redefining the component sends the new shape"
+          (redefine! one-slot)
+          (let [[kind _rev id vals] (next-event rdr)]
+            (is (= "reload" kind))
+            (is (= "panel" id))
+            (is (= [1] vals))))
 
-          (testing "and a later change patches with the new shape, not the old"
-            (swap! q inc)
-            (is (= ["patch" "panel" [2]] (next-event rdr))))
+        (testing "and a later change patches with the new shape, not the old"
+          (swap! panel-q inc)
+          (is (= ["patch" "panel" [2]] (next-event rdr))))
 
-          (finally (redefine! two-slots)))))))
+        (finally (redefine! two-slots))))))
 
 ;; The slot reads one key. The other is there to be written without the browser
 ;; hearing about it.
-(defui board [st]
-  [:p (server (:shown @st))])
+(def ^:private board-st (atom {:shown 0 :hidden 0}))
+
+(defui board []
+  [:p (server (:shown @board-st))])
 
 (def ^:private board-spec
   {:title "board"
-   :mounts [{:el "app"
-             :state (fn [_req] {:board (atom {:shown 0 :hidden 0})})
-             :component (fn [state] (board (:board state)))}]})
+   :watch [board-st]
+   :mounts [{:el "app" :ui #'board}]})
 
 ;; A watched atom says something was written, not that this mount has anything
 ;; to say. Rather than declare what a component reads, the slots are run and the
 ;; frame is sent only when a value differs.
 (deftest a-write-that-changes-no-slot-sends-nothing
+  (reset! board-st {:shown 0 :hidden 0})
   (with-connection board-spec
-    (fn [{:keys [sock rdr session]}]
-      (let [st (:board (connection-state session))]
+    (fn [{:keys [sock rdr]}]
 
-        (testing "the connection is mounted with the value the slot reads"
-          (is (= ["mount" "board" "app" [0]] (next-event rdr))))
+      (testing "the connection is mounted with the value the slot reads"
+        (is (= ["mount" "board" "app" [0]] (next-event rdr))))
 
-        (testing "writing state no slot reads sends nothing"
-          (swap! st update :hidden inc)
-          (is (silent? sock rdr 300)))
+      (testing "writing state no slot reads sends nothing"
+        (swap! board-st update :hidden inc)
+        (is (silent? sock rdr 300)))
 
-        (testing "writing the same value again sends nothing"
-          (swap! st update :shown identity)
-          (is (silent? sock rdr 300)))
+      (testing "writing the same value again sends nothing"
+        (swap! board-st update :shown identity)
+        (is (silent? sock rdr 300)))
 
-        (testing "a value that differs is sent"
-          (swap! st update :shown inc)
-          (is (= ["patch" "board" [1]] (next-event rdr))))))))
+      (testing "a value that differs is sent"
+        (swap! board-st update :shown inc)
+        (is (= ["patch" "board" [1]] (next-event rdr)))))))
 
 ;; Three handlers. The first answers nothing, the second replies with a value,
 ;; and the third fails.
@@ -191,7 +193,7 @@
 
 (def ^:private desk-spec
   {:title "desk"
-   :mounts [{:el "app" :component (fn [_] (desk))}]})
+   :mounts [{:el "app" :ui #'desk}]})
 
 (deftest a-handler-answers-over-rpc
   (reset! log [])
@@ -226,7 +228,7 @@
 (def ^:private page-spec
   {:title "a title"
    :head "<link rel=\"stylesheet\" href=\"/style.css\">"
-   :mounts [{:el "app" :component (fn [_] (greeting))}]})
+   :mounts [{:el "app" :ui #'greeting}]})
 
 (defn- nonce-of [csp]
   (second (re-find #"nonce-([^']+)'" csp)))
@@ -270,7 +272,7 @@
     (fs/delete-on-exit f)
     (spit (fs/file f) html)
     {:index (str f)
-     :mounts [{:el "app" :component (fn [_] (greeting))}]}))
+     :mounts [{:el "app" :ui #'greeting}]}))
 
 ;; With an :index the page is yours. Buzz fills in the mount comments and the
 ;; nonce, and touches nothing else.
@@ -304,68 +306,66 @@
       (is (str/includes? body "<div id=\"app\"></div>"))
       (is (not (str/includes? body "hello"))))))
 
-(defn- mount-state
-  "The atoms one mount of one connection owns."
-  [session el]
-  (:state (first (filter #(= el (:el %)) (:mounted (get @handler/conns session))))))
+;; A page can hold more than one mount. Each gets its own instance and its
+;; own slots, so nothing one does reaches the other.
+(def ^:private left-n (atom 0))
+(def ^:private right-n (atom 100))
 
-;; A page can hold more than one mount. Each gets its own instance, its own
-;; state and its own slots, so nothing one does reaches the other.
-(defui left-tally [n]
-  [:p (server @n) [:button {:on-click (fn [_] (server! (swap! n inc)))} "+"]])
+(defui left-tally []
+  [:p (server @left-n) [:button {:on-click (fn [_] (server! (swap! left-n inc)))} "+"]])
 
-(defui right-tally [n]
-  [:p (server @n) [:button {:on-click (fn [_] (server! (swap! n dec)))} "-"]])
+(defui right-tally []
+  [:p (server @right-n) [:button {:on-click (fn [_] (server! (swap! right-n dec)))} "-"]])
 
 (def ^:private two-mounts-spec
   {:title "two"
-   :mounts [{:el "left"
-             :state (fn [_req] {:n (atom 0)})
-             :component (fn [st] (left-tally (:n st)))}
-            {:el "right"
-             :state (fn [_req] {:n (atom 100)})
-             :component (fn [st] (right-tally (:n st)))}]})
+   :watch [left-n right-n]
+   :mounts [{:el "left" :ui #'left-tally}
+            {:el "right" :ui #'right-tally}]})
 
 (deftest each-mount-is-its-own
+  (reset! left-n 0)
+  (reset! right-n 100)
   (with-connection two-mounts-spec
-    (fn [{:keys [sock rdr session] :as conn}]
+    (fn [{:keys [sock rdr] :as conn}]
 
       (testing "every mount arrives with the value it was built with"
         (is (= ["mount" "left-tally" "left" [0]] (next-event rdr)))
         (is (= ["mount" "right-tally" "right" [100]] (next-event rdr))))
 
-      (testing "writing one mount's state patches that mount alone"
-        (swap! (:n (mount-state session "left")) inc)
+      (testing "writing what one mount reads patches that mount alone"
+        (swap! left-n inc)
         (is (= ["patch" "left-tally" [1]] (next-event rdr)))
         (is (silent? sock rdr 300)))
 
       (testing "a handler belongs to the mount it came from"
         (is (= 204 (first (rpc conn "right-tally/0" []))))
-        (is (= 1 @(:n (mount-state session "left"))))
-        (is (= 99 @(:n (mount-state session "right"))))
+        (is (= 1 @left-n))
+        (is (= 99 @right-n))
         (is (= ["patch" "right-tally" [99]] (next-event rdr)))))))
 
 ;; The headline the readme makes: state the server owns is the same for every
 ;; browser, and state a browser owns is its own.
 (def ^:private shared (atom 0))
 
-(defui ticker [seen]
-  [:p (server @shared) (server @seen)])
+(def ^:private seen (atom {}))
+
+(defui ticker []
+  [:p (server @shared) (server (get @seen (handler/connection (request)) 0))])
 
 (def ^:private ticker-spec
   {:title "ticker"
-   :watch [shared]
-   :mounts [{:el "app"
-             :state (fn [_req] {:seen (atom 0)})
-             :component (fn [st] (ticker (:seen st)))}]})
+   :watch [shared seen]
+   :mounts [{:el "app" :ui #'ticker}]})
 
 (deftest a-watched-atom-reaches-every-connection
   (reset! shared 0)
+  (reset! seen {})
   (with-connection ticker-spec
     (fn [one]
       (let [two (open-events (:port one))]
         (try
-          (testing "each browser mounts with its own instance"
+          (testing "each browser mounts with the values its request selects"
             (is (not= (:session one) (:session two)))
             (is (= ["mount" "ticker" "app" [0 0]] (next-event (:rdr one))))
             (is (= ["mount" "ticker" "app" [0 0]] (next-event (:rdr two)))))
@@ -375,14 +375,11 @@
             (is (= ["patch" "ticker" [1 0]] (next-event (:rdr one))))
             (is (= ["patch" "ticker" [1 0]] (next-event (:rdr two)))))
 
-          (testing "a write to one browser's own state reaches only that browser"
-            (swap! (:seen (connection-state (:session two))) inc)
+          (testing "a write under one connection's key patches only that one:
+                    the others' slots run and their values did not change"
+            (swap! seen assoc (:session two) 1)
             (is (= ["patch" "ticker" [1 1]] (next-event (:rdr two))))
             (is (silent? (:sock one) (:rdr one) 300)))
-
-          (testing "so the two browsers hold different values"
-            (is (= 0 @(:seen (connection-state (:session one)))))
-            (is (= 1 @(:seen (connection-state (:session two))))))
 
           (finally (.close (:sock two))))))))
 
@@ -397,88 +394,193 @@
             (Thread/sleep 10)
             (recur))))))
 
-(defui leaky [q]
-  [:p (server @q)])
+(defui leaky []
+  [:p (server 0)])
+
+(def ^:private left-behind (atom nil))
 
 (def ^:private leaky-spec
   {:title "leaky"
-   :mounts [{:el "app"
-             :state (fn [_req] {:q (atom 0)})
-             :component (fn [st] (leaky (:q st)))}]})
+   :mounts [{:el "app" :ui #'leaky}]
+   :on-close (fn [req] (reset! left-behind (handler/connection req)))})
 
-;; A browser that goes away takes its instances and its watches with it.
-;; Otherwise every reload of a page leaves another watch on the atoms behind it.
+;; A browser that goes away is dropped from its handler's registry, and the
+;; application hears which connection it was, so state it keyed goes with it.
 (deftest a-closed-connection-is-forgotten
+  (reset! left-behind nil)
   (with-connection leaky-spec
-    (fn [{:keys [sock rdr session]}]
-      (let [q (:q (connection-state session))]
+    (fn [{:keys [sock rdr session ui]}]
 
-        (testing "while it is open the connection is watching its own state"
-          (is (= ["mount" "leaky" "app" [0]] (next-event rdr)))
-          (is (seq (.getWatches q))))
+      (testing "while it is open the registry holds it"
+        (is (= ["mount" "leaky" "app" [0]] (next-event rdr)))
+        (is (contains? (registry-of ui) session)))
 
-        (.close sock)
+      (.close sock)
 
-        (testing "closing it drops the connection"
-          (is (until 3000 #(not (contains? @handler/conns session)))))
+      (testing "closing it drops the connection"
+        (is (until 3000 #(not (contains? (registry-of ui) session)))))
 
-        (testing "and the watches on its state go with it"
-          (is (until 3000 #(empty? (.getWatches q)))))))))
+      (testing "and the app is told which one ended"
+        (is (until 3000 #(= session @left-behind)))))))
 
-;; A part leaves no trace at runtime: it is spliced in when the component that
-;; uses it expands. Editing one has to expand those components again, or they
-;; keep running the JavaScript the old part produced.
-(defpart badge [^:server q]
-  [:em (server @q)])
+(defpart badge [n]
+  [:em n])
 
-(defui card [q]
-  [:p (badge q)])
+(def ^:private card-q (atom 0))
 
-(def ^:private wider-badge
-  '(defpart badge [^:server q] [:em (server @q) (server (inc @q))]))
+(defui card []
+  [:p (badge (server @card-q))])
 
-(def ^:private narrow-badge
-  '(defpart badge [^:server q] [:em (server @q)]))
+(def ^:private louder-badge '(defpart badge [n] [:em n "!"]))
+(def ^:private plain-badge  '(defpart badge [n] [:em n]))
 
 (def ^:private card-spec
   {:title "card"
-   :mounts [{:el "app"
-             :state (fn [_req] {:q (atom 0)})
-             :component (fn [st] (card (:q st)))}]})
+   :watch [card-q]
+   :mounts [{:el "app" :ui #'card}]})
 
-(deftest editing-a-part-reloads-the-components-that-use-it
+(deftest editing-a-part-reloads-the-pages-that-show-it
+  (reset! card-q 0)
   (with-connection card-spec
-    (fn [{:keys [rdr session]}]
-      (let [q (:q (connection-state session))]
+    (fn [{:keys [rdr]}]
+      (try
+        (testing "the component passes its slot through the part"
+          (is (= ["mount" "card" "app" [0]] (next-event rdr))))
+
+        (testing "editing the part reloads the page"
+          (redefine! louder-badge)
+          (let [[kind _rev id vals] (next-event rdr)]
+            (is (= "reload" kind))
+            (is (= "card" id))
+            (is (= [0] vals))))
+
+        (testing "the module contains the edited part"
+          (is (str/includes? (:body ((handler/handler card-spec) {:uri "/components.mjs"}))
+                             "\"!\"")))
+
+        (finally (redefine! plain-badge))))))
+
+(def ^:private steps (atom 0))
+
+(defpart step-button [label]
+  [:button {:on-click (fn [_] (server! (swap! steps inc)))} label])
+
+(defui stepped-panel []
+  [:div (server @steps) (step-button "go")])
+
+(def ^:private stepped-spec
+  {:title "stepped"
+   :watch [steps]
+   :mounts [{:el "app" :ui #'stepped-panel}]})
+
+(deftest a-function-part-serves-and-answers-through-its-component
+  (reset! steps 0)
+  (with-connection stepped-spec
+    (fn [{:keys [rdr] :as conn}]
+      (testing "the mount carries the component's slot"
+        (is (= ["mount" "stepped-panel" "app" [0]] (next-event rdr))))
+
+      (testing "the module defines the part the component calls"
+        (let [body (:body ((handler/handler stepped-spec) {:uri "/components.mjs"}))]
+          (is (str/includes? body "const buzz_DOT_handler_test_SLASH_step_button = "))
+          (is (str/includes? body "buzz_DOT_handler_test_SLASH_step_button("))))
+
+      (testing "the mount dispatches to the part handler"
+        (is (= 204 (first (rpc conn "buzz.handler-test/step-button/0" []))))
+        (is (= 1 @steps))
+        (is (= ["patch" "stepped-panel" [1]] (next-event rdr)))))))
+
+;; The request mark, end to end. A slot reads the request that opened the
+;; stream, a handler reads the rpc that carried the call, and the connection
+;; accessor names the same connection in both, so state keyed by it agrees.
+(defonce ^:private seen-conn (atom nil))
+(defonce ^:private closed (atom nil))
+
+(defui req-panel []
+  [:div
+   [:p (server (str (get-in (request) [:headers "x-user"])
+                    "/" (some? (handler/connection (request)))))]
+   [:button {:on-click (fn [_] (server! (reply (do (reset! seen-conn (handler/connection (request)))
+                                                   (get-in (request) [:headers "x-user"] "nobody")))))}
+    "who"]])
+
+(def ^:private req-spec
+  {:title "req"
+   :mounts [{:el "app" :ui #'req-panel}]
+   :on-close (fn [req] (reset! closed (handler/connection req)))})
+
+(deftest the-request-reaches-slots-and-handlers
+  (reset! seen-conn nil)
+  (reset! closed nil)
+  (with-connection req-spec
+    (fn [{:keys [sock rdr session] :as conn}]
+
+      (testing "a slot reads the request that opened the stream"
+        (is (= ["mount" "req-panel" "app" ["alice/true"]] (next-event rdr))))
+
+      (testing "a handler reads the rpc, which carries no x-user header"
+        (is (= [200 "\"nobody\""] (rpc conn "req-panel/0" []))))
+
+      (testing "slot and handler name the same connection"
+        (is (= session @seen-conn)))
+
+      (testing "closing the stream tells the app which connection ended"
+        (.close sock)
+        (is (until 3000 #(= session @closed)))))))
+
+;; A `:ui` mount names its component by var. Nothing closes over a
+;; connection, so one instance serves them all, and the request keeps their
+;; renders apart.
+(defui shared-ui []
+  [:p (server (get-in (request) [:headers "x-user"] "nobody"))])
+
+(def ^:private shared-spec
+  {:title "shared"
+   :mounts [{:el "app" :ui #'shared-ui}]})
+
+(def ^:private louder-shared
+  '(defui shared-ui [] [:p (server (get-in (request) [:headers "x-user"] "nobody")) "!"]))
+
+(def ^:private plain-shared
+  '(defui shared-ui [] [:p (server (get-in (request) [:headers "x-user"] "nobody"))]))
+
+(deftest a-ui-var-names-one-instance-for-every-connection
+  (with-connection shared-spec
+    (fn [{:keys [rdr session port ui]}]
+      (is (= ["mount" "shared-ui" "app" ["alice"]] (next-event rdr)))
+      (let [bob (open-events port {"X-User" "bob"})]
         (try
-          (testing "the part contributes its slot to the component"
-            (is (= ["mount" "card" "app" [0]] (next-event rdr))))
+          (testing "each connection renders from its own request"
+            (is (= ["mount" "shared-ui" "app" ["bob"]] (next-event (:rdr bob)))))
 
-          (testing "editing the part reloads the component, which was not touched"
-            (redefine! wider-badge)
-            (let [[kind _rev id vals] (next-event rdr)]
-              (is (= "reload" kind))
-              (is (= "card" id))
-              (is (= [0 1] vals))))
+          (testing "through one shared instance"
+            (is (identical? (:instance (first (:mounted (get (registry-of ui) session))))
+                            (:instance (first (:mounted (get (registry-of ui) (:session bob))))))))
 
-          (testing "and the component now runs what the new part produced"
-            (swap! q inc)
-            (is (= ["patch" "card" [1 2]] (next-event rdr))))
+          (testing "a reload builds the next instance, once, for both"
+            (try
+              (redefine! louder-shared)
+              (is (= "reload" (first (next-event rdr))))
+              (is (= "reload" (first (next-event (:rdr bob)))))
+              (is (identical? (:instance (first (:mounted (get (registry-of ui) session))))
+                              (:instance (first (:mounted (get (registry-of ui) (:session bob)))))))
+              (finally (redefine! plain-shared))))
 
-          (finally (redefine! narrow-badge)))))))
+          (finally (.close (:sock bob))))))))
 
 ;; What the browser imports. The registry entries are read by client.cljs as
 ;; `.-f`, `.-init` and `.-nlocals`, so the names here are a contract between two
 ;; files that nothing else holds together.
-(defui gauge [q]
+(def ^:private gauge-q (atom 0))
+
+(defui gauge []
   (let [seen (local-state 0)]
-    [:p (server @q) @seen]))
+    [:p (server @gauge-q) @seen]))
 
 (def ^:private gauge-spec
   {:title "gauge"
-   :mounts [{:el "app"
-             :state (fn [_req] {:q (atom 0)})
-             :component (fn [st] (gauge (:q st)))}]})
+   :watch [gauge-q]
+   :mounts [{:el "app" :ui #'gauge}]})
 
 (deftest the-browser-is-served-the-modules-it-imports
   (let [ui (handler/handler gauge-spec)]
@@ -505,47 +607,20 @@
     (testing "a module the page does not serve is declined"
       (is (nil? (ui {:uri "/nope.mjs"}))))))
 
-;; A handler is a closure over the state its component was built with, and never
-;; sees a request. So the request that opened the connection is the one chance to
-;; put an identity somewhere the component and its handlers can reach.
-(defui greeter [who]
-  [:p (server @who)
-   [:button {:on-click (fn [_] (server! (reply @who)))} "who am i"]])
+;; A slot reads the request that opened the stream, so the page mounts already
+;; knowing who is looking at it.
+(defui greeter []
+  [:p (server (get-in (request) [:headers "x-user"] "nobody"))
+   [:button {:on-click (fn [_] (server! (reply (get-in (request) [:headers "x-user"] "nobody"))))}
+    "who am i"]])
 
 (def ^:private greeter-spec
   {:title "greeter"
-   :mounts [{:el "app"
-             ;; :name is a plain value, :who an atom. Both belong to the
-             ;; connection, and only one of them is watchable.
-             :state (fn [req] {:name (get-in req [:headers "x-user"] "nobody")
-                               :who (atom (get-in req [:headers "x-user"] "nobody"))})
-             :component (fn [st] (greeter (:who st)))}]})
+   :mounts [{:el "app" :ui #'greeter}]})
 
-(deftest a-mount-builds-its-state-from-the-request
-  (with-connection greeter-spec
-    (fn [{:keys [rdr port] :as alice}]
-      (let [bob (open-events port {"X-User" "bob"})]
-        (try
-          (testing "the state fn reads whoever opened the connection"
-            (is (= ["mount" "greeter" "app" ["alice"]] (next-event rdr))))
-
-          (testing "and another browser gets its own"
-            (is (= ["mount" "greeter" "app" ["bob"]] (next-event (:rdr bob)))))
-
-          (testing "state that is not an atom is carried, not watched"
-            (is (= "alice" (:name (connection-state (:session alice)))))
-            (is (= "bob" (:name (connection-state (:session bob))))))
-
-          (testing "a handler acts as the identity its connection was built with"
-            (is (= [200 "\"alice\""] (rpc alice "greeter/0" [])))
-            (is (= [200 "\"bob\""] (rpc bob "greeter/0" []))))
-
-          (finally (.close (:sock bob))))))))
-
-;; A handler acts as the identity its connection was built with, so a session id
-;; on its own would be a second way to be someone: learn one, send it with
-;; whatever you signed in as, and the handler answers as the connection rather
-;; than as you. The token Buzz hands a browser is what ties the two together.
+;; A session id arrives in the rpc body, so on its own it would be a second way
+;; to be someone: learn one, send it, and the connection answers. The token
+;; Buzz hands a browser is what ties the two together.
 (deftest a-connection-answers-only-the-browser-that-opened-it
   (with-connection greeter-spec
     (fn [{:keys [port] :as alice}]
@@ -558,17 +633,18 @@
           (testing "and neither can a browser carrying no token at all"
             (is (= 404 (first (rpc (dissoc bob :token) "greeter/0" [])))))
 
-          (testing "the browser that opened it still gets through"
-            (is (= [200 "\"bob\""] (rpc bob "greeter/0" []))))
+          (testing "the browser that opened it still gets through, and the
+                    handler reads its own rpc, which carries no name"
+            (is (= [200 "\"nobody\""] (rpc bob "greeter/0" []))))
 
           (testing "and only when it asks the way the runtime does"
             (is (= 404 (first (rpc (assoc bob :no-header true) "greeter/0" [])))))
 
           (finally (.close (:sock bob))))))))
 
-;; `conns` is one map for the whole process, so without this a page could be
-;; asked to run a handler belonging to another one. Two handlers on one server
-;; is the ordinary arrangement: a sign in page and the page behind it.
+;; Each handler holds its own registry, so a session id from one page finds
+;; nothing at another one's endpoint. Two handlers on one server is the
+;; ordinary arrangement: a sign in page and the page behind it.
 (deftest a-connection-answers-only-through-the-page-that-built-it
   (let [main  (handler/handler greeter-spec)
         other (handler/handler (assoc greeter-spec :path "/other"))
@@ -579,7 +655,7 @@
       (let [conn (open-events port {"X-User" "alice"} "/other/events")]
         (try
           (testing "the page that built the connection answers it"
-            (is (= [200 "\"alice\""]
+            (is (= [200 "\"nobody\""]
                    (rpc (assoc conn :uri "/other/rpc") "greeter/0" []))))
 
           (testing "another page's rpc endpoint does not, though the id is the same"
@@ -601,10 +677,10 @@
 (defui parlour [] [:p "the parlour"])
 
 (def ^:private doorway-spec
-  {:title "doorway" :mounts [{:el "door" :component (fn [_] (doorway))}]})
+  {:title "doorway" :mounts [{:el "door" :ui #'doorway}]})
 
 (def ^:private parlour-spec
-  {:title "parlour" :mounts [{:el "room" :component (fn [_] (parlour))}]})
+  {:title "parlour" :mounts [{:el "room" :ui #'parlour}]})
 
 (deftest two-handlers-serve-two-pages
   (let [door  (handler/handler doorway-spec)
@@ -631,7 +707,7 @@
 ;; the path goes into the compiled runtime rather than into a global.
 (def ^:private door-at-path
   {:title "doorway" :path "/signin"
-   :mounts [{:el "door" :component (fn [_] (doorway))}]})
+   :mounts [{:el "door" :ui #'doorway}]})
 
 (deftest a-handler-answers-under-its-own-path
   (let [door (handler/handler door-at-path)
@@ -673,7 +749,7 @@
    [:button {:on-click (fn [_] (server! (reply :made {:status 201})))} "made"]])
 
 (def ^:private gate-spec
-  {:title "gate" :mounts [{:el "app" :component (fn [_] (gate))}]})
+  {:title "gate" :mounts [{:el "app" :ui #'gate}]})
 
 (defn- rpc-raw
   "The whole response, headers and all."
@@ -712,3 +788,76 @@
 
       (testing "anything else in the map is part of the response too"
         (is (str/includes? (rpc-raw conn "gate/2") "HTTP/1.1 201"))))))
+
+;; The stream is the one response plain Ring cannot make, so it is the whole
+;; of what an adapter provides. A fake one drives a page with no server and no
+;; socket, which is also what running Buzz on another server looks like.
+(defui faked []
+  [:p (server @shared)])
+
+(def ^:private faked-spec
+  {:title "faked"
+   :watch [shared]
+   :mounts [{:el "app" :ui #'faked}]})
+
+(deftest the-stream-is-served-through-an-adapter
+  (reset! shared 0)
+  (let [frames  (atom [])
+        opened  (atom nil)
+        closed  (atom nil)
+        fake    (fn [_req {:keys [status on-open on-close]}]
+                  (reset! opened on-open)
+                  (reset! closed on-close)
+                  {:status status :body :fake-stream})
+        ui      (handler/handler (assoc faked-spec :adapter fake))
+        resp    (ui {:uri "/events"})
+        ch      (reify stream/Channel
+                  (send! [_ s] (swap! frames conj s))
+                  (close! [_] nil))]
+
+    (testing "the adapter's answer is the response"
+      (is (= :fake-stream (:body resp))))
+
+    (@opened ch)
+
+    (testing "the session and the mount arrive as frames"
+      (is (= 2 (count @frames)))
+      (is (str/starts-with? (first @frames) "data: [\"session\""))
+      (is (str/includes? (second @frames) "\"mount\"")))
+
+    (testing "a watched write patches through the same channel"
+      (swap! shared inc)
+      (is (str/includes? (last @frames) "\"patch\"")))
+
+    (testing "the close callback drops the connection"
+      (@closed)
+      (is (empty? (registry-of ui))))))
+
+;; A second server. Capra streams through StreamableResponseBody rather than
+;; a channel, so if a page runs on it unchanged the adapter seam holds. It
+;; runs under babashka too, which this test also proves.
+(deftest capra-serves-the-same-page
+  (reset! shared 0)
+  (let [run-server (requiring-resolve 'capra.server/run-server)
+        adapter    @(requiring-resolve 'buzz.capra/adapter)
+        port       (with-open [s (java.net.ServerSocket. 0)] (.getLocalPort s))
+        ui         (handler/handler (assoc faked-spec :adapter adapter))
+        server     (run-server (fn [req] (or (ui req) {:status 404 :body "no"}))
+                               :port port)]
+    (try
+      (let [{:keys [rdr sock] :as conn} (open-events port)]
+        (testing "the stream opens and mounts"
+          (is (= ["mount" "faked" "app" [0]] (next-event rdr))))
+
+        (testing "a watched write patches through capra"
+          (swap! shared inc)
+          (is (= ["patch" "faked" [1]] (next-event rdr))))
+
+        (testing "the rpc endpoint is plain ring, so it just works"
+          (is (= 404 (first (rpc (assoc conn :session "made-up") "nope/0" [])))))
+
+        (testing "a closed client is learned about, and no watch thread blocks"
+          (.close sock)
+          (is (until 5000 #(do (swap! shared inc)
+                               (empty? (registry-of ui)))))))
+      (finally (.close server)))))

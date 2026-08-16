@@ -3,8 +3,7 @@
   over HTTP so the browser knows when it asked, and can time the whole loop:
   server work, wire, and render."
   (:require [babashka.nrepl.server :as nrepl]
-            [buzz.core :refer [client defpart defui server server!]]
-            [buzz.handler :as buzz]
+            [buzz.core :as buzz :refer [client defpart defui server server!]]
             [clojure.string :as str]
             [org.httpkit.server :as http]))
 
@@ -71,7 +70,7 @@
 (def ui
   (buzz/handler {:index "public/bench.html"
                  :watch [rows]
-                 :mounts [{:el "app" :component (fn [_] (table))}]}))
+                 :mounts [{:el "app" :ui #'table}]}))
 
 (defn app [req]
   (or (routes req) (ui req) {:status 404 :body "not found"}))

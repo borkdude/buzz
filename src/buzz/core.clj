@@ -1,6 +1,5 @@
 (ns buzz.core
-  "Splits one component definition into a part that runs here and a part that
-  runs in the browser.
+  "Splits component definitions into server and browser code.
 
   A component body is written as if it all ran in the browser. Forms wrapped in
   `(server ...)` are pulled out:
@@ -12,9 +11,11 @@
                      an `rpc!` call in its place, carrying the local bindings
                      the expression needs
 
-  What is left is compiled to JavaScript by Squint, here, once. Renders after
-  the first one send only the values."
-  (:require [clojure.string :as str]
+  What remains is compiled to JavaScript by Squint. Later renders send only
+  server values."
+  (:require [buzz.impl.page :as page]
+            [buzz.impl.parts :as parts]
+            [clojure.string :as str]
             [clojure.walk :as walk]
             [squint.compiler :as squint]))
 
@@ -64,50 +65,63 @@
   [& _]
   (throw (ex-info "(local-state ...) used outside defui" {})))
 
-(def ^:private bare-marks
-  '{server :server, server! :server!, reply :reply,
-    client :client, local-state :local-state})
+(defmacro request
+  "Returns the current Ring request. In `(server ...)`, this is the request
+  that opened the stream. In `(server! ...)`, this is the RPC request.
+
+    (server (notes-for (whoami (request))))
+    (server! (delete! (whoami (request)) (client id)))"
+  [& _]
+  (throw (ex-info "(request) used outside (server ...) or (server! ...)" {})))
 
 (def ^:private marks
   {#'server :server, #'server! :server!, #'reply :reply,
-   #'client :client, #'local-state :local-state})
+   #'client :client, #'local-state :local-state, #'request :request})
 
 (defn- mark
-  "Which mark a head symbol names, if any. A bare name matches by name, so a
-  part keeps its marks wherever it is spliced. Anything else resolves, so an
-  alias or a rename means what it names rather than nothing at all."
   [head]
   (when (symbol? head)
-    (or (bare-marks head)
-        (marks (try (resolve head) (catch Exception _ nil))))))
+    (marks (try (resolve head) (catch Exception _ nil)))))
+
+(def ^:private ^:dynamic *self*
+  nil)
+
+(declare ^:private split-part-body)
+(declare ^:private handlers-form)
 
 (defmacro defpart
-  "A hiccup helper. Unlike a function, this is spliced into whichever component
-  uses it, before the body is walked, so `(server ...)` inside one is seen and
-  its handlers belong to the enclosing component.
-
-  Parameters carry browser values. Mark one `^:server` to pass something that
-  only exists here, such as an atom a component was given:
-
-    (defpart row [item ^:server store]
-      [:li {:on-click (fn [_] (server (swap! store conj item)))} item])
-
-  It is an ordinary `def`, so it resolves like anything else and a stale
-  reference fails loudly. Evaluating one expands every component again, so a
-  change reaches the browser without touching the components themselves."
+  "Defines a Hiccup function that runs in the browser. Parts can recurse.
+  Define server values and local state in `defui` and pass them as arguments."
   [nm argv & body]
-  `(do (def ~nm {::part true :params '~argv :body '~body})
-       (recompile!)
-       (var ~nm)))
+  (when-let [p (some #(when (:server (meta %)) %) argv)]
+    (throw (ex-info (str "^:server parameters are not supported in " nm ": " p
+                         ". Pass the value or handler from defui.")
+                    {:part nm :param p})))
+  (let [qualified (symbol (str *ns*) (str nm))
+        {:keys [js ssr-forms handlers parts req-sym]}
+        (binding [*self* {:name nm :qualified qualified :arity (count argv)}]
+          (split-part-body qualified argv body))]
+    `(do (let [was# (when-let [v# (resolve '~nm)] (when (bound? v#) @v#))]
+           (def ~nm (with-meta (fn ~argv ~@ssr-forms)
+                      (parts/fn-part-meta
+                       {:buzz/name '~qualified
+                       :buzz/arity ~(count argv)
+                       :buzz/js ~js
+                       :buzz/parts '~(vec parts)
+                       :buzz/handlers ~(handlers-form handlers req-sym)})))
+           ;; Recompile callers only when the argument count changes.
+           (if (and (parts/fn-part? was#)
+                    (not= ~(count argv) (:buzz/arity (meta was#))))
+             (recompile!)
+             (touch!)))
+         (var ~nm))))
 
-(defn- part
-  "The part a head symbol names, if it names one and is not shadowed."
+(defn- part-var
+  "The var a head symbol names, if it names one and is not shadowed."
   [head scope]
   (when (and (symbol? head) (not (scope head)))
     (when-let [v (try (resolve head) (catch Exception _ nil))]
-      (when (and (var? v) (bound? v))
-        (let [value @v]
-          (when (and (map? value) (::part value)) value))))))
+      (when (and (var? v) (bound? v)) v))))
 
 (def ^:private lambda-heads '#{fn fn*})
 (def ^:private let-heads '#{let let* loop loop* when-let if-let when-some if-some})
@@ -126,6 +140,21 @@
 
 (declare ^:private conv)
 
+(defn- lift-request
+  "Replaces `(request)` forms in `expr` with `sym`. Returns the rewritten form
+  and whether a replacement occurred."
+  [expr sym]
+  (let [used (atom false)
+        out  (walk/postwalk
+              (fn [x]
+                (if (and (seq? x) (= :request (mark (first x))))
+                  (if (= 1 (count x))
+                    (do (reset! used true) sym)
+                    (throw (ex-info "(request) takes no arguments" {:form x})))
+                  x))
+              expr)]
+    [out @used]))
+
 (defn- slot!
   "`(server ...)` in value position. Hoists the expression to a parameter of the
   client function. Nothing crosses from the browser here: a slot is evaluated
@@ -134,7 +163,9 @@
   (when (some #(and (seq? %) (= :client (mark (first %)))) (tree-seq coll? seq expr))
     (throw (ex-info "(client ...) only works inside a handler, not in value position"
                     {:expr expr})))
-  (let [sym (gensym "slot__")]
+  (let [sym (gensym "slot__")
+        [expr req?] (lift-request expr (:req-sym @acc))]
+    (when req? (swap! acc assoc :slot-request? true))
     (swap! acc update :slots conj {:sym sym :expr expr})
     sym))
 
@@ -181,9 +212,11 @@
       (throw (ex-info "(reply ...) must be the last form of a (server! ...)"
                       {:forms (vec forms)})))
     (let [[server-expr pairs] (lift-client expr)
+          [server-expr req?]  (lift-request server-expr (:req-sym @acc))
           id (str comp-id "/" (count (:handlers @acc)))]
       (swap! acc update :handlers conj
              [id {:params (mapv first pairs) :expr server-expr
+                  :request req?
                   :reply (if resp? :response answer?)}])
       (list 'rpc! id (mapv #(conv (second %) scope true comp-id acc) pairs)))))
 
@@ -220,6 +253,27 @@
         [scope' bvec'] (conv-bindings bvec scope lambda? comp-id acc)]
     (apply list head bvec' (mapv #(conv % scope' lambda? comp-id acc) body))))
 
+(def js-name
+  "Returns a qualified part name as a JavaScript module binding."
+  parts/js-name)
+
+(defn- js-part-sym
+  "Returns the symbol used for part calls and module declarations."
+  [qualified]
+  (symbol (js-name qualified)))
+
+(defn- fn-part-call
+  [{:keys [qualified arity simple]} args scope lambda? comp-id acc]
+  (when-not (= arity (count args))
+    (throw (ex-info (str simple " expects " arity
+                         (if (= 1 arity) " argument" " arguments")
+                         ", received " (count args))
+                    {:part qualified :args (vec args)})))
+  (swap! acc update :parts conj qualified)
+  (swap! acc update :part-syms assoc (js-part-sym qualified) qualified)
+  (apply list (js-part-sym qualified)
+         (mapv #(conv % scope lambda? comp-id acc) args)))
+
 (defn- conv
   "Rewrites `form` into the form the browser evaluates, recording slots and
   handlers in `acc` along the way."
@@ -228,7 +282,8 @@
     (and (seq? form) (seq form))
     (let [head (first form)
           args (rest form)
-          mk   (mark head)]
+          mk   (when-not (and (simple-symbol? head) (scope head))
+                 (mark head))]
       (cond
         ;; Each marker has one legal place. Somewhere else is an error, never a
         ;; different meaning.
@@ -265,31 +320,32 @@
         (= :client mk)
         (throw (ex-info "(client ...) crosses a value into a (server! ...). Browser state is (local-state ...)"
                         {:form form}))
+
+        (= :request mk)
+        (throw (ex-info "(request) is only valid inside (server ...) or (server! ...)"
+                        {:form form}))
         (= 'quote head)  form
         (lambda-heads head) (conv-fn form scope comp-id acc)
         (let-heads head)    (conv-let form scope lambda? comp-id acc)
         (seq-heads head)    (conv-let form scope lambda? comp-id acc)
         :else
-        ;; A part becomes a `let` binding its parameters to the forms it was
-        ;; called with, then is walked like anything else. Destructuring and
-        ;; scope tracking come for free that way.
-        ;;
-        ;; A `^:server` parameter is substituted into the body instead of bound,
-        ;; so it never enters browser scope and a `(server ...)` using it keeps
-        ;; resolving where the part was called from.
-        (if-let [p (part head scope)]
-          (let [params (:params p)]
-            (when-not (= (count params) (count args))
-              (throw (ex-info (str head " takes " (count params) " arguments, given " (count args))
-                              {:part head :params params :args (vec args)})))
-            (let [pairs  (map vector params args)
-                  server? #(:server (meta (first %)))
-                  subs   (into {} (map (fn [[p a]] [p a])) (filter server? pairs))
-                  binds  (vec (mapcat identity (remove server? pairs)))
-                  body   (cond->> (:body p)
-                           (seq subs) (walk/postwalk-replace subs))]
-              (conv (apply list 'let binds body) scope lambda? comp-id acc)))
-          (apply list (mapv #(conv % scope lambda? comp-id acc) form)))))
+        (let [v     (part-var head scope)
+              value (when v @v)]
+          (cond
+            ;; Resolve self-recursion before the part var exists.
+            (and *self* (= head (:name *self*)) (not (scope head)))
+            (fn-part-call {:qualified (:qualified *self*) :arity (:arity *self*)
+                           :simple (:name *self*)}
+                          args scope lambda? comp-id acc)
+
+            (parts/fn-part? value)
+            (let [m (meta value)]
+              (fn-part-call {:qualified (:buzz/name m) :arity (:buzz/arity m)
+                             :simple (symbol (name (:buzz/name m)))}
+                            args scope lambda? comp-id acc))
+
+            :else
+            (apply list (mapv #(conv % scope lambda? comp-id acc) form))))))
 
     (vector? form) (mapv #(conv % scope lambda? comp-id acc) form)
     (map? form)    (into {} (mapv (fn [[k v]] [(conv k scope lambda? comp-id acc)
@@ -315,19 +371,18 @@
 
     (vector? form) (mapv ssr-form form)
     (set? form)    (into #{} (mapv ssr-form form))
-    (seq? form)    (if (= 'quote (first form))
-                     form
-                     (apply list (mapv ssr-form form)))
+    (seq? form)    (cond
+                     (= 'quote (first form)) form
+                     ;; Omit handlers passed as arguments from server rendering.
+                     (= 'rpc! (first form)) nil
+                     :else (apply list (mapv ssr-form form)))
     :else form))
 
-;; Bumped every time a defui is evaluated, so re-evaluating one in a REPL is
-;; enough to tell the browsers something changed.
-(defonce revision (atom 0))
+(def revision
+  "Revision counter incremented when a defui or defpart is evaluated."
+  parts/revision)
 
-;; Every defui keeps its own form, so it can be expanded again. A part is
-;; inlined at expansion time, which means editing one leaves every component
-;; that used it holding stale JavaScript. Re-evaluating them all is cheaper than
-;; working out which ones actually care.
+;; Keep each defui form so callers can be recompiled after an arity change.
 (defonce ^:private components (atom {}))
 
 (def ^:dynamic ^:private *recompiling* false)
@@ -341,7 +396,7 @@
   (when-not *recompiling* (swap! revision inc)))
 
 (defn recompile!
-  "Expands every defui again. Called when a part changes."
+  "Expands every defui again. Called when a part's arity changes."
   []
   (binding [*recompiling* true]
     (doseq [[_ {:keys [ns form]}] @components]
@@ -361,22 +416,73 @@
   (:body (squint/compile* [form]
                           {:context :expr :core-alias "SQ" :elide-imports true})))
 
+(defn- handlers-form
+  [handlers req-sym]
+  (into {} (map (fn [[id h]]
+                  [id {:fn `(fn ~(if (:request h)
+                                   (into [req-sym] (:params h))
+                                   (:params h))
+                              ~(:expr h))
+                       :request (boolean (:request h))
+                       :reply (:reply h)}]))
+        handlers))
+
+(defn- split-part-body
+  [qualified argv body]
+  (let [acc   (atom {:slots [] :handlers [] :locals [] :parts #{} :part-syms {}
+                     :req-sym (gensym "req__")})
+        forms (mapv #(conv % (binder-syms argv) false (str qualified) acc) body)
+        {:keys [slots handlers locals parts part-syms]} @acc
+        nm    (name qualified)]
+    (when (seq slots)
+      (throw (ex-info (str "(server ...) in " nm " must be passed from defui: "
+                           "(" nm " (server ...))")
+                      {:part qualified :expr (:expr (first slots))})))
+    (when (seq locals)
+      (throw (ex-info (str "(local-state ...) in " nm
+                           " must be created in defui and passed as an argument")
+                      {:part qualified})))
+    {:js        (to-js (apply list 'fn argv forms))
+     ;; Restore part vars for server rendering.
+     :ssr-forms (mapv ssr-form (walk/postwalk-replace part-syms forms))
+     :handlers  handlers
+     :req-sym   (:req-sym @acc)
+     :parts     parts}))
+
+(defn touch!
+  "Increments the revision without recompiling components."
+  []
+  (swap! revision inc))
+
+(def parts-closure
+  "Returns metadata for every part reachable from `syms`."
+  parts/parts-closure)
+
+(defn part-handlers
+  "Returns the merged handlers for every part reachable from `syms`."
+  [syms]
+  (into {} (mapcat (comp :buzz/handlers val)) (parts-closure syms)))
+
 (defn split-body
   "Returns the pieces a component is made of. Server slots come first in the
   browser function's parameters, then the browser's own."
   [body comp-id]
-  (let [acc   (atom {:slots [] :handlers [] :locals []})
+  (let [acc   (atom {:slots [] :handlers [] :locals [] :parts #{} :part-syms {}
+                     :req-sym (gensym "req__") :slot-request? false})
         forms (mapv #(conv % #{} false comp-id acc) body)
-        {:keys [slots handlers locals]} @acc
+        {:keys [slots handlers locals parts part-syms req-sym slot-request?]} @acc
         params (into (mapv :sym slots) (mapv :sym locals))]
     {:js         (to-js (apply list 'fn params forms))
      ;; the initial values take the slots, so a local can start from what the
      ;; server sent rather than only from a literal
      :init-js    (to-js (list 'fn (mapv :sym slots) (mapv :init locals)))
      :locals     (count locals)
-     :ssr-forms  (mapv ssr-form forms)
+     :ssr-forms  (mapv ssr-form (walk/postwalk-replace part-syms forms))
      :slot-exprs (mapv :expr slots)
      :handlers   handlers
+     :req-sym    req-sym
+     :request?   slot-request?
+     :parts      parts
      :slot-syms  params}))
 
 (defmacro defui
@@ -389,21 +495,36 @@
      :handlers id -> fn, called when the browser sends an :rpc}"
   [nm argv & body]
   (let [comp-id (str nm)
-        {:keys [js init-js locals ssr-forms slot-exprs slot-syms handlers]} (split-body body comp-id)]
+        {:keys [js init-js locals ssr-forms slot-exprs slot-syms handlers parts
+                req-sym request?]} (split-body body comp-id)]
     `(do
        (defn ~nm ~argv
          {:id       ~comp-id
           :js       ~js
           :init     ~init-js
           :locals   ~locals
+          :parts    '~(vec parts)
+          ;; :slots takes a request only when needed.
+          :request  ~(boolean request?)
           :ssr      (fn ~slot-syms ~@ssr-forms)
-          :slots    (fn [] ~(vec slot-exprs))
-          :handlers ~(into {} (map (fn [[id h]]
-                                     ;; false, true, or :response for a reply
-                                     ;; that also answers with an http response
-                                     [id {:fn `(fn ~(:params h) ~(:expr h))
-                                          :reply (:reply h)}]))
-                           handlers)})
+          :slots    (fn ~(if request? [req-sym] []) ~(vec slot-exprs))
+          ;; Resolve part handlers on every component call.
+          :handlers (merge (part-handlers '~(vec parts))
+                           ~(handlers-form handlers req-sym))})
        (register! '~(symbol (str *ns*) (str nm))
                   {:ns '~(ns-name *ns*) :form '~&form})
        (var ~nm))))
+
+(def handler
+  "Returns a Ring handler for `spec`. See `buzz.stream` for `:adapter`."
+  page/handler)
+
+(def connection
+  "Returns the connection ID in `req`. Returns nil before the stream opens.
+  A reconnect gets a new ID."
+  page/connection)
+
+(def token
+  "Returns the Buzz browser token in `req`. The token persists across tabs and
+  reconnects."
+  page/token)

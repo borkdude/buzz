@@ -32,8 +32,7 @@ Create a project with two files. `deps.edn`:
 
 ```clojure
 (ns counter
-  (:require [buzz.core :refer [client defui local-state server server!]]
-            [buzz.handler :as buzz]
+  (:require [buzz.core :as buzz :refer [client defui local-state server server!]]
             [org.httpkit.server :as http]))
 
 (defonce clicks (atom 0))
@@ -49,7 +48,7 @@ Create a project with two files. `deps.edn`:
 (def ui
   (buzz/handler {:title "counter"
                  :watch [clicks]
-                 :mounts [{:el "app" :component (fn [_] (counter))}]}))
+                 :mounts [{:el "app" :ui #'counter}]}))
 
 (defn -main [& _]
   (http/run-server (fn [req] (or (ui req) {:status 404 :body "not found"}))
@@ -87,12 +86,16 @@ You can define a part of a component with `defpart`. A part is like a component,
 (defpart row [item]
   [:li (:title item)])
 ```
-Buzz splices a part into the component that uses it, so a `server!` inside a
-part belongs to that component.
+
+Parts compile to browser functions and can call themselves. Define
+`(server ...)` and `(local-state ...)` in `defui`, then pass their results to
+the part. Parts can contain `(server! ...)`. See [doc/parts.md](doc/parts.md).
 
 ## Mounting
 
-The `buzz/handler` function returns a Ring handler and is server agnostic. In babashka, we typically use `org.httpkit.server/run-server` to run it.
+The `buzz/handler` function returns a Ring handler. Its event stream requires a
+`buzz.stream` adapter. Buzz uses the bundled http-kit adapter unless the
+handler spec supplies `:adapter`.
 
 To compose the handler with other routes, you can use `or` since the handler returns `nil` for unknown routes. For example:
 
@@ -103,6 +106,13 @@ To compose the handler with other routes, you can use `or` since the handler ret
 
 Buzz watches each atom in `:watch`. When one of them changes, it re-renders the component and sends a patch to each browser. One mount can hold one component at one element. A page can have more than one mount.
 
+A mount names its component by var, so re-evaluating the component reaches
+the open pages:
+
+```clojure
+:mounts [{:el "app" :ui #'todo-app}]
+```
+
 The page belongs to the handler, so one application can serve more than one of them. Give a handler a `:path` and it answers under that path, stream and modules included.
 
 ```clojure
@@ -112,18 +122,38 @@ The page belongs to the handler, so one application can serve more than one of t
 (defn app [req] (or (admin req) (home req) {:status 404 :body "not found"}))
 ```
 
-## Per connection state
+## Request
 
-Give a mount a `:state` function to make state that belongs to one browser. It is called with the request that opened the connection and returns a map. Buzz watches every atom in that map for that browser alone.
+Use `(buzz/request)` inside `(server ...)` and `(server! ...)` to read the
+current Ring request. In `(server ...)`, this is the request that opened the
+event stream. In `(server! ...)`, this is the RPC request.
+
+Keep state in application atoms. Use `(buzz/token (buzz/request))` as a key for
+browser-scoped state and `(buzz/connection (buzz/request))` for
+connection-scoped state. See [examples/auth](examples/auth) for per-user state
+and authentication.
 
 ```clojure
-{:el "app"
- :state (fn [req] {:user (whoami req)
-                   :query (atom "")})
- :component (fn [state] (admin (:user state) (:query state)))}
+(defonce queries (atom {}))   ; connection id -> search text
+
+(defn- my-query  [req]   (get @queries (buzz/connection req) ""))
+(defn- remember! [req q] (swap! queries assoc (buzz/connection req) q))
+
+(defui todo-app []
+  (let [todos (server (matching (my-query (buzz/request))))]
+    [:div
+     [:input {:on-input (fn [e] (server! (remember! (buzz/request)
+                                                    (client (.. e -target -value)))))}]
+     ...]))
 ```
 
-See [examples/auth](examples/auth) for a page that signs two users in and gives each of them their own data.
+A reconnect gets a new connection ID. Use `:on-close` to remove
+connection-scoped state. Buzz passes it the request that opened the connection:
+
+```clojure
+(buzz/handler {:on-close (fn [req] (swap! queries dissoc (buzz/connection req))) ...})
+```
+
 
 ## The page
 
