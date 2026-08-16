@@ -87,14 +87,15 @@ You can define a part of a component with `defpart`. A part is like a component,
   [:li (:title item)])
 ```
 
-`defpart` creates a browser function and supports recursion. Pass server
-values, local state and per-connection handlers from `defui` as arguments. A
-`server!` that uses global state can stay in the part. See
-[doc/parts.md](doc/parts.md).
+Parts compile to browser functions and can call themselves. Define
+`(server ...)` and `(local-state ...)` in `defui`, then pass their results to
+the part. Parts can contain `(server! ...)`. See [doc/parts.md](doc/parts.md).
 
 ## Mounting
 
-The `buzz/handler` function returns a Ring handler and is server agnostic. In babashka, we typically use `org.httpkit.server/run-server` to run it. The one thing a plain Ring handler cannot do is hold the event stream open, so that goes through a `buzz.stream` adapter: http-kit's ships with Buzz and is used when a handler gets no `:adapter` of its own.
+The `buzz/handler` function returns a Ring handler. Its event stream requires a
+`buzz.stream` adapter. Buzz uses the bundled http-kit adapter unless the
+handler spec supplies `:adapter`.
 
 To compose the handler with other routes, you can use `or` since the handler returns `nil` for unknown routes. For example:
 
@@ -123,10 +124,17 @@ The page belongs to the handler, so one application can serve more than one of t
 
 ## The request
 
-Inside a `(server ...)` or a `(server! ...)`, `(buzz/request)` is the request that
-caused that code to run: the one that opened the stream for a slot, the rpc
-itself for a handler. Identity and scope derive from it, and state lives in
-your own atoms:
+Use `(buzz/request)` inside `(server ...)` and `(server! ...)` to read the
+current Ring request. In `(server ...)`, this is the request that opened the
+event stream. In `(server! ...)`, this is the RPC request.
+
+Keep state in application atoms and choose a key for its scope:
+
+| scope | key |
+|-------|-----|
+| user | `(whoami (buzz/request))` |
+| browser | `(buzz/token (buzz/request))` |
+| connection | `(buzz/connection (buzz/request))` |
 
 ```clojure
 (defonce queries (atom {}))   ; connection id -> search text
@@ -142,22 +150,18 @@ your own atoms:
      ...]))
 ```
 
-A helper is ordinary server code, so it takes the request as an argument. The
-marks themselves stay in the body: `(buzz/request)` and `(client ...)` are
-rewritten at compile time, so a helper cannot call them itself.
+`(buzz/request)` and `(client ...)` are compiler forms. Use them in a component
+or part, then pass their values to ordinary server functions.
 
-Key by `(whoami (buzz/request))` for state a user owns, `(buzz/token (buzz/request))`
-for state a browser owns, and `(buzz/connection (buzz/request))` for state one
-connection owns: a tab holds one at a time, and a reconnect starts a new one.
-Connections end, so a handler takes `:on-close`, called with the request that
-opened the connection, so the key is derived the same way it was made:
+A reconnect gets a new connection ID. Use `:on-close` to remove
+connection-scoped state. Buzz passes it the request that opened the connection:
 
 ```clojure
 (buzz/handler {:on-close (fn [req] (swap! queries dissoc (buzz/connection req))) ...})
 ```
 
-See [examples/auth](examples/auth) for a page that signs two users in and
-gives each of them their own data, checked again on every action.
+See [examples/auth](examples/auth) for request-based authentication and
+per-user state.
 
 ## The page
 

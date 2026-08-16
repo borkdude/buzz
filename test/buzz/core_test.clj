@@ -333,8 +333,6 @@
     (is (false? (:request (get (:handlers inst) "quiet/0"))))
     (is (= [(deref clicks)] ((:slots inst))))))
 
-;; A part's handler reaches the request the same way, which is what lets a
-;; part act for whoever is asking without anything being passed down.
 (defpart who-button []
   [:button {:on-click (fn [_] (server! (reply (get-in (request) [:headers "x-user"]))))}
    "who"])
@@ -350,15 +348,13 @@
 
 (deftest the-request-is-refused-in-browser-code
   (testing "in value position"
-    (is (re-find #"server value"
+    (is (re-find #"only valid inside"
                  (refusal '(buzz.core/defui r1 [] [:p (buzz.core/request)])))))
   (testing "in a local-state init"
-    (is (re-find #"server value"
+    (is (re-find #"only valid inside"
                  (refusal '(buzz.core/defui r2 []
                              (let [q (buzz.core/local-state (buzz.core/request))] [:p @q])))))))
 
-;; Marks resolve like any var, so a local shadow frees the name: this server
-;; is a browser function, not a slot.
 (defui shadowed []
   (let [server (fn [x] [:em x])]
     [:p (server 1)]))

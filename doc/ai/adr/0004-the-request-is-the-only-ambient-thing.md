@@ -6,37 +6,32 @@ Status: Prototyped on the `request-mark` branch.
 
 ## Context
 
-A mount's `:state` fn ran once per connection and its result was captured in
-closures: the component was called with it, and every handler closed over it.
-One decision, four costs.
+A mount's `:state` function ran once per connection. Its result was passed to
+the component and captured by its handlers. This had four costs:
 
 1. Identity froze at stream open, which is [0003](0003-revocation-and-open-connections.md).
 2. Handlers had to be instantiated per connection, so `conns` held rebuilt
    instances and reload machinery to rebuild them.
-3. A part is compiled once, so its handlers could not reach per connection
-   state at all. First splicing compensated, which banned recursion. Then
-   passing handlers down compensated, which put browser code where the first
-   paint had to compile it.
-4. Two tabs never shared, even when the state was the user's rather than the
-   tab's, because the connection was the only scope on offer.
+3. Parts could not access per-connection state. Inlining parts prevented
+   recursion. Passing handlers to parts required browser code to compile during
+   server rendering.
+4. State was scoped to one connection even when it belonged to a user or
+   browser.
 
 ## Decision
 
-State lives in the application's own atoms. Buzz supplies one ambient value,
-the request, as a sixth mark beside `server`, `server!`, `client`, `reply`
-and `local-state`:
+Applications store state in their own atoms. Buzz adds `request` as a sixth
+compiler form beside `server`, `server!`, `client`, `reply` and `local-state`:
 
 ```clojure
 (server  (notes-for (whoami (request))))          ; the request that opened the stream
 (server! (delete! (whoami (request)) (client id))) ; the rpc carrying this call
 ```
 
-`(request)` means the request that caused this code to run. In a slot that is
-the one that opened the stream, refreshed by a reconnect. In a handler it is
-the rpc itself, so authority is checked per action, which closes the write
-path of 0003. The read path closes when the application treats the cookie as
-a key rather than a fact: delete the session it points to and the next patch
-renders the signed out view.
+In `(server ...)`, `(request)` returns the request that opened the stream. A
+reconnect supplies a new request. In `(server! ...)`, it returns the RPC
+request, so authorization can be checked for each action. Deleting a watched
+session also removes protected data from later renders.
 
 Scope is a keying choice, not a framework concept:
 
@@ -45,36 +40,27 @@ Scope is a keying choice, not a framework concept:
 | everyone | none, a plain atom |
 | per user | `(whoami (request))`, from the app's cookie |
 | per browser | `(buzz/token (request))`, Buzz's cookie |
-| per connection, which a tab holds one of | `(buzz/connection (request))`, assoc'd by Buzz |
+| per connection | `(buzz/connection (request))`, added by Buzz |
 
-The connection id is the one enrichment: the stream's opening request and
-every rpc that connection sends carry the same value, so state keyed by it
-agrees on both sides. Keying by the request map itself would not, since a
-handler's request is a fresh map per call.
+Buzz adds the same connection ID to the stream request and its RPC requests.
+Do not use the request map itself as a key because each RPC has a new map.
 
-Connections end and only Buzz knows when, so the handler spec takes one
-lifecycle notification:
+Use `:on-close` to remove connection-scoped state:
 
 ```clojure
 (buzz/handler {:on-close (fn [req] (swap! snakes dissoc (buzz/connection req))) ...})
 ```
 
-The hook receives the request that opened the connection, enriched like a
-slot's, so whichever key the application derived it derives again here. What
-that means for its atoms is its business.
-User and browser keyed maps outlive any connection and want app side TTLs.
+The hook receives the opening request with its connection ID. User-scoped and
+browser-scoped state requires an application-defined retention policy.
 
 ## Costs
 
-- A component that filters by per tab state runs its lookup on every patch of
-  every connection, where a `:state` closure read it once. The lookups this
-  design asks for are a cookie regex and a map get, well under the render and
-  encode work around them.
-- Marks that never call `(request)` compile exactly as before, and a handler
-  that asks gets it as a prepended argument. Measured on `bb bench`, which
-  never asks: four interleaved rounds against main, full browser loop per op,
-  medians in ms. Every delta is inside one standard deviation, so the branch
-  is at parity.
+- Per-connection lookups now run on every patch instead of once when the
+  connection opens. These lookups are a cookie match and a map lookup.
+- Handlers that use `(request)` receive it as an extra argument. The benchmark
+  below does not use `(request)`. Results varied without a consistent
+  regression.
 
   | op | n | main | branch |
   |----|---|------|--------|
@@ -85,16 +71,14 @@ User and browser keyed maps outlive any connection and want app side TTLs.
 
 ## Consequences
 
-`:state` and `:component` are gone: a mount that carries one is refused with
-directions. A `:ui` mount names its component by var, and one instance serves
-every connection, cached per revision. Each handler owns a registry of its
-connections, which is item 4 of
-[0002](0002-work-after-the-scheduler.md): a write watched by one page runs no
-other page's slots, and the rpc `:page` check became structural.
+Mounts use `:ui` instead of `:state` and `:component`. A component instance is
+cached per revision and shared by all connections. Each handler owns its
+connection registry, as proposed by item 4 of
+[0002](0002-work-after-the-scheduler.md). Watched writes patch only that
+handler's connections. RPC lookup is also limited to that registry.
 
 ## References
 
 - `request`, `lift-request` in `src/buzz/core.clj`
 - `connection`, `token`, `:on-close` in `src/buzz/core.clj`
-- The multi-snake branch of the same name, a game whose whole state is one
-  atom keyed by connection id.
+- The multi-snake `request-mark` branch, which keys game state by connection ID.

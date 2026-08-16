@@ -1,6 +1,5 @@
 (ns buzz.core
-  "The whole of Buzz: the compiler that splits a component between server and
-  browser, and the Ring handler that serves what it produces.
+  "Splits component definitions into server and browser code.
 
   A component body is written as if it all ran in the browser. Forms wrapped in
   `(server ...)` are pulled out:
@@ -12,26 +11,8 @@
                      an `rpc!` call in its place, carrying the local bindings
                      the expression needs
 
-  What is left is compiled to JavaScript by Squint, here, once. Renders after
-  the first one send only the values.
-
-  `handler` turns a spec into a Ring handler for one page:
-
-    (def ui
-      (handler {:title \"todos\"
-                :watch [db]                           ; patch everyone on change
-                :mounts [{:el \"app\" :ui #'todo-app}]}))
-
-    (defn app [req] (or (ui req) (my-static-files req)))
-
-  A `:ui` mount names its component by var (or thunk), called with no
-  arguments: nothing closes over a connection, so one instance serves them
-  all and per connection facts come from `(request)`. Atoms in `:watch` are
-  watched for every connection. State belongs to the application, in its own
-  atoms, keyed by what it reads from `(request)`. Requests the page does not
-  own return nil, so the application composes. The server is anyone who can
-  run Ring plus one `buzz.stream` adapter, and http-kit is only the bundled
-  default."
+  What remains is compiled to JavaScript by Squint. Later renders send only
+  server values."
   (:require [buzz.impl.page :as page]
             [buzz.impl.parts :as parts]
             [clojure.string :as str]
@@ -85,9 +66,8 @@
   (throw (ex-info "(local-state ...) used outside defui" {})))
 
 (defmacro request
-  "The request that caused this code to run: inside a `(server ...)` slot the
-  one that opened the stream, inside a `(server! ...)` the rpc carrying the
-  call. Server side only, so it never reaches the browser.
+  "Returns the current Ring request. In `(server ...)`, this is the request
+  that opened the stream. In `(server! ...)`, this is the RPC request.
 
     (server (notes-for (whoami (request))))
     (server! (delete! (whoami (request)) (client id)))"
@@ -99,25 +79,19 @@
    #'client :client, #'local-state :local-state, #'request :request})
 
 (defn- mark
-  "Which mark a head symbol names, if any. Resolution rather than the name: a
-  mark is a var like anything else, so an alias means it and a rename or a
-  local shadow frees the name."
   [head]
   (when (symbol? head)
     (marks (try (resolve head) (catch Exception _ nil)))))
 
 (def ^:private ^:dynamic *self*
-  "Metadata for the part being compiled. Used for self-recursion before its
-  var exists."
   nil)
 
 (declare ^:private split-part-body)
 (declare ^:private handlers-form)
 
 (defmacro defpart
-  "Defines a Hiccup function for use in components. Parts run in the browser
-  and can call themselves. Pass server values, local state and per-connection
-  handlers from `defui` as arguments."
+  "Defines a Hiccup function that runs in the browser. Parts can recurse.
+  Define server values and local state in `defui` and pass them as arguments."
   [nm argv & body]
   (when-let [p (some #(when (:server (meta %)) %) argv)]
     (throw (ex-info (str "^:server parameters are not supported in " nm ": " p
@@ -167,9 +141,8 @@
 (declare ^:private conv)
 
 (defn- lift-request
-  "Replaces every `(request)` in `expr` with `sym`. Returns the expression and
-  whether it asked. Marks resolve, so a function that happens to be called
-  request is someone else's var and stays untouched."
+  "Replaces `(request)` forms in `expr` with `sym`. Returns the rewritten form
+  and whether a replacement occurred."
   [expr sym]
   (let [used (atom false)
         out  (walk/postwalk
@@ -348,10 +321,8 @@
         (throw (ex-info "(client ...) crosses a value into a (server! ...). Browser state is (local-state ...)"
                         {:form form}))
 
-        ;; The ones inside server forms are lifted out before the walk, so
-        ;; this is browser code asking for a server value.
         (= :request mk)
-        (throw (ex-info "(request) is a server value. It only means something inside (server ...) or (server! ...)"
+        (throw (ex-info "(request) is only valid inside (server ...) or (server! ...)"
                         {:form form}))
         (= 'quote head)  form
         (lambda-heads head) (conv-fn form scope comp-id acc)
@@ -408,8 +379,7 @@
     :else form))
 
 (def revision
-  "Bumped every time a defui or defpart is evaluated, so re-evaluating one in
-  a REPL is enough to tell the browsers something changed."
+  "Revision counter incremented when a defui or defpart is evaluated."
   parts/revision)
 
 ;; Keep each defui form so callers can be recompiled after an arity change.
@@ -447,9 +417,6 @@
                           {:context :expr :core-alias "SQ" :elide-imports true})))
 
 (defn- handlers-form
-  "Returns a handler map form for embedding in a definition. A handler that
-  asked for the request takes it as its first parameter, and says so, so the
-  rpc endpoint knows to pass it."
   [handlers req-sym]
   (into {} (map (fn [[id h]]
                   [id {:fn `(fn ~(if (:request h)
@@ -461,7 +428,6 @@
         handlers))
 
 (defn- split-part-body
-  "Compiles a part body and rejects component-owned state."
   [qualified argv body]
   (let [acc   (atom {:slots [] :handlers [] :locals [] :parts #{} :part-syms {}
                      :req-sym (gensym "req__")})
@@ -538,8 +504,7 @@
           :init     ~init-js
           :locals   ~locals
           :parts    '~(vec parts)
-          ;; whether any slot asked for the request, so the caller knows
-          ;; which arity :slots is
+          ;; :slots takes a request only when needed.
           :request  ~(boolean request?)
           :ssr      (fn ~slot-syms ~@ssr-forms)
           :slots    (fn ~(if request? [req-sym] []) ~(vec slot-exprs))
@@ -550,20 +515,16 @@
                   {:ns '~(ns-name *ns*) :form '~&form})
        (var ~nm))))
 
-;; The page half, forwarded so the application sees one namespace.
 (def handler
-  "Returns a Ring handler for the page described by `spec`. See the namespace
-  docstring for the spec, `buzz.stream` for the `:adapter`."
+  "Returns a Ring handler for `spec`. See `buzz.stream` for `:adapter`."
   page/handler)
 
 (def connection
-  "The id of the connection `req` belongs to: the same value in a slot and in
-  every rpc that connection sends. A tab holds one at a time, and a reconnect
-  starts a new one, with `:on-close` for the old. Nil during the first paint,
-  which belongs to no connection yet."
+  "Returns the connection ID in `req`. Returns nil before the stream opens.
+  A reconnect gets a new ID."
   page/connection)
 
 (def token
-  "The browser token in `req`: one value per browser, minted by Buzz. Stable
-  across tabs and reconnects, so it keys state a browser owns."
+  "Returns the Buzz browser token in `req`. The token persists across tabs and
+  reconnects."
   page/token)

@@ -1,34 +1,15 @@
 (ns buzz.stream
-  "What Buzz asks of a server: keep one response open and let chunks be
-  written to it over time. An adapter is a function of a Ring request and
+  "Server adapter contract for event streams. An adapter receives a Ring
+  request and
 
     {:status .. :headers .. :on-open (fn [ch]) :on-close (fn [])}
 
-  that answers the request with those, keeps it open, calls `:on-open` with
-  something satisfying `Channel`, and calls `:on-close` when the client goes
-  away. Everything else Buzz serves is plain Ring, so the adapter is the whole
-  of what a server has to provide.
+  The adapter returns the server response, calls `:on-open` with a `Channel`,
+  and calls `:on-close` once when the connection closes.
 
-  The contract, learned the hard way from a server whose writes block:
-
-  - `send!` never blocks and never throws. Buzz calls it from watch threads,
-    which are the application's own `swap!` callers, so an adapter over a
-    blocking writer puts a queue and a pump thread in between and treats a
-    queue that stays full as a dead connection.
-  - Killing a connection never blocks either: a close can park in the same
-    backpressure a wedged write does.
-  - `:on-close` fires at most once. The application's own close hook is
-    downstream of it.
-  - The channel works inside `:on-open`, which is where the first frames are
-    sent, and every chunk reaches the wire promptly: a buffering adapter
-    breaks the stream invisibly.
-  - `send!` answers with whether the connection still accepts writes, so the
-    caller can stop working for a dead one.
-  - Buzz writes a heartbeat every 25 seconds, which an adapter that only
-    learns of a dead client from a failed write is allowed to lean on.
-  - `:on-close` says nothing about why. So far nobody has needed to know.")
+  `send!` and `close!` must not block or throw. `send!` returns true while the
+  connection accepts writes. Adapters must flush chunks promptly.")
 
 (defprotocol Channel
-  (send! [ch s] "Writes one chunk, keeping the stream open. Logical true
-  while the connection accepts writes.")
-  (close! [ch] "Closes the stream."))
+  (send! [ch s] "Writes one chunk. Returns true while writes are accepted.")
+  (close! [ch] "Closes the stream without blocking."))

@@ -65,16 +65,16 @@ that use it only when the number of parameters changes.
 
 - A `defpart` can call only parts that are already defined. Mutual recursion
   requires re-evaluating the first definition after both parts exist.
-- A function passed to a part can contain `(server! ...)`, but not other
-  browser-only forms. For example, this does not compile:
+- Functions passed to parts must also compile on the JVM for server rendering.
+  Keep `js/` and `await` code in the part itself:
 
   ```clojure
   (defpart submit-button [on-submit]
-    [:button {:on-click on-submit} "save"])
+    [:button {:on-click (fn [e]
+                          (js/console.log "saving")
+                          (on-submit e))}
+     "save"])
 
   (defui editor []
-    (submit-button
-     (fn [_]
-       (js/console.log "saving")
-       (server! (persist!)))))
+    (submit-button (fn [_] (server! (persist!)))))
   ```

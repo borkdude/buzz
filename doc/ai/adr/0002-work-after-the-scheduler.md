@@ -99,11 +99,9 @@ vector, which `mount` and `reload` already send.
 
 ## 4. Handler local connection registries
 
-Done, with [0004](0004-the-request-is-the-only-ambient-thing.md). Each handler
-owns a registry of its connections and keys its watches by it, `broadcast-patch!`
-walks that registry alone, and `rpc` finds only its own sessions, so the `:page`
-check fell away. The replacement this item asked for is `:on-close`, and
-multi-snake uses it. The original text follows.
+Completed by [0004](0004-the-request-is-the-only-ambient-thing.md). Each handler
+now owns a connection registry. Patches and RPC lookup use only that registry.
+`:on-close` replaces direct access to the former global registry.
 
 Each handler owns its connections and its watches.
 

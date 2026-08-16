@@ -40,9 +40,6 @@
 ;; browser gets an `rpc!` call carrying `id` — which is a binding the browser
 ;; itself introduced, in the `for`.
 
-;; Defines one browser function per row. Its handlers use the stable IDs
-;; buzz.app/todo-row/0 and buzz.app/todo-row/1.
-
 (defpart todo-row [{:keys [id title done]}]
   [:li {:key id}
    [:input {:type "checkbox"
@@ -53,10 +50,7 @@
 
 #_(todo-row {:id 1 :title "ship code, not JSON" :done false})
 
-;; What each tab is searching for, keyed by its connection, so the box is not
-;; shared between windows the way `clicks` is. It lives here because the
-;; matching runs here, and it is a plain watched atom: the app owns it, and
-;; the close hook below lets go of a tab that went away.
+;; Search text by connection ID. The close hook removes disconnected entries.
 
 (defn refuse! [] (throw (ex-info "the server said no" {})))
 
@@ -68,7 +62,6 @@
   (let [todos (server (matching (my-query (buzz/request))))
         left  (server (count (remove :done (vals @db))))
         n     (server @clicks)
-        ;; browser state, so what came back has somewhere to live
         said  (local-state nil)]
     [:div
      [:h1 "todos!"]

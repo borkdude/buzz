@@ -1,11 +1,5 @@
 (ns notes
-  "Two users, a note list each, and one page that knows which of them is
-  looking at it.
-
-  Buzz authenticates nobody. An application has to decide who someone is, and
-  keep everyone else away from the handler. What Buzz gives it is `(buzz/request)`:
-  in a slot the request that opened the stream, in a handler the rpc itself,
-  so authority is read where it is used and checked again on every action."
+  "Example note app with request-based authentication and per-user state."
   (:require [buzz.core :as buzz :refer [client defui local-state reply server server!]]
             [clojure.string :as str]
             [org.httpkit.server :as http]))
@@ -20,10 +14,8 @@
 
 (defn- role-of [user] (:role (get users user)))
 
-;; Refuses by throwing, so the browser sees a rejected promise. Every guarded
-;; handler calls this itself. A component that draws no admin control still
-;; registers its handler, because the handler map is built once for the
-;; component rather than once per render.
+;; Conditional rendering does not authorize an RPC, so privileged handlers
+;; call this directly.
 (defn- admin! [role]
   (when-not (= :admin role)
     (throw (ex-info "not allowed" {:role role}))))
@@ -88,9 +80,8 @@
   (swap! sessions dissoc t)
   {:headers {"Set-Cookie" (str (cookie "") " Max-Age=0")}})
 
-;; Nothing is passed in: every mark derives the user from the request that
-;; brought it to run. A slot reads the one that opened the stream, a handler
-;; the rpc, so a handler acts as whoever is asking now.
+;; Resolve identity from the stream request for slots and the RPC request for
+;; handlers.
 (defui board []
   (let [draft (local-state "")]
     [:div
@@ -113,10 +104,7 @@
                                            conj (client @draft)))
                            (reset! draft ""))}
       "add"]
-     ;; Drawn for an admin only. The slot decides what the page shows. It does
-     ;; not decide what the handler does, so the handler reads the role from
-     ;; its own rpc: a role withdrawn between draw and click is refused.
-     ;; A boolean rather than the role, because a keyword arrives as a string.
+     ;; Check the current role in the handler as well as during rendering.
      (when (server (= :admin (role-of (whoami (buzz/request)))))
        [:p [:a {:href "/admin"} "everyone's notes"] " "
         [:button {:on-click (fn [_]
@@ -129,21 +117,14 @@
                               (set! js/window.location "/signin"))}
           "sign out"]]]))
 
-;; `sessions` is watched as well: signing out deletes the session a slot's
-;; cookie points to, so every open page of that user redraws signed out on the
-;; next patch rather than on its next reconnect.
+;; Watching sessions redraws open pages after signout.
 (def ^:private notes-ui
   (buzz/handler
    {:title "notes"
     :watch [notes sessions]
     :mounts [{:el "app" :ui #'board}]}))
 
-;; Requests Buzz does not own return nil, so the application decides what
-;; reaches it. Everything Buzz serves sits behind the same check: the page, the
-;; event stream and the rpc endpoint alike. Guarding only the page would leave
-;; the handlers open, and a `server!` handler is an endpoint.
-;; The login page is a component too, on its own path so that its stream and its
-;; modules do not collide with the ones behind the gate.
+;; Route checks protect the page, event stream, and RPC endpoint.
 (defui doorbell []
   (let [form (local-state {:who "" :pw "" :err nil})]
     [:div
@@ -152,9 +133,7 @@
                   :on-input (fn [e] (swap! form assoc :who (.. e -target -value)))}]]
      [:p [:input {:type "password" :value (:pw @form) :placeholder "password"
                   :on-input (fn [e] (swap! form assoc :pw (.. e -target -value)))}]]
-     ;; The reply carries the Set-Cookie, so the browser is signed in by the
-     ;; time this resolves. A wrong password throws on the server, which the
-     ;; browser sees as a rejected promise.
+     ;; Wait for the Set-Cookie response before redirecting.
      [:button {:on-click (^:async fn [_]
                           (try
                             (await (server! (reply :ok (sign-in! (client (:who @form))
@@ -170,16 +149,9 @@
                  :path "/signin"
                  :mounts [{:el "signin" :ui #'doorbell}]}))
 
-;; Only an admin gets past the check in `app`, so only an admin opens this
-;; stream. That is worth having, but it is not what makes `clear!` safe: the
-;; handler checks the role itself, the way every handler that does something
-;; only some people may do has to.
-;;
-;; The role comes from the rpc that carries the click, so taking it away is
-;; refused on the very next action, open connection or not.
+;; Check the current RPC role and the browser-supplied user.
 (defn- clear! [role who]
   (admin! role)
-  ;; the browser says which list to empty, so only a name that exists may be one
   (when (contains? users who)
     (swap! notes assoc who [])))
 
@@ -187,8 +159,6 @@
   [:div
    [:h1 "everyone's notes"]
    [:ul
-    ;; joined here rather than in the browser, so the body stays free of
-    ;; anything the page would have to import
     (for [row (server (mapv (fn [[who ns]] {:who who :notes (str/join ", " ns)})
                             (sort @notes)))]
       [:li {:key (:who row)}
