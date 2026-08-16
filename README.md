@@ -49,7 +49,7 @@ Create a project with two files. `deps.edn`:
 (def ui
   (buzz/handler {:title "counter"
                  :watch [clicks]
-                 :mounts [{:el "app" :component (fn [_] (counter))}]}))
+                 :mounts [{:el "app" :ui #'counter}]}))
 
 (defn -main [& _]
   (http/run-server (fn [req] (or (ui req) {:status 404 :body "not found"}))

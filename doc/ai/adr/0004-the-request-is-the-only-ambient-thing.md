@@ -83,10 +83,12 @@ User and browser keyed maps outlive any connection and want app side TTLs.
 
 ## Consequences
 
-`:state` and per connection instances are no longer load bearing. A `:ui`
-mount names its component by var, and one instance serves every connection,
-cached per revision. `:component` and `:state` still work, instantiated per
-connection as before, and nothing uses them in the examples.
+`:state` and `:component` are gone: a mount that carries one is refused with
+directions. A `:ui` mount names its component by var, and one instance serves
+every connection, cached per revision. Each handler owns a registry of its
+connections, which is item 4 of
+[0002](0002-work-after-the-scheduler.md): a write watched by one page runs no
+other page's slots, and the rpc `:page` check became structural.
 
 ## References
 

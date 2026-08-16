@@ -9,9 +9,7 @@
 
   A `:ui` mount names its component by var (or thunk), called with no
   arguments: nothing closes over a connection, so one instance serves them
-  all and per connection facts come from `(request)`. A `:component` mount is
-  the older form, a fn of the mount's `:state` map, instantiated per
-  connection.
+  all and per connection facts come from `(request)`.
 
     (defn app [req] (or (ui req) (my-static-files req)))
 
@@ -20,16 +18,10 @@
   mount with an `<!--el-->` comment for the first paint and the script tags with
   `nonce=\"NONCE\"`.
 
-  Every atom in a mount's `:state` map is watched for that connection alone.
-  Atoms in the top level `:watch` are watched for all of them.
-
-  A mount's `:state` is given the request that opened the connection, which is
-  where an identity comes from. Buzz authenticates nobody: what a `:state` fn
-  makes of a request, and whether the handler is wrapped in anything, is the
-  application's business.
-
-  It is called once for the first paint and again when the connection opens, so
-  read the request rather than act on it.
+  Atoms in `:watch` are watched for every connection. State belongs to the
+  application, in its own atoms, keyed by what it reads from `(request)`.
+  Buzz authenticates nobody: what an application makes of a request, and
+  whether the handler is wrapped in anything, is its business.
 
   Requests the page does not own return nil, so the application composes."
   (:require [babashka.fs :as fs]
@@ -45,12 +37,13 @@
 ;; /rpc is a plain request. Nothing is bidirectional, so there is no upgrade to
 ;; negotiate and no socket to nurse: EventSource reconnects on its own.
 ;;
-;; session -> {:ch channel :owner browser token :page the handler that built it
-;;             :mounted [{:el :state :instance :spec}]}. A connection needs its
-;; own instances because a handler closes over the arguments its component was
-;; called with, and it needs a session id because the RPC arrives on a separate
-;; request that has to find them again.
-(defonce conns (atom {}))
+;; Each handler owns a registry of its connections,
+;; session -> {:ch channel :owner browser token
+;;             :mounted [{:el :spec :sent :req :instance}]},
+;; so an id from one page cannot be found by another one's endpoint, and a
+;; write watched by one page runs no other page's slots. The heartbeat and the
+;; reload walk every registry, which is what this set is for.
+(defonce ^:private registries (atom #{}))
 
 ;; A session id arrives in the rpc body, so on its own it lets anyone who learns
 ;; one act as the connection it belongs to, whatever they signed in as. Buzz
@@ -122,12 +115,9 @@
       (reset! sent vals)
       (event! ch ["patch" (:id instance) vals]))))
 
-;; The request is what a connection knows about who opened it. Handing it to
-;; `:state` is the only place identity can enter, since a handler is a closure
-;; over the state its component was built with and never sees a request itself.
-;; A `:ui` mount names its component by var (or thunk), so nothing closes over
-;; a connection and one instance can serve them all. Cached per revision: a
-;; reload builds the next one, and every connection sees it.
+;; A mount names its component by var (or thunk), so nothing closes over a
+;; connection and one instance serves them all. Cached per revision: a reload
+;; builds the next one, and every connection sees it.
 (defn- shared-instance [ui]
   (let [cache (atom nil)]
     (fn []
@@ -136,32 +126,11 @@
           (:inst c)
           (:inst (reset! cache {:rev rev :inst (if (var? ui) ((deref ui)) (ui))})))))))
 
-(defn- instance-of
-  "The instance a mount shows: the shared one for a `:ui` mount, a fresh one
-  over `state` for a legacy `:component` mount."
-  [spec state]
-  (if-let [f (::instance spec)] (f) ((:component spec) state)))
+(defn- build [{:keys [el] :as spec} req]
+  {:el el :spec spec :sent (atom ::none) :req req
+   :instance ((::instance spec))})
 
-(defn- build [{:keys [el state] :as spec} req]
-  (let [st (if state (state req) {})]
-    {:el el :state st :spec spec :sent (atom ::none) :req req
-     :instance (instance-of spec st)}))
-
-;; What a connection owns is not all atoms. An identity read from the request is
-;; a plain value, and there is nothing to watch about it.
-(defn- refs [state]
-  (filter #(instance? clojure.lang.IRef %) (vals state)))
-
-(defn- watch-session! [ch session mount]
-  (doseq [a (refs (:state mount))]
-    (add-watch a [::render session (:id (:instance mount))]
-               (fn [_ _ _ _] (patch! ch mount)))))
-
-(defn- unwatch-session! [session mounted]
-  (doseq [m mounted, a (refs (:state m))]
-    (remove-watch a [::render session (:id (:instance m))])))
-
-(defn- open-stream [session ch req mounts page]
+(defn- open-stream [registry session ch req mounts]
   (let [held  (browser-token req)
         token (or held (str (random-uuid)))]
     (http/send! ch {:status 200
@@ -174,21 +143,19 @@
     ;; is something here to find under it. Building the mounts renders every
     ;; component, which is long enough for a browser to have answered.
     (let [mounted (mapv #(build % (assoc req ::connection session)) mounts)]
-      (swap! conns assoc session {:ch ch :mounted mounted :owner token :page page})
+      (swap! registry assoc session {:ch ch :mounted mounted :owner token})
       (event! ch ["session" session])
       (doseq [{:keys [el instance sent] :as m} mounted]
-        (watch-session! ch session m)
         (let [vals (slot-vals m)]
           (reset! sent vals)
           (event! ch ["mount" (:id instance) el vals]))))))
 
-(defn- events [req mounts page on-close]
+(defn- events [registry req mounts on-close]
   (let [session (str (random-uuid))]
     (http/as-channel req
-                     {:on-open  (fn [ch] (open-stream session ch req mounts page))
+                     {:on-open  (fn [ch] (open-stream registry session ch req mounts))
                       :on-close (fn [_ _]
-                                  (unwatch-session! session (:mounted (get @conns session)))
-                                  (swap! conns dissoc session)
+                                  (swap! registry dissoc session)
                                   ;; the app hears the id its request-keyed
                                   ;; state used, so it can let go of it
                                   (when on-close (on-close session)))})))
@@ -203,18 +170,18 @@
 ;; browser's promise rejects. The detail stays here: an exception message can
 ;; carry more than a browser should be told.
 ;;
-;; Three things have to agree before a handler runs. The header, because a
+;; Two things have to agree before a handler runs. The header, because a
 ;; request that carries one is not a form a page elsewhere can post: it needs a
 ;; preflight, and Buzz answers none. Same site is not the same as same origin,
-;; so a neighbouring subdomain would otherwise be allowed to try. The page,
-;; because `conns` is one map for every handler in the process and an id from
-;; one page would otherwise be answered by another one's endpoint. The token,
-;; because a session id on its own says nothing about who is asking.
-(defn- rpc [req page]
+;; so a neighbouring subdomain would otherwise be allowed to try. The token,
+;; because a session id on its own says nothing about who is asking. The page
+;; needs no check of its own any more: each handler looks in its own registry,
+;; so another page's session id finds nothing here.
+(defn- rpc [registry req]
   (let [[session handler-id args] (json/parse-string (slurp (:body req)))
-        conn (get @conns session)]
+        conn (get @registry session)]
     (if-let [h (and (get-in req [:headers "x-buzz-rpc"])
-                    (= (:page conn) page)
+                    conn
                     (= (:owner conn) (browser-token req))
                     (some #(get (:handlers (:instance %)) handler-id)
                           (:mounted conn)))]
@@ -236,27 +203,26 @@
       (json-response 404 {:error "no such handler"}))))
 
 ;; The reply to an RPC is not the response. It is whatever :patch the write
-;; happens to produce, on every stream watching that data.
-(defn- broadcast-patch! [_ _ _ _]
-  (doseq [{:keys [ch mounted]} (vals @conns)
-          m mounted]
-    (patch! ch m)))
+;; happens to produce, on every stream of this handler watching that data. The
+;; walk is per registry, so a write watched by one page runs no other page's
+;; slots.
+(defn- broadcast-patch! [registry]
+  (fn [_ _ _ _]
+    (doseq [{:keys [ch mounted]} (vals @registry)
+            m mounted]
+      (patch! ch m))))
 
 ;; Re-evaluating a defui in a REPL bumps the revision. Rebuild each
 ;; connection's instances so their handler ids match the new code, then tell the
-;; browser to import the components again under a fresh URL. Per-connection
-;; state is kept, so a reload does not clear what someone had typed.
+;; browser to import the components again under a fresh URL. Browser state is
+;; the browser's, so a reload does not clear what someone had typed.
 (defn- reload-all! [_ _ _ rev]
-  (doseq [[session {:keys [ch mounted]}] @conns]
-    (let [rebuilt (mapv (fn [m] (assoc m :instance (instance-of (:spec m) (:state m)))) mounted)]
-      (swap! conns assoc-in [session :mounted] rebuilt)
-      ;; A watch closes over the mount it was installed with, so the old ones
-      ;; still hold the old instance and would patch with the slots of code the
-      ;; browser has stopped running.
-      (unwatch-session! session mounted)
+  (doseq [registry @registries
+          [session {:keys [ch mounted]}] @registry]
+    (let [rebuilt (mapv (fn [m] (assoc m :instance ((::instance (:spec m))))) mounted)]
+      (swap! registry assoc-in [session :mounted] rebuilt)
       ;; the slots may have changed shape, so this one always goes out
       (doseq [{:keys [instance sent] :as m} rebuilt]
-        (watch-session! ch session m)
         (let [vals (slot-vals m)]
           (reset! sent vals)
           (event! ch ["reload" rev (:id instance) vals]))))))
@@ -266,13 +232,14 @@
 ;; Idle streams get dropped by proxies. A comment frame is ignored by
 ;; EventSource and keeps the connection accounted for.
 ;; One for the whole process rather than one per page, since it walks every
-;; connection there is.
+;; registry there is.
 (defonce ^:private heartbeat
   (delay
     (future
       (loop []
         (Thread/sleep 25000)
-        (doseq [{:keys [ch]} (vals @conns)]
+        (doseq [registry @registries
+                {:keys [ch]} (vals @registry)]
           (http/send! ch ": ping\n\n" false))
         (recur)))))
 
@@ -305,10 +272,7 @@
 ;; one to a JavaScript expression, so this only has to give them their imports
 ;; and a name. The browser imports the result and never evaluates a string.
 (defn- components-module [mounts path]
-  ;; Only :js is read, and that does not depend on the arguments, so the
-  ;; components are called with no state at all rather than with a connection's.
-  ;; Building one here would run every `:state` fn for a module that ignores it.
-  (let [insts (map #(instance-of % {}) mounts)
+  (let [insts (map #((::instance %)) mounts)
         ;; Resolve parts per request so edits do not require recompiling callers.
         parts (core/parts-closure (mapcat :parts insts))]
     {:status 200
@@ -342,8 +306,8 @@
 ;; First paint. Each component renders here from the same converted form, with
 ;; handlers blanked, which changes no output because Reagami's ssr drops every
 ;; `on*` attribute by name anyway. Reagami adopts these nodes in the browser
-;; instead of rebuilding them. There is no connection yet, so a mount's `:state`
-;; starts empty for this render.
+;; instead of rebuilding them. There is no connection yet, so `(request)` in a
+;; slot is the page request and its connection id is nil.
 (defn- first-paint [spec req]
   (let [mount (build spec req)
         inst  (:instance mount)
@@ -410,19 +374,23 @@
 
   Installs watches and starts the heartbeat as a side effect of being called."
   [{:keys [watch mounts path] :as spec}]
-  (doseq [a watch]
-    (add-watch a ::render broadcast-patch!))
+  (doseq [m mounts]
+    (when (or (:state m) (:component m))
+      (throw (ex-info (str "a mount is {:el ... :ui #'component}. :state and :component are gone: "
+                           "derive per connection facts from (request) and key your own atoms")
+                      {:mount (select-keys m [:el])})))
+    (when-not (:ui m)
+      (throw (ex-info "a mount needs :ui, a component var or thunk" {:mount m}))))
   @heartbeat
-  (let [mounts (mapv (fn [m] (if-let [ui (:ui m)]
-                               (assoc m ::instance (shared-instance ui))
-                               m))
-                     mounts)
+  (let [registry (atom {})
+        _      (swap! registries conj registry)
+        _      (doseq [a watch]
+                 ;; keyed by this handler's registry, so two handlers watching
+                 ;; one atom each broadcast to their own connections
+                 (add-watch a [::render registry] (broadcast-patch! registry)))
+        mounts (mapv (fn [m] (assoc m ::instance (shared-instance (:ui m)))) mounts)
         spec   (assoc spec :mounts mounts)
         path   (or path "")
-        ;; what tells one handler's connections from another's. The path rather
-        ;; than something minted here, so that building the same handler twice
-        ;; still owns the connections it opened the first time.
-        page   path
         routes (cond-> {(str path "/")               :page
                         (str path "/client.mjs")     :client
                         (str path "/rpc.mjs")        :rpc-module
@@ -431,12 +399,16 @@
                         (str path "/rpc")            :rpc}
                  ;; /admin and /admin/ are the same page
                  (seq path) (assoc path :page))]
-    (fn [req]
-      (case (routes (:uri req))
-        :page       (index-page req spec)
-        :client     (runtime-module "client.cljs" path)
-        :rpc-module (runtime-module "rpc.cljs" path)
-        :components (components-module mounts path)
-        :events     (events req mounts page (:on-close spec))
-        :rpc        (rpc req page)
-        nil))))
+    ;; the registry rides on the handler for whoever holds the fn, which is
+    ;; how the tests look inside without a global to reach for
+    (with-meta
+      (fn [req]
+        (case (routes (:uri req))
+          :page       (index-page req spec)
+          :client     (runtime-module "client.cljs" path)
+          :rpc-module (runtime-module "rpc.cljs" path)
+          :components (components-module mounts path)
+          :events     (events registry req mounts (:on-close spec))
+          :rpc        (rpc registry req)
+          nil))
+      {::registry registry})))
