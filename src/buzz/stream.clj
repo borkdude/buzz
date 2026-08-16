@@ -21,8 +21,14 @@
     downstream of it.
   - The channel works inside `:on-open`, which is where the first frames are
     sent, and every chunk reaches the wire promptly: a buffering adapter
-    breaks the stream invisibly.")
+    breaks the stream invisibly.
+  - `send!` answers with whether the connection still accepts writes, so the
+    caller can stop working for a dead one.
+  - Buzz writes a heartbeat every 25 seconds, which an adapter that only
+    learns of a dead client from a failed write is allowed to lean on.
+  - `:on-close` says nothing about why. So far nobody has needed to know.")
 
 (defprotocol Channel
-  (send! [ch s] "Writes one chunk, keeping the stream open.")
+  (send! [ch s] "Writes one chunk, keeping the stream open. Logical true
+  while the connection accepts writes.")
   (close! [ch] "Closes the stream."))

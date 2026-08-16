@@ -6,6 +6,7 @@
 
 (defn- wrap [ch]
   (reify stream/Channel
+    ;; http-kit's send! already answers false once the channel closed
     (send! [_ s] (http/send! ch s false))
     (close! [_] (http/close ch))))
 

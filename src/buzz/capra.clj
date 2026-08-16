@@ -47,11 +47,12 @@
 (defn- channel [^LinkedBlockingQueue queue out open on-close done]
   (reify stream/Channel
     (send! [_ s]
-      (when @open
-        ;; a queue that stays full means nobody is draining it, which is a
-        ;; dead connection with extra steps
-        (when-not (.offer queue s 1 TimeUnit/SECONDS)
-          (die! open out on-close done))))
+      (boolean
+       (when @open
+         ;; a queue that stays full means nobody is draining it, which is a
+         ;; dead connection with extra steps
+         (or (.offer queue s 1 TimeUnit/SECONDS)
+             (do (die! open out on-close done) false)))))
     (close! [_]
       (die! open out on-close done)
       (.offer queue goodbye))))
