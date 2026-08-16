@@ -1,22 +1,15 @@
 (ns buzz.impl.page
-  "The page half of buzz.core: the Ring handler for what the compiler
-  produced. Its own file for its own reading, not its own API: everything an
-  application touches is forwarded from `buzz.core`, which loads this after
-  the compiler is defined, so reaching back is done by name."
+  "The page half of Buzz: the Ring handler for what the compiler produced.
+  Its own file for its own reading, not its own API: everything an
+  application touches is forwarded from `buzz.core`."
   (:require [babashka.fs :as fs]
+            [buzz.impl.parts :as parts]
             [buzz.stream :as stream]
             [cheshire.core :as json]
             [clojure.java.io :as io]
             [clojure.string :as str]
             [reagami.ssr :as ssr]
             [squint.compiler :as squint]))
-
-;; The compiler's vars, reached by name: `buzz.core` is mid-load when this
-;; file loads, so a `:require` back at it would load it twice.
-(def ^:private parts-closure* (delay (requiring-resolve 'buzz.core/parts-closure)))
-(def ^:private js-name*       (delay (requiring-resolve 'buzz.core/js-name)))
-;; deref'd once here: the delay holds the atom, not the var
-(def ^:private revision*      (delay @(requiring-resolve 'buzz.core/revision)))
 
 (defonce ^:private registries (atom #{}))
 
@@ -96,7 +89,7 @@
 (defn- shared-instance [ui]
   (let [cache (atom nil)]
     (fn []
-      (let [rev @@revision* c @cache]
+      (let [rev @parts/revision c @cache]
         (if (and c (= rev (:rev c)))
           (:inst c)
           (:inst (reset! cache {:rev rev :inst (if (var? ui) ((deref ui)) (ui))})))))))
@@ -193,7 +186,7 @@
 ;; connection's instances so their handler ids match the new code, then tell the
 ;; browser to import the components again under a fresh URL. Browser state is
 ;; the browser's, so a reload does not clear what someone had typed.
-(defn ^:no-doc reload-all! [_ _ _ rev]
+(defn- reload-all! [_ _ _ rev]
   (doseq [registry @registries
           [session {:keys [ch mounted]}] @registry]
     (let [rebuilt (mapv (fn [m] (assoc m :instance ((::instance (:spec m))))) mounted)]
@@ -249,13 +242,13 @@
 (defn- components-module [mounts path]
   (let [insts (map #((::instance %)) mounts)
         ;; Resolve parts per request so edits do not require recompiling callers.
-        parts (@parts-closure* (mapcat :parts insts))]
+        parts (parts/parts-closure (mapcat :parts insts))]
     {:status 200
      :headers js-headers
      :body (str "import * as SQ from \"squint-cljs/core.js\";\n"
                 "import { rpc_BANG_ } from \"" path "/rpc.mjs\";\n"
                 (str/join (for [[sym m] parts]
-                            (str "const " (@js-name* sym) " = " (:buzz/js m) ";\n")))
+                            (str "const " (parts/js-name sym) " = " (:buzz/js m) ";\n")))
                 "export const registry = {\n"
                 (str/join ",\n"
                           (map #(str "  " (pr-str (:id %)) ": {f: " (:js %)
@@ -395,3 +388,5 @@
           :rpc        (rpc registry req)
           nil))
       {:buzz.core/registry registry})))
+
+(add-watch parts/revision ::reload reload-all!)

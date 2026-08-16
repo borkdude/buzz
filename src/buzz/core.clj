@@ -32,7 +32,9 @@
   own return nil, so the application composes. The server is anyone who can
   run Ring plus one `buzz.stream` adapter, and http-kit is only the bundled
   default."
-  (:require [clojure.string :as str]
+  (:require [buzz.impl.page :as page]
+            [buzz.impl.parts :as parts]
+            [clojure.string :as str]
             [clojure.walk :as walk]
             [squint.compiler :as squint]))
 
@@ -127,14 +129,14 @@
           (split-part-body qualified argv body))]
     `(do (let [was# (when-let [v# (resolve '~nm)] (when (bound? v#) @v#))]
            (def ~nm (with-meta (fn ~argv ~@ssr-forms)
-                      {::fn-part true
-                       :buzz/name '~qualified
+                      (parts/fn-part-meta
+                       {:buzz/name '~qualified
                        :buzz/arity ~(count argv)
                        :buzz/js ~js
                        :buzz/parts '~(vec parts)
-                       :buzz/handlers ~(handlers-form handlers req-sym)}))
+                       :buzz/handlers ~(handlers-form handlers req-sym)})))
            ;; Recompile callers only when the argument count changes.
-           (if (and (fn? was#) (::fn-part (meta was#))
+           (if (and (parts/fn-part? was#)
                     (not= ~(count argv) (:buzz/arity (meta was#))))
              (recompile!)
              (touch!)))
@@ -278,10 +280,9 @@
         [scope' bvec'] (conv-bindings bvec scope lambda? comp-id acc)]
     (apply list head bvec' (mapv #(conv % scope' lambda? comp-id acc) body))))
 
-(defn js-name
+(def js-name
   "Returns a qualified part name as a JavaScript module binding."
-  [sym]
-  (str/replace (munge (str sym)) "." "_DOT_"))
+  parts/js-name)
 
 (defn- js-part-sym
   "Returns the symbol used for part calls and module declarations."
@@ -366,7 +367,7 @@
                            :simple (:name *self*)}
                           args scope lambda? comp-id acc)
 
-            (and (fn? value) (::fn-part (meta value)))
+            (parts/fn-part? value)
             (let [m (meta value)]
               (fn-part-call {:qualified (:buzz/name m) :arity (:buzz/arity m)
                              :simple (symbol (name (:buzz/name m)))}
@@ -406,9 +407,10 @@
                      :else (apply list (mapv ssr-form form)))
     :else form))
 
-;; Bumped every time a defui is evaluated, so re-evaluating one in a REPL is
-;; enough to tell the browsers something changed.
-(defonce revision (atom 0))
+(def revision
+  "Bumped every time a defui or defpart is evaluated, so re-evaluating one in
+  a REPL is enough to tell the browsers something changed."
+  parts/revision)
 
 ;; Keep each defui form so callers can be recompiled after an arity change.
 (defonce ^:private components (atom {}))
@@ -486,18 +488,9 @@
   []
   (swap! revision inc))
 
-(defn parts-closure
+(def parts-closure
   "Returns metadata for every part reachable from `syms`."
-  [syms]
-  (loop [todo (seq syms) seen {}]
-    (if-let [[s & more] todo]
-      (if (contains? seen s)
-        (recur more seen)
-        (let [m (some-> (try (resolve s) (catch Exception _ nil)) deref meta)]
-          (if (::fn-part m)
-            (recur (concat more (:buzz/parts m)) (assoc seen s m))
-            (recur more seen))))
-      seen)))
+  parts/parts-closure)
 
 (defn part-handlers
   "Returns the merged handlers for every part reachable from `syms`."
@@ -557,10 +550,7 @@
                   {:ns '~(ns-name *ns*) :form '~&form})
        (var ~nm))))
 
-;; The page half. Loaded here at the end, so it can reach everything above by
-;; name without a cycle, and forwarded, so the application sees one namespace.
-(require '[buzz.impl.page :as page])
-
+;; The page half, forwarded so the application sees one namespace.
 (def handler
   "Returns a Ring handler for the page described by `spec`. See the namespace
   docstring for the spec, `buzz.stream` for the `:adapter`."
@@ -576,5 +566,3 @@
   "The browser token in `req`: one value per browser, minted by Buzz. Stable
   across tabs and reconnects, so it keys state a browser owns."
   page/token)
-
-(add-watch revision ::reload page/reload-all!)
