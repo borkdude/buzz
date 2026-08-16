@@ -2,7 +2,8 @@ name: test
 
 on:
   push:
-    branches: [main]
+    # request-mark while the redesign is watched for flaky hangs
+    branches: [main, request-mark]
   pull_request:
 
 jobs:
