@@ -1,7 +1,6 @@
 (ns buzz.app
   (:require [babashka.nrepl.server :as nrepl]
-            [buzz.core :refer [client defpart defui local-state reply request server server!]]
-            [buzz.handler :as buzz]
+            [buzz.core :as buzz :refer [client defpart defui local-state reply request server server!]]
             [clojure.string :as str]
             [org.httpkit.server :as http]))
 

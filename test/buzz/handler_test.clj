@@ -1,7 +1,7 @@
 (ns buzz.handler-test
   (:require [babashka.fs :as fs]
-            [buzz.core :refer [defpart defui local-state reply request server server!]]
-            [buzz.handler :as handler]
+            [buzz.core :as handler :refer [defpart defui local-state reply request server server!]]
+            [buzz.stream :as stream]
             [cheshire.core :as json]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
@@ -788,3 +788,47 @@
 
       (testing "anything else in the map is part of the response too"
         (is (str/includes? (rpc-raw conn "gate/2") "HTTP/1.1 201"))))))
+
+;; The stream is the one response plain Ring cannot make, so it is the whole
+;; of what an adapter provides. A fake one drives a page with no server and no
+;; socket, which is also what running Buzz on another server looks like.
+(defui faked []
+  [:p (server @shared)])
+
+(def ^:private faked-spec
+  {:title "faked"
+   :watch [shared]
+   :mounts [{:el "app" :ui #'faked}]})
+
+(deftest the-stream-is-served-through-an-adapter
+  (reset! shared 0)
+  (let [frames  (atom [])
+        opened  (atom nil)
+        closed  (atom nil)
+        fake    (fn [_req {:keys [status on-open on-close]}]
+                  (reset! opened on-open)
+                  (reset! closed on-close)
+                  {:status status :body :fake-stream})
+        ui      (handler/handler (assoc faked-spec :adapter fake))
+        resp    (ui {:uri "/events"})
+        ch      (reify stream/Channel
+                  (send! [_ s] (swap! frames conj s))
+                  (close! [_] nil))]
+
+    (testing "the adapter's answer is the response"
+      (is (= :fake-stream (:body resp))))
+
+    (@opened ch)
+
+    (testing "the session and the mount arrive as frames"
+      (is (= 2 (count @frames)))
+      (is (str/starts-with? (first @frames) "data: [\"session\""))
+      (is (str/includes? (second @frames) "\"mount\"")))
+
+    (testing "a watched write patches through the same channel"
+      (swap! shared inc)
+      (is (str/includes? (last @frames) "\"patch\"")))
+
+    (testing "the close callback drops the connection"
+      (@closed)
+      (is (empty? (registry-of ui))))))

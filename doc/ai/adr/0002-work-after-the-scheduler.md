@@ -198,7 +198,7 @@ small.
 
 ## References
 
-- `patch!`, `broadcast-patch!`, `conns` in `src/buzz/handler.clj`
+- `patch!`, `broadcast-patch!`, the registries in `src/buzz/core.clj`
 - `split-body` in `src/buzz/core.clj`, for what 2 could decide statically
 - `handle` in `resources/buzz/client.cljs`, which 3 changes
 - multi-snake `src/snake/main.clj`, for the `conns` watch that 4 breaks

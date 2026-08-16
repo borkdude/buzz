@@ -6,8 +6,7 @@
   keep everyone else away from the handler. What Buzz gives it is `(request)`:
   in a slot the request that opened the stream, in a handler the rpc itself,
   so authority is read where it is used and checked again on every action."
-  (:require [buzz.core :refer [client defui local-state reply request server server!]]
-            [buzz.handler :as buzz]
+  (:require [buzz.core :as buzz :refer [client defui local-state reply request server server!]]
             [clojure.string :as str]
             [org.httpkit.server :as http]))
 

@@ -77,7 +77,7 @@ handled.
 
 ## References
 
-- `broadcast-patch!`, `conns` in `src/buzz/handler.clj`
+- `broadcast-patch!`, the registries in `src/buzz/core.clj`
 - `:state` and what a connection is built with, in the `handler` docstring
 - `examples/auth/README.md`, on a role reaching an open connection
 - Phoenix LiveView security model, on `live_socket_id` and disconnecting

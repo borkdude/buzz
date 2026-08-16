@@ -93,6 +93,6 @@ other page's slots, and the rpc `:page` check became structural.
 ## References
 
 - `request`, `lift-request` in `src/buzz/core.clj`
-- `connection`, `token`, `:on-close` in `src/buzz/handler.clj`
+- `connection`, `token`, `:on-close` in `src/buzz/core.clj`
 - The multi-snake branch of the same name, a game whose whole state is one
   atom keyed by connection id.

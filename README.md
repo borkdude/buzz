@@ -32,8 +32,7 @@ Create a project with two files. `deps.edn`:
 
 ```clojure
 (ns counter
-  (:require [buzz.core :refer [client defui local-state server server!]]
-            [buzz.handler :as buzz]
+  (:require [buzz.core :as buzz :refer [client defui local-state server server!]]
             [org.httpkit.server :as http]))
 
 (defonce clicks (atom 0))
@@ -95,7 +94,7 @@ values, local state and per-connection handlers from `defui` as arguments. A
 
 ## Mounting
 
-The `buzz/handler` function returns a Ring handler and is server agnostic. In babashka, we typically use `org.httpkit.server/run-server` to run it.
+The `buzz/handler` function returns a Ring handler and is server agnostic. In babashka, we typically use `org.httpkit.server/run-server` to run it. The one thing a plain Ring handler cannot do is hold the event stream open, so that goes through a `buzz.stream` adapter: http-kit's ships with Buzz and is used when a handler gets no `:adapter` of its own.
 
 To compose the handler with other routes, you can use `or` since the handler returns `nil` for unknown routes. For example:
 
