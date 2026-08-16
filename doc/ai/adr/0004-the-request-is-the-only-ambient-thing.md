@@ -56,10 +56,12 @@ Connections end and only Buzz knows when, so the handler spec takes one
 lifecycle notification:
 
 ```clojure
-(buzz/handler {:on-close (fn [conn-id] (swap! snakes dissoc conn-id)) ...})
+(buzz/handler {:on-close (fn [req] (swap! snakes dissoc (buzz/connection req))) ...})
 ```
 
-What that means for the application's atoms is the application's business.
+The hook receives the request that opened the connection, enriched like a
+slot's, so whichever key the application derived it derives again here. What
+that means for its atoms is its business.
 User and browser keyed maps outlive any connection and want app side TTLs.
 
 ## Costs

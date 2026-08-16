@@ -149,11 +149,11 @@ rewritten at compile time, so a helper cannot call them itself.
 Key by `(whoami (buzz/request))` for state a user owns, `(buzz/token (buzz/request))`
 for state a browser owns, and `(buzz/connection (buzz/request))` for state one
 connection owns: a tab holds one at a time, and a reconnect starts a new one.
-Connections end, so a handler takes `:on-close`, called with the connection
-id, to let go of what one held:
+Connections end, so a handler takes `:on-close`, called with the request that
+opened the connection, so the key is derived the same way it was made:
 
 ```clojure
-(buzz/handler {:on-close (fn [conn] (swap! queries dissoc conn)) ...})
+(buzz/handler {:on-close (fn [req] (swap! queries dissoc (buzz/connection req))) ...})
 ```
 
 See [examples/auth](examples/auth) for a page that signs two users in and

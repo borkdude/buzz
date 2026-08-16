@@ -103,7 +103,7 @@
   ;; The session id is what an RPC arrives with, so it goes out only once there
   ;; is something here to find under it. Building the mounts renders every
   ;; component, which is long enough for a browser to have answered.
-  (let [mounted (mapv #(build % (assoc req :buzz.core/connection session)) mounts)]
+  (let [mounted (mapv #(build % req) mounts)]
     (swap! registry assoc session {:ch ch :mounted mounted :owner token})
     (event! ch ["session" session])
     (doseq [{:keys [el instance sent] :as m} mounted]
@@ -117,7 +117,10 @@
 (defn- events [registry adapter req mounts on-close]
   (let [session (str (random-uuid))
         held    (browser-token req)
-        token   (or held (str (random-uuid)))]
+        token   (or held (str (random-uuid)))
+        ;; enriched once: the same request the slots read, connection id and
+        ;; all, so a key derived at open can be derived again at close
+        req     (assoc req :buzz.core/connection session)]
     (adapter req
              {:status 200
               :headers (cond-> {"Content-Type" "text/event-stream"
@@ -127,9 +130,9 @@
               :on-open  (fn [ch] (open-stream registry session ch req mounts token))
               :on-close (fn []
                           (swap! registry dissoc session)
-                          ;; the app hears the id its request-keyed state
-                          ;; used, so it can let go of it
-                          (when on-close (on-close session)))})))
+                          ;; the app hears the request its keys derived from,
+                          ;; so it can derive them again and let go
+                          (when on-close (on-close req)))})))
 
 (defn- json-response [status body]
   {:status status

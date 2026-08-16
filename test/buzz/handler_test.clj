@@ -402,7 +402,7 @@
 (def ^:private leaky-spec
   {:title "leaky"
    :mounts [{:el "app" :ui #'leaky}]
-   :on-close (fn [conn] (reset! left-behind conn))})
+   :on-close (fn [req] (reset! left-behind (handler/connection req)))})
 
 ;; A browser that goes away is dropped from its handler's registry, and the
 ;; application hears which connection it was, so state it keyed goes with it.
@@ -507,7 +507,7 @@
 (def ^:private req-spec
   {:title "req"
    :mounts [{:el "app" :ui #'req-panel}]
-   :on-close (fn [session] (reset! closed session))})
+   :on-close (fn [req] (reset! closed (handler/connection req)))})
 
 (deftest the-request-reaches-slots-and-handlers
   (reset! seen-conn nil)
