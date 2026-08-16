@@ -129,16 +129,22 @@ itself for a handler. Identity and scope derive from it, and state lives in
 your own atoms:
 
 ```clojure
-(defonce queries (atom {}))   ; connection id -> search text
+(defonce queries (atom {}))   ; connection id -> search text, so one per tab
+
+(defn- my-query  [req]   (get @queries (buzz/connection req) ""))
+(defn- remember! [req q] (swap! queries assoc (buzz/connection req) q))
 
 (defui todo-app []
-  (let [todos (server (matching (get @queries (buzz/connection (request)) "")))]
+  (let [todos (server (matching (my-query (request))))]
     [:div
-     [:input {:on-input (fn [e] (server! (swap! queries assoc
-                                                (buzz/connection (request))
-                                                (client (.. e -target -value)))))}]
+     [:input {:on-input (fn [e] (server! (remember! (request)
+                                                    (client (.. e -target -value)))))}]
      ...]))
 ```
+
+A helper is ordinary server code, so it takes the request as an argument. The
+marks themselves stay in the body: `(request)` and `(client ...)` are
+rewritten at compile time, so a helper cannot call them itself.
 
 Key by `(whoami (request))` for state a user owns, `(buzz/token (request))`
 for state a browser owns, and `(buzz/connection (request))` for state a tab
