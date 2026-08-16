@@ -1,5 +1,5 @@
 (ns buzz.core-test
-  (:require [buzz.core :as b :refer [client defpart defui local-state server server!]]
+  (:require [buzz.core :as b :refer [client defpart defui local-state reply request server server!]]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]))
 
@@ -296,3 +296,61 @@
   (let [inst (trash-list)]
     (is (re-find #"buzz_DOT_core_test_SLASH_delete\(\"old\"\)" (:js inst)))
     (is (str/includes? (pr-str ((:ssr inst))) "old"))))
+
+;; The sixth mark. Inside a slot it is the request that opened the stream,
+;; inside a handler the rpc carrying the call, and it never crosses to the
+;; browser.
+(defui greeter2 []
+  [:div
+   [:p (server (get-in (request) [:headers "x-user"] "nobody"))]
+   [:button {:on-click (fn [_] (server! (reply (get-in (b/request) [:headers "x-user"]))))}
+    "who"]])
+
+(deftest a-mark-for-the-request
+  (let [inst (greeter2)]
+
+    (testing "a slot that asks says so, and its fn takes the request"
+      (is (true? (:request inst)))
+      (is (= ["alice"] ((:slots inst) {:headers {"x-user" "alice"}}))))
+
+    (testing "a handler that asks is flagged, and receives it first"
+      (let [h (get (:handlers inst) "greeter2/0")]
+        (is (true? (:request h)))
+        (is (= "bob" ((:fn h) {:headers {"x-user" "bob"}})))))
+
+    (testing "the browser function knows nothing about any of it"
+      (is (not (str/includes? (:js inst) "x-user"))))))
+
+(defui quiet []
+  [:p (server @clicks)
+   [:button {:on-click (fn [_] (server! (swap! clicks inc)))} "+"]])
+
+(deftest a-component-that-never-asks-pays-nothing
+  (let [inst (quiet)]
+    (is (false? (:request inst)))
+    (is (false? (:request (get (:handlers inst) "quiet/0"))))
+    (is (= [(deref clicks)] ((:slots inst))))))
+
+;; A part's handler reaches the request the same way, which is what lets a
+;; part act for whoever is asking without anything being passed down.
+(defpart who-button []
+  [:button {:on-click (fn [_] (server! (reply (get-in (request) [:headers "x-user"]))))}
+   "who"])
+
+(defui who-panel []
+  [:div (who-button)])
+
+(deftest a-part-handler-reaches-the-request
+  (let [inst (who-panel)
+        h    (get (:handlers inst) "buzz.core-test/who-button/0")]
+    (is (true? (:request h)))
+    (is (= "carol" ((:fn h) {:headers {"x-user" "carol"}})))))
+
+(deftest the-request-is-refused-in-browser-code
+  (testing "in value position"
+    (is (re-find #"server value"
+                 (refusal '(buzz.core/defui r1 [] [:p (buzz.core/request)])))))
+  (testing "in a local-state init"
+    (is (re-find #"server value"
+                 (refusal '(buzz.core/defui r2 []
+                             (let [q (buzz.core/local-state (buzz.core/request))] [:p @q])))))))

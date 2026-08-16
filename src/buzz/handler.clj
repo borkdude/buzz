@@ -82,6 +82,19 @@
   [token]
   {"Set-Cookie" (str token-cookie "=" token "; Path=/; HttpOnly; SameSite=Lax")})
 
+(defn connection
+  "The id of the connection `req` belongs to: the same value in a slot and in
+  every rpc that connection sends, so it keys state a tab owns. Nil during
+  the first paint, which belongs to no connection yet."
+  [req]
+  (::connection req))
+
+(defn token
+  "The browser token in `req`: one value per browser, minted by Buzz. Stable
+  across tabs and reconnects, so it keys state a browser owns."
+  [req]
+  (browser-token req))
+
 (defn- event!
   "One SSE frame. JSON escapes newlines inside strings, so a value can never
   break out of its own `data:` line."
@@ -93,8 +106,14 @@
 ;; its slots actually do, run the slots and send nothing when the values are the
 ;; same as last time. Unchanged slots are usually the identical objects, so the
 ;; comparison stops at the first identity check.
-(defn- patch! [ch {:keys [instance sent]}]
-  (let [vals ((:slots instance))]
+(defn- slot-vals
+  "The current slot values of one mount. The instance says whether its slots
+  read the request, so a page that never asks pays nothing."
+  [{:keys [instance req]}]
+  (if (:request instance) ((:slots instance) req) ((:slots instance))))
+
+(defn- patch! [ch {:keys [instance sent] :as mount}]
+  (let [vals (slot-vals mount)]
     (when (not= vals @sent)
       (reset! sent vals)
       (event! ch ["patch" (:id instance) vals]))))
@@ -104,7 +123,8 @@
 ;; over the state its component was built with and never sees a request itself.
 (defn- build [{:keys [el state component] :as spec} req]
   (let [st (if state (state req) {})]
-    {:el el :state st :spec spec :sent (atom ::none) :instance (component st)}))
+    {:el el :state st :spec spec :sent (atom ::none) :req req
+     :instance (component st)}))
 
 ;; What a connection owns is not all atoms. An identity read from the request is
 ;; a plain value, and there is nothing to watch about it.
@@ -132,22 +152,25 @@
     ;; The session id is what an RPC arrives with, so it goes out only once there
     ;; is something here to find under it. Building the mounts renders every
     ;; component, which is long enough for a browser to have answered.
-    (let [mounted (mapv #(build % req) mounts)]
+    (let [mounted (mapv #(build % (assoc req ::connection session)) mounts)]
       (swap! conns assoc session {:ch ch :mounted mounted :owner token :page page})
       (event! ch ["session" session])
       (doseq [{:keys [el instance sent] :as m} mounted]
         (watch-session! ch session m)
-        (let [vals ((:slots instance))]
+        (let [vals (slot-vals m)]
           (reset! sent vals)
           (event! ch ["mount" (:id instance) el vals]))))))
 
-(defn- events [req mounts page]
+(defn- events [req mounts page on-close]
   (let [session (str (random-uuid))]
     (http/as-channel req
                      {:on-open  (fn [ch] (open-stream session ch req mounts page))
                       :on-close (fn [_ _]
                                   (unwatch-session! session (:mounted (get @conns session)))
-                                  (swap! conns dissoc session))})))
+                                  (swap! conns dissoc session)
+                                  ;; the app hears the id its request-keyed
+                                  ;; state used, so it can let go of it
+                                  (when on-close (on-close session)))})))
 
 (defn- json-response [status body]
   {:status status
@@ -175,7 +198,9 @@
                     (some #(get (:handlers (:instance %)) handler-id)
                           (:mounted conn)))]
       (try
-        (let [v (apply (:fn h) args)]
+        (let [v (apply (:fn h) (if (:request h)
+                                 (cons (assoc req ::connection session) args)
+                                 args))]
           (case (:reply h)
             ;; `(reply v resp)`, so the handler answered with both
             :response (let [[value resp] v]
@@ -211,7 +236,7 @@
       ;; the slots may have changed shape, so this one always goes out
       (doseq [{:keys [instance sent] :as m} rebuilt]
         (watch-session! ch session m)
-        (let [vals ((:slots instance))]
+        (let [vals (slot-vals m)]
           (reset! sent vals)
           (event! ch ["reload" rev (:id instance) vals]))))))
 
@@ -299,11 +324,12 @@
 ;; instead of rebuilding them. There is no connection yet, so a mount's `:state`
 ;; starts empty for this render.
 (defn- first-paint [spec req]
-  (let [inst (:instance (build spec req))
+  (let [mount (build spec req)
+        inst  (:instance mount)
         ;; a browser slot has no value yet, so the first paint renders whatever
         ;; the component makes of an empty one
         locals (repeatedly (:locals inst 0) #(atom nil))]
-    (ssr/render (into [(:ssr inst)] (concat ((:slots inst)) locals)))))
+    (ssr/render (into [(:ssr inst)] (concat (slot-vals mount) locals)))))
 
 ;; The version comes from this library rather than from the page, so an import
 ;; map cannot drift away from the Squint that compiled the components.
@@ -385,6 +411,6 @@
         :client     (runtime-module "client.cljs" path)
         :rpc-module (runtime-module "rpc.cljs" path)
         :components (components-module mounts path)
-        :events     (events req mounts page)
+        :events     (events req mounts page (:on-close spec))
         :rpc        (rpc req page)
         nil))))

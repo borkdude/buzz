@@ -1,6 +1,6 @@
 (ns buzz.handler-test
   (:require [babashka.fs :as fs]
-            [buzz.core :refer [defpart defui local-state reply server server!]]
+            [buzz.core :refer [defpart defui local-state reply request server server!]]
             [buzz.handler :as handler]
             [cheshire.core :as json]
             [clojure.string :as str]
@@ -489,6 +489,44 @@
         (is (= 204 (first (rpc conn "buzz.handler-test/step-button/0" []))))
         (is (= 1 @steps))
         (is (= ["patch" "stepped-panel" [1]] (next-event rdr)))))))
+
+;; The request mark, end to end. A slot reads the request that opened the
+;; stream, a handler reads the rpc that carried the call, and the connection
+;; accessor names the same connection in both, so state keyed by it agrees.
+(defonce ^:private seen-conn (atom nil))
+(defonce ^:private closed (atom nil))
+
+(defui req-panel []
+  [:div
+   [:p (server (str (get-in (request) [:headers "x-user"])
+                    "/" (some? (handler/connection (request)))))]
+   [:button {:on-click (fn [_] (server! (reply (do (reset! seen-conn (handler/connection (request)))
+                                                   (get-in (request) [:headers "x-user"] "nobody")))))}
+    "who"]])
+
+(def ^:private req-spec
+  {:title "req"
+   :mounts [{:el "app" :component (fn [_] (req-panel))}]
+   :on-close (fn [session] (reset! closed session))})
+
+(deftest the-request-reaches-slots-and-handlers
+  (reset! seen-conn nil)
+  (reset! closed nil)
+  (with-connection req-spec
+    (fn [{:keys [sock rdr session] :as conn}]
+
+      (testing "a slot reads the request that opened the stream"
+        (is (= ["mount" "req-panel" "app" ["alice/true"]] (next-event rdr))))
+
+      (testing "a handler reads the rpc, which carries no x-user header"
+        (is (= [200 "\"nobody\""] (rpc conn "req-panel/0" []))))
+
+      (testing "slot and handler name the same connection"
+        (is (= session @seen-conn)))
+
+      (testing "closing the stream tells the app which connection ended"
+        (.close sock)
+        (is (until 3000 #(= session @closed)))))))
 
 ;; What the browser imports. The registry entries are read by client.cljs as
 ;; `.-f`, `.-init` and `.-nlocals`, so the names here are a contract between two

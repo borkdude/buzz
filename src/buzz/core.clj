@@ -64,13 +64,23 @@
   [& _]
   (throw (ex-info "(local-state ...) used outside defui" {})))
 
+(defmacro request
+  "The request that caused this code to run: inside a `(server ...)` slot the
+  one that opened the stream, inside a `(server! ...)` the rpc carrying the
+  call. Server side only, so it never reaches the browser.
+
+    (server (notes-for (whoami (request))))
+    (server! (delete! (whoami (request)) (client id)))"
+  [& _]
+  (throw (ex-info "(request) used outside (server ...) or (server! ...)" {})))
+
 (def ^:private bare-marks
   '{server :server, server! :server!, reply :reply,
-    client :client, local-state :local-state})
+    client :client, local-state :local-state, request :request})
 
 (def ^:private marks
   {#'server :server, #'server! :server!, #'reply :reply,
-   #'client :client, #'local-state :local-state})
+   #'client :client, #'local-state :local-state, #'request :request})
 
 (defn- mark
   "Which mark a head symbol names, if any. A bare name matches by name, so a
@@ -99,7 +109,7 @@
                          ". Pass the value or handler from defui.")
                     {:part nm :param p})))
   (let [qualified (symbol (str *ns*) (str nm))
-        {:keys [js ssr-forms handlers parts]}
+        {:keys [js ssr-forms handlers parts req-sym]}
         (binding [*self* {:name nm :qualified qualified :arity (count argv)}]
           (split-part-body qualified argv body))]
     `(do (let [was# (when-let [v# (resolve '~nm)] (when (bound? v#) @v#))]
@@ -109,7 +119,7 @@
                        :buzz/arity ~(count argv)
                        :buzz/js ~js
                        :buzz/parts '~(vec parts)
-                       :buzz/handlers ~(handlers-form handlers)}))
+                       :buzz/handlers ~(handlers-form handlers req-sym)}))
            ;; Recompile callers only when the argument count changes.
            (if (and (fn? was#) (::fn-part (meta was#))
                     (not= ~(count argv) (:buzz/arity (meta was#))))
@@ -141,6 +151,27 @@
 
 (declare ^:private conv)
 
+(defn- lift-request
+  "Replaces every `(request)` in `expr` with `sym`. Returns the expression and
+  whether it asked. A call with arguments is left alone unless it names the
+  mark's var, so a function that happens to be called request keeps working."
+  [expr sym]
+  (let [used (atom false)
+        out  (walk/postwalk
+              (fn [x]
+                (if (and (seq? x) (= :request (mark (first x))))
+                  (cond
+                    (= 1 (count x))
+                    (do (reset! used true) sym)
+
+                    (marks (try (resolve (first x)) (catch Exception _ nil)))
+                    (throw (ex-info "(request) takes no arguments" {:form x}))
+
+                    :else x)
+                  x))
+              expr)]
+    [out @used]))
+
 (defn- slot!
   "`(server ...)` in value position. Hoists the expression to a parameter of the
   client function. Nothing crosses from the browser here: a slot is evaluated
@@ -149,7 +180,9 @@
   (when (some #(and (seq? %) (= :client (mark (first %)))) (tree-seq coll? seq expr))
     (throw (ex-info "(client ...) only works inside a handler, not in value position"
                     {:expr expr})))
-  (let [sym (gensym "slot__")]
+  (let [sym (gensym "slot__")
+        [expr req?] (lift-request expr (:req-sym @acc))]
+    (when req? (swap! acc assoc :slot-request? true))
     (swap! acc update :slots conj {:sym sym :expr expr})
     sym))
 
@@ -196,9 +229,11 @@
       (throw (ex-info "(reply ...) must be the last form of a (server! ...)"
                       {:forms (vec forms)})))
     (let [[server-expr pairs] (lift-client expr)
+          [server-expr req?]  (lift-request server-expr (:req-sym @acc))
           id (str comp-id "/" (count (:handlers @acc)))]
       (swap! acc update :handlers conj
              [id {:params (mapv first pairs) :expr server-expr
+                  :request req?
                   :reply (if resp? :response answer?)}])
       (list 'rpc! id (mapv #(conv (second %) scope true comp-id acc) pairs)))))
 
@@ -302,6 +337,12 @@
         (= :client mk)
         (throw (ex-info "(client ...) crosses a value into a (server! ...). Browser state is (local-state ...)"
                         {:form form}))
+
+        ;; The ones inside server forms are lifted out before the walk, so
+        ;; this is browser code asking for a server value.
+        (= :request mk)
+        (throw (ex-info "(request) is a server value. It only means something inside (server ...) or (server! ...)"
+                        {:form form}))
         (= 'quote head)  form
         (lambda-heads head) (conv-fn form scope comp-id acc)
         (let-heads head)    (conv-let form scope lambda? comp-id acc)
@@ -395,16 +436,24 @@
                           {:context :expr :core-alias "SQ" :elide-imports true})))
 
 (defn- handlers-form
-  "Returns a handler map form for embedding in a definition."
-  [handlers]
+  "Returns a handler map form for embedding in a definition. A handler that
+  asked for the request takes it as its first parameter, and says so, so the
+  rpc endpoint knows to pass it."
+  [handlers req-sym]
   (into {} (map (fn [[id h]]
-                  [id {:fn `(fn ~(:params h) ~(:expr h)) :reply (:reply h)}]))
+                  [id {:fn `(fn ~(if (:request h)
+                                   (into [req-sym] (:params h))
+                                   (:params h))
+                              ~(:expr h))
+                       :request (boolean (:request h))
+                       :reply (:reply h)}]))
         handlers))
 
 (defn- split-part-body
   "Compiles a part body and rejects component-owned state."
   [qualified argv body]
-  (let [acc   (atom {:slots [] :handlers [] :locals [] :parts #{} :part-syms {}})
+  (let [acc   (atom {:slots [] :handlers [] :locals [] :parts #{} :part-syms {}
+                     :req-sym (gensym "req__")})
         forms (mapv #(conv % (binder-syms argv) false (str qualified) acc) body)
         {:keys [slots handlers locals parts part-syms]} @acc
         nm    (name qualified)]
@@ -420,6 +469,7 @@
      ;; Restore part vars for server rendering.
      :ssr-forms (mapv ssr-form (walk/postwalk-replace part-syms forms))
      :handlers  handlers
+     :req-sym   (:req-sym @acc)
      :parts     parts}))
 
 (defn touch!
@@ -449,9 +499,10 @@
   "Returns the pieces a component is made of. Server slots come first in the
   browser function's parameters, then the browser's own."
   [body comp-id]
-  (let [acc   (atom {:slots [] :handlers [] :locals [] :parts #{} :part-syms {}})
+  (let [acc   (atom {:slots [] :handlers [] :locals [] :parts #{} :part-syms {}
+                     :req-sym (gensym "req__") :slot-request? false})
         forms (mapv #(conv % #{} false comp-id acc) body)
-        {:keys [slots handlers locals parts part-syms]} @acc
+        {:keys [slots handlers locals parts part-syms req-sym slot-request?]} @acc
         params (into (mapv :sym slots) (mapv :sym locals))]
     {:js         (to-js (apply list 'fn params forms))
      ;; the initial values take the slots, so a local can start from what the
@@ -461,6 +512,8 @@
      :ssr-forms  (mapv ssr-form (walk/postwalk-replace part-syms forms))
      :slot-exprs (mapv :expr slots)
      :handlers   handlers
+     :req-sym    req-sym
+     :request?   slot-request?
      :parts      parts
      :slot-syms  params}))
 
@@ -474,7 +527,8 @@
      :handlers id -> fn, called when the browser sends an :rpc}"
   [nm argv & body]
   (let [comp-id (str nm)
-        {:keys [js init-js locals ssr-forms slot-exprs slot-syms handlers parts]} (split-body body comp-id)]
+        {:keys [js init-js locals ssr-forms slot-exprs slot-syms handlers parts
+                req-sym request?]} (split-body body comp-id)]
     `(do
        (defn ~nm ~argv
          {:id       ~comp-id
@@ -482,11 +536,14 @@
           :init     ~init-js
           :locals   ~locals
           :parts    '~(vec parts)
+          ;; whether any slot asked for the request, so the caller knows
+          ;; which arity :slots is
+          :request  ~(boolean request?)
           :ssr      (fn ~slot-syms ~@ssr-forms)
-          :slots    (fn [] ~(vec slot-exprs))
+          :slots    (fn ~(if request? [req-sym] []) ~(vec slot-exprs))
           ;; Resolve part handlers on every component call.
           :handlers (merge (part-handlers '~(vec parts))
-                           ~(handlers-form handlers))})
+                           ~(handlers-form handlers req-sym))})
        (register! '~(symbol (str *ns*) (str nm))
                   {:ns '~(ns-name *ns*) :form '~&form})
        (var ~nm))))
