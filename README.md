@@ -129,7 +129,7 @@ itself for a handler. Identity and scope derive from it, and state lives in
 your own atoms:
 
 ```clojure
-(defonce queries (atom {}))   ; connection id -> search text, so one per tab
+(defonce queries (atom {}))   ; connection id -> search text
 
 (defn- my-query  [req]   (get @queries (buzz/connection req) ""))
 (defn- remember! [req q] (swap! queries assoc (buzz/connection req) q))
@@ -147,9 +147,10 @@ marks themselves stay in the body: `(request)` and `(client ...)` are
 rewritten at compile time, so a helper cannot call them itself.
 
 Key by `(whoami (request))` for state a user owns, `(buzz/token (request))`
-for state a browser owns, and `(buzz/connection (request))` for state a tab
-owns. Connections end, so a handler takes `:on-close`, called with the
-connection id, to let go of what a tab held:
+for state a browser owns, and `(buzz/connection (request))` for state one
+connection owns: a tab holds one at a time, and a reconnect starts a new one.
+Connections end, so a handler takes `:on-close`, called with the connection
+id, to let go of what one held:
 
 ```clojure
 (buzz/handler {:on-close (fn [conn] (swap! queries dissoc conn)) ...})

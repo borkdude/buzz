@@ -45,7 +45,7 @@ Scope is a keying choice, not a framework concept:
 | everyone | none, a plain atom |
 | per user | `(whoami (request))`, from the app's cookie |
 | per browser | `(buzz/token (request))`, Buzz's cookie |
-| per tab | `(buzz/connection (request))`, assoc'd by Buzz |
+| per connection, which a tab holds one of | `(buzz/connection (request))`, assoc'd by Buzz |
 
 The connection id is the one enrichment: the stream's opening request and
 every rpc that connection sends carry the same value, so state keyed by it

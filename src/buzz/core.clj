@@ -558,8 +558,9 @@
 
 (def connection
   "The id of the connection `req` belongs to: the same value in a slot and in
-  every rpc that connection sends, so it keys state a tab owns. Nil during
-  the first paint, which belongs to no connection yet."
+  every rpc that connection sends. A tab holds one at a time, and a reconnect
+  starts a new one, with `:on-close` for the old. Nil during the first paint,
+  which belongs to no connection yet."
   page/connection)
 
 (def token
