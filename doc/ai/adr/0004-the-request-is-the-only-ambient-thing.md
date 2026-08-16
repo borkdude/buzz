@@ -69,8 +69,17 @@ User and browser keyed maps outlive any connection and want app side TTLs.
   design asks for are a cookie regex and a map get, well under the render and
   encode work around them.
 - Marks that never call `(request)` compile exactly as before, and a handler
-  that asks gets it as a prepended argument. The acceptance test is a zero
-  delta on `bb bench`, which never asks.
+  that asks gets it as a prepended argument. Measured on `bb bench`, which
+  never asks: four interleaved rounds against main, full browser loop per op,
+  medians in ms. Every delta is inside one standard deviation, so the branch
+  is at parity.
+
+  | op | n | main | branch |
+  |----|---|------|--------|
+  | create-1000 | 6 | 58.6 | 56.8 |
+  | create-5000 | 2 | 295.6 | 316.9 |
+  | update-one | 24 | 36.5 | 30.0 |
+  | update-10th | 24 | 34.8 | 28.6 |
 
 ## Consequences
 
