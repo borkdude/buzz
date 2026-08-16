@@ -425,9 +425,6 @@
         (testing "and the watches on its state go with it"
           (is (until 3000 #(empty? (.getWatches q)))))))))
 
-;; A part is compiled once and the module is compiled per request, so editing
-;; one reaches every open page without the components that call it being
-;; expanded again.
 (defpart badge [n]
   [:em n])
 
@@ -450,22 +447,19 @@
         (testing "the component passes its slot through the part"
           (is (= ["mount" "card" "app" [0]] (next-event rdr))))
 
-        (testing "editing the part tells the page to fetch the module again"
+        (testing "editing the part reloads the page"
           (redefine! louder-badge)
           (let [[kind _rev id vals] (next-event rdr)]
             (is (= "reload" kind))
             (is (= "card" id))
             (is (= [0] vals))))
 
-        (testing "and the module serves what the part says now"
+        (testing "the module contains the edited part"
           (is (str/includes? (:body ((handler/handler card-spec) {:uri "/components.mjs"}))
                              "\"!\"")))
 
         (finally (redefine! plain-badge))))))
 
-;; A function part rides along: the module defines it once, the component
-;; calls it by name, and its handler is dispatched through the mount that
-;; merged it in.
 (def ^:private steps (atom 0))
 
 (defpart step-button [label]
@@ -491,7 +485,7 @@
           (is (str/includes? body "const buzz_DOT_handler_test_SLASH_step_button = "))
           (is (str/includes? body "buzz_DOT_handler_test_SLASH_step_button("))))
 
-      (testing "an rpc reaches the part's handler through the mount"
+      (testing "the mount dispatches to the part handler"
         (is (= 204 (first (rpc conn "buzz.handler-test/step-button/0" []))))
         (is (= 1 @steps))
         (is (= ["patch" "stepped-panel" [1]] (next-event rdr)))))))

@@ -82,38 +82,21 @@
         (marks (try (resolve head) (catch Exception _ nil))))))
 
 (def ^:private ^:dynamic *self*
-  "The part being defined, while its own body converts. Its var is not there
-  yet, so `defpart` says here what the name is about to mean."
+  "Metadata for the part being compiled. Used for self-recursion before its
+  var exists."
   nil)
 
 (declare ^:private split-part-body)
 (declare ^:private handlers-form)
 
 (defmacro defpart
-  "A hiccup helper: a function the browser calls, so a part can call itself
-  and a tree can draw a tree.
-
-    (defpart node [n]
-      [:li (:label n)
-       [:ul (for [c (:children n)] (node c))]])
-
-  The body sees its parameters and globals. Everything else enters at the
-  call site: the component writes `(server ...)` where it calls the part, and
-  the part receives a plain value. State and event handlers travel the same
-  road, so a part that writes per connection state is given the handler:
-
-    (row item (server (count @store))
-         (fn [_] (server! (swap! store conj (client item)))))
-
-  A `(server! ...)` over global state works in the body itself. Its handlers
-  belong to the part, so a component that uses one is not renumbered by it.
-
-  It is an ordinary `def`, so it resolves like anything else and a stale
-  reference fails loudly."
+  "Defines a Hiccup function for use in components. Parts run in the browser
+  and can call themselves. Pass server values, local state and per-connection
+  handlers from `defui` as arguments."
   [nm argv & body]
   (when-let [p (some #(when (:server (meta %)) %) argv)]
-    (throw (ex-info (str nm " has a ^:server parameter, " p
-                         ". There are none: pass the value, or the handler, from the component")
+    (throw (ex-info (str "^:server parameters are not supported in " nm ": " p
+                         ". Pass the value or handler from defui.")
                     {:part nm :param p})))
   (let [qualified (symbol (str *ns*) (str nm))
         {:keys [js ssr-forms handlers parts]}
@@ -127,9 +110,7 @@
                        :buzz/js ~js
                        :buzz/parts '~(vec parts)
                        :buzz/handlers ~(handlers-form handlers)}))
-           ;; A changed arity invalidates every call, so the components are
-           ;; expanded again and say so. Otherwise the callers hold a name,
-           ;; and the name still means this part.
+           ;; Recompile callers only when the argument count changes.
            (if (and (fn? was#) (::fn-part (meta was#))
                     (not= ~(count argv) (:buzz/arity (meta was#))))
              (recompile!)
@@ -255,27 +236,21 @@
     (apply list head bvec' (mapv #(conv % scope' lambda? comp-id acc) body))))
 
 (defn js-name
-  "The name a part has in the compiled module: its qualified name, munged.
-  The dot is munged here as well, since a flat const has no namespace
-  objects, so two parts collide only when their qualified names do. The
-  namespace also keeps the name from being a bare JavaScript reserved word,
-  which `munge` does not rename and the compiler reads as an operator."
+  "Returns a qualified part name as a JavaScript module binding."
   [sym]
   (str/replace (munge (str sym)) "." "_DOT_"))
 
 (defn- js-part-sym
-  "The symbol a part call compiles to. Munged the way the compiler munges a
-  reference, so the call sites and the module definition agree."
+  "Returns the symbol used for part calls and module declarations."
   [qualified]
   (symbol (js-name qualified)))
 
 (defn- fn-part-call
-  "A call to a function part: converted arguments around the module name. The
-  qualified name is kept as well, so the ssr form can put it back and reach
-  the var."
   [{:keys [qualified arity simple]} args scope lambda? comp-id acc]
   (when-not (= arity (count args))
-    (throw (ex-info (str simple " takes " arity " arguments, given " (count args))
+    (throw (ex-info (str simple " expects " arity
+                         (if (= 1 arity) " argument" " arguments")
+                         ", received " (count args))
                     {:part qualified :args (vec args)})))
   (swap! acc update :parts conj qualified)
   (swap! acc update :part-syms assoc (js-part-sym qualified) qualified)
@@ -335,15 +310,12 @@
         (let [v     (part-var head scope)
               value (when v @v)]
           (cond
-            ;; The part being defined calls itself. Its var is not there yet,
-            ;; so `defpart` said what the name is about to mean.
+            ;; Resolve self-recursion before the part var exists.
             (and *self* (= head (:name *self*)) (not (scope head)))
             (fn-part-call {:qualified (:qualified *self*) :arity (:arity *self*)
                            :simple (:name *self*)}
                           args scope lambda? comp-id acc)
 
-            ;; A part is a function the browser calls, so it can recurse and
-            ;; its handlers keep its own name.
             (and (fn? value) (::fn-part (meta value)))
             (let [m (meta value)]
               (fn-part-call {:qualified (:buzz/name m) :arity (:buzz/arity m)
@@ -379,9 +351,7 @@
     (set? form)    (into #{} (mapv ssr-form form))
     (seq? form)    (cond
                      (= 'quote (first form)) form
-                     ;; a handler passed to a part is an argument rather than
-                     ;; an attribute, so the call the browser would make is
-                     ;; blanked here by name
+                     ;; Omit handlers passed as arguments from server rendering.
                      (= 'rpc! (first form)) nil
                      :else (apply list (mapv ssr-form form)))
     :else form))
@@ -390,10 +360,7 @@
 ;; enough to tell the browsers something changed.
 (defonce revision (atom 0))
 
-;; Every defui keeps its own form, so it can be expanded again. A component
-;; compiles a call for each part it uses, so changing a part's arity leaves
-;; every caller holding a call that no longer fits. Re-evaluating them all is
-;; cheaper than working out which ones actually care.
+;; Keep each defui form so callers can be recompiled after an arity change.
 (defonce ^:private components (atom {}))
 
 (def ^:dynamic ^:private *recompiling* false)
@@ -428,49 +395,40 @@
                           {:context :expr :core-alias "SQ" :elide-imports true})))
 
 (defn- handlers-form
-  "The handler map as a form the definition embeds: id -> what the server
-  does. `:reply` is false, true, or :response for a reply that also answers
-  with an http response."
+  "Returns a handler map form for embedding in a definition."
   [handlers]
   (into {} (map (fn [[id h]]
                   [id {:fn `(fn ~(:params h) ~(:expr h)) :reply (:reply h)}]))
         handlers))
 
 (defn- split-part-body
-  "The pieces a part is made of. A slot and a local belong to a component, so
-  a part asking for one is told where it goes instead."
+  "Compiles a part body and rejects component-owned state."
   [qualified argv body]
   (let [acc   (atom {:slots [] :handlers [] :locals [] :parts #{} :part-syms {}})
-        ;; handler ids carry the qualified name, so two parts collide only
-        ;; when their qualified names do
         forms (mapv #(conv % (binder-syms argv) false (str qualified) acc) body)
         {:keys [slots handlers locals parts part-syms]} @acc
         nm    (name qualified)]
     (when (seq slots)
-      (throw (ex-info (str "(server ...) in " nm " is a value the component owns. "
-                           "Pass it as an argument: (" nm " (server ...))")
+      (throw (ex-info (str "(server ...) in " nm " must be passed from defui: "
+                           "(" nm " (server ...))")
                       {:part qualified :expr (:expr (first slots))})))
     (when (seq locals)
-      (throw (ex-info (str "(local-state ...) in " nm " is state the component owns. "
-                           "Make it there and pass the atom")
+      (throw (ex-info (str "(local-state ...) in " nm
+                           " must be created in defui and passed as an argument")
                       {:part qualified})))
     {:js        (to-js (apply list 'fn argv forms))
-     ;; the browser form names parts by their module name, and the same form
-     ;; runs here for the first paint, so the name goes back to the var
+     ;; Restore part vars for server rendering.
      :ssr-forms (mapv ssr-form (walk/postwalk-replace part-syms forms))
      :handlers  handlers
      :parts     parts}))
 
 (defn touch!
-  "Bumps the revision without expanding anything. Editing a function part is
-  enough: its callers hold a name, and the module is compiled per request.
-  Public because `defpart` expands into a call to it."
+  "Increments the revision without recompiling components."
   []
   (swap! revision inc))
 
 (defn parts-closure
-  "Every function part reachable from `syms`: its qualified name and its
-  definition. Walks what each part uses, so a part a part calls is included."
+  "Returns metadata for every part reachable from `syms`."
   [syms]
   (loop [todo (seq syms) seen {}]
     (if-let [[s & more] todo]
@@ -483,9 +441,7 @@
       seen)))
 
 (defn part-handlers
-  "The handlers of every part in `syms`, one map. Read when a component is
-  called, so an edited part answers with its new code without touching its
-  callers."
+  "Returns the merged handlers for every part reachable from `syms`."
   [syms]
   (into {} (mapcat (comp :buzz/handlers val)) (parts-closure syms)))
 
@@ -528,8 +484,7 @@
           :parts    '~(vec parts)
           :ssr      (fn ~slot-syms ~@ssr-forms)
           :slots    (fn [] ~(vec slot-exprs))
-          ;; the parts are read here, at each call, so an edited part answers
-          ;; with its new handlers without this component being expanded again
+          ;; Resolve part handlers on every component call.
           :handlers (merge (part-handlers '~(vec parts))
                            ~(handlers-form handlers))})
        (register! '~(symbol (str *ns*) (str nm))

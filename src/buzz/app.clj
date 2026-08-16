@@ -41,8 +41,8 @@
 ;; browser gets an `rpc!` call carrying `id` — which is a binding the browser
 ;; itself introduced, in the `for`.
 
-;; A function the browser calls once per row. The handlers belong to it, so
-;; the wire names them buzz.app/todo-row/0 and /1 wherever it is used.
+;; Defines one browser function per row. Its handlers use the stable IDs
+;; buzz.app/todo-row/0 and buzz.app/todo-row/1.
 
 (defpart todo-row [{:keys [id title done]}]
   [:li {:key id}

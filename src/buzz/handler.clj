@@ -263,8 +263,7 @@
   ;; components are called with no state at all rather than with a connection's.
   ;; Building one here would run every `:state` fn for a module that ignores it.
   (let [insts (map #((:component %) {}) mounts)
-        ;; read per request like everything else here, so an edited part is
-        ;; served fresh without its callers being expanded again
+        ;; Resolve parts per request so edits do not require recompiling callers.
         parts (core/parts-closure (mapcat :parts insts))]
     {:status 200
      :headers js-headers

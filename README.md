@@ -88,11 +88,10 @@ You can define a part of a component with `defpart`. A part is like a component,
   [:li (:title item)])
 ```
 
-A part is a function the browser calls, so it can call itself and a tree can
-draw a tree. A `server!` inside one registers handlers under the part's own
-name. Server values and local state belong to the component: write them in
-the `defui` and pass them down as arguments, so the component's head is the
-whole list of what crosses the wire. See [doc/parts.md](doc/parts.md).
+`defpart` creates a browser function and supports recursion. Pass server
+values, local state and per-connection handlers from `defui` as arguments. A
+`server!` that uses global state can stay in the part. See
+[doc/parts.md](doc/parts.md).
 
 ## Mounting
 

@@ -108,9 +108,6 @@
     (testing "b/reply says the response carries the value"
       (is (true? (:reply h))))))
 
-;; A part is a function of browser values. What the server owns enters at the
-;; call site: the component writes the slot, and the handler, and passes both
-;; down. So the component's head is the whole list of what crosses the wire.
 (defpart row [item n add!]
   [:li {:on-click add!} item " of " n])
 
@@ -124,35 +121,33 @@
   (let [store (atom [])
         inst  (shelf store)]
 
-    (testing "the slots belong to the component that wrote them"
+    (testing "the component owns the slots"
       (is (= [0 0] ((:slots inst)))))
 
-    (testing "so do the handlers it passed down"
+    (testing "the component owns passed handlers"
       (is (= ["shelf/0" "shelf/1"] (sort (keys (:handlers inst))))))
 
-    (testing "a passed handler closes over what the component was given"
+    (testing "a passed handler captures component arguments"
       ((:fn (get (:handlers inst) "shelf/0")) "a")
       (is (= ["a"] @store))
       (is (= [1 1] ((:slots inst)))))
 
-    (testing "the wrong number of arguments is an error"
-      (is (re-find #"takes 3 arguments, given 1"
+    (testing "the wrong argument count is rejected"
+      (is (re-find #"expects 3 arguments, received 1"
                    (refusal '(buzz.core/defui bad []
                                [:ul (buzz.core-test/row "a")])))))))
 
-;; A mark that makes a value or state names the component that owns it, so a
-;; part asking for one is told where it goes.
 (deftest a-mark-that-needs-a-component-is-refused-in-a-part
-  (testing "a slot belongs to a component"
-    (is (re-find #"value the component owns"
+  (testing "server is rejected"
+    (is (re-find #"must be passed from defui"
                  (refusal '(buzz.core/defpart p1 [] [:li (server 1)])))))
 
-  (testing "so does a local"
-    (is (re-find #"state the component owns"
+  (testing "local-state is rejected"
+    (is (re-find #"must be created in defui"
                  (refusal '(buzz.core/defpart p2 [] [:li @(local-state 0)])))))
 
-  (testing "and there are no server parameters"
-    (is (re-find #"pass the value, or the handler"
+  (testing "server parameters are rejected"
+    (is (re-find #"Pass the value or handler from defui"
                  (refusal '(buzz.core/defpart p3 [^:server q] [:li q]))))))
 
 ;; The one mark the server never sees. A local is an atom the browser makes at
@@ -201,8 +196,6 @@
         (is (some? slot))
         (is (str/includes? params slot))))))
 
-;; A part's own handlers keep its name, so a component that uses one is not
-;; renumbered by it.
 (def basket (atom []))
 
 (defpart fruit-row [item]
@@ -220,27 +213,25 @@
       (is (re-find #"buzz_DOT_core_test_SLASH_fruit_row\(\"apple\"\)" (:js inst)))
       (is (not (str/includes? (:js inst) "swap"))))
 
-    (testing "and records that it uses it"
+    (testing "the component records the part dependency"
       (is (= ['buzz.core-test/fruit-row] (:parts inst))))
 
-    (testing "the handler belongs to the part, not the component"
+    (testing "the part owns its handler"
       (is (= ["buzz.core-test/fruit-row/0"] (keys (:handlers inst))))
       ((:fn (get (:handlers inst) "buzz.core-test/fruit-row/0")) "apple")
       (is (= ["apple"] @basket)))
 
-    (testing "the part contributes no slots"
+    (testing "the part adds no slots"
       (is (= [] ((:slots inst)))))
 
-    (testing "the first paint renders through the part"
+    (testing "server rendering calls the part"
       (is (str/includes? (pr-str ((:ssr inst))) "apple")))
 
-    (testing "the wrong number of arguments is an error"
-      (is (re-find #"takes 1 arguments, given 2"
+    (testing "the wrong argument count is rejected"
+      (is (re-find #"expects 1 argument, received 2"
                    (refusal '(buzz.core/defui bad-call []
                                [:ul (buzz.core-test/fruit-row "a" "b")])))))))
 
-;; The reason parts are functions. An inlined part calling itself would
-;; expand forever, and a function calling itself is a Tuesday.
 (def forest-data
   (atom {:label "root"
          :children [{:label "a" :children [{:label "a1" :children []}]}
@@ -260,14 +251,12 @@
     (testing "the component passes the tree through one slot"
       (is (re-find #"buzz_DOT_core_test_SLASH_branch\(slot__\d+\)" (:js inst))))
 
-    (testing "the part's own code calls itself"
+    (testing "the compiled part calls itself"
       (is (str/includes? (:buzz/js (meta branch)) "buzz_DOT_core_test_SLASH_branch(")))
 
-    (testing "the first paint walks the whole tree"
+    (testing "server rendering walks the whole tree"
       (is (str/includes? (pr-str (apply (:ssr inst) ((:slots inst)))) "a1")))))
 
-;; Editing a function part reaches the page through the module and the merged
-;; handler map, both read per request, so the components are left alone.
 (defpart tally-button []
   [:button {:on-click (fn [_] (server! (swap! clicks inc)))} "+"])
 
@@ -287,9 +276,9 @@
       (let [inst (tally-panel)]
         (testing "the component was not expanded again"
           (is (= before (:js inst))))
-        (testing "but the revision moved, so the browsers fetch the module again"
+        (testing "the revision changes"
           (is (= (inc rev) @b/revision)))
-        (testing "and the handler map answers with the new code"
+        (testing "the new handler is used"
           (reset! clicks 0)
           ((:fn (get (:handlers inst) "buzz.core-test/tally-button/0")))
           (is (= 2 @clicks))))
@@ -297,9 +286,6 @@
         (redefine! '(buzz.core/defpart tally-button []
                       [:button {:on-click (fn [_] (server! (swap! clicks inc)))} "+"]))))))
 
-;; A JavaScript reserved word is a fine part name. The module name carries the
-;; namespace, so it is never bare `delete`, which munge would not rename and
-;; the compiler reads as an operator.
 (defpart delete [x]
   [:li.trash x])
 
