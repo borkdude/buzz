@@ -2,8 +2,7 @@ name: test
 
 on:
   push:
-    # Include request-mark while checking the stream redesign for hangs.
-    branches: [main, request-mark]
+    branches: [main]
   pull_request:
 
 jobs:
