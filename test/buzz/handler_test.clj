@@ -832,3 +832,32 @@
     (testing "the close callback drops the connection"
       (@closed)
       (is (empty? (registry-of ui))))))
+
+;; A second server. Capra streams through StreamableResponseBody rather than
+;; a channel, so if a page runs on it unchanged the adapter seam holds. It
+;; runs under babashka too, which this test also proves.
+(deftest capra-serves-the-same-page
+  (reset! shared 0)
+  (let [run-server (requiring-resolve 'capra.server/run-server)
+        adapter    @(requiring-resolve 'buzz.capra/adapter)
+        port       (with-open [s (java.net.ServerSocket. 0)] (.getLocalPort s))
+        ui         (handler/handler (assoc faked-spec :adapter adapter))
+        server     (run-server (fn [req] (or (ui req) {:status 404 :body "no"}))
+                               :port port)]
+    (try
+      (let [{:keys [rdr sock] :as conn} (open-events port)]
+        (testing "the stream opens and mounts"
+          (is (= ["mount" "faked" "app" [0]] (next-event rdr))))
+
+        (testing "a watched write patches through capra"
+          (swap! shared inc)
+          (is (= ["patch" "faked" [1]] (next-event rdr))))
+
+        (testing "the rpc endpoint is plain ring, so it just works"
+          (is (= 404 (first (rpc (assoc conn :session "made-up") "nope/0" [])))))
+
+        (testing "a closed client is learned about, and no watch thread blocks"
+          (.close sock)
+          (is (until 5000 #(do (swap! shared inc)
+                               (empty? (registry-of ui)))))))
+      (finally (.close server)))))
