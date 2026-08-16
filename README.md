@@ -123,7 +123,7 @@ The page belongs to the handler, so one application can serve more than one of t
 
 ## The request
 
-Inside a `(server ...)` or a `(server! ...)`, `(request)` is the request that
+Inside a `(server ...)` or a `(server! ...)`, `(buzz/request)` is the request that
 caused that code to run: the one that opened the stream for a slot, the rpc
 itself for a handler. Identity and scope derive from it, and state lives in
 your own atoms:
@@ -135,19 +135,19 @@ your own atoms:
 (defn- remember! [req q] (swap! queries assoc (buzz/connection req) q))
 
 (defui todo-app []
-  (let [todos (server (matching (my-query (request))))]
+  (let [todos (server (matching (my-query (buzz/request))))]
     [:div
-     [:input {:on-input (fn [e] (server! (remember! (request)
+     [:input {:on-input (fn [e] (server! (remember! (buzz/request)
                                                     (client (.. e -target -value)))))}]
      ...]))
 ```
 
 A helper is ordinary server code, so it takes the request as an argument. The
-marks themselves stay in the body: `(request)` and `(client ...)` are
+marks themselves stay in the body: `(buzz/request)` and `(client ...)` are
 rewritten at compile time, so a helper cannot call them itself.
 
-Key by `(whoami (request))` for state a user owns, `(buzz/token (request))`
-for state a browser owns, and `(buzz/connection (request))` for state one
+Key by `(whoami (buzz/request))` for state a user owns, `(buzz/token (buzz/request))`
+for state a browser owns, and `(buzz/connection (buzz/request))` for state one
 connection owns: a tab holds one at a time, and a reconnect starts a new one.
 Connections end, so a handler takes `:on-close`, called with the connection
 id, to let go of what one held:

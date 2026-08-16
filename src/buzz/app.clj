@@ -1,6 +1,6 @@
 (ns buzz.app
   (:require [babashka.nrepl.server :as nrepl]
-            [buzz.core :as buzz :refer [client defpart defui local-state reply request server server!]]
+            [buzz.core :as buzz :refer [client defpart defui local-state reply server server!]]
             [clojure.string :as str]
             [org.httpkit.server :as http]))
 
@@ -65,7 +65,7 @@
 (defn- my-query [req] (get @queries (buzz/connection req) ""))
 
 (defui todo-app []
-  (let [todos (server (matching (my-query (request))))
+  (let [todos (server (matching (my-query (buzz/request))))
         left  (server (count (remove :done (vals @db))))
         n     (server @clicks)
         ;; browser state, so what came back has somewhere to live
@@ -77,7 +77,7 @@
      ;; overwrite what was typed while the round trip was still in the air.
      [:input.search {:placeholder "search"
                      :on-input (fn [e]
-                                 (server! (swap! queries assoc (buzz/connection (request))
+                                 (server! (swap! queries assoc (buzz/connection (buzz/request))
                                                  (client (.. e -target -value)))))}]
      [:input.new {:placeholder (str "what needs doing, " (server (System/getProperty "user.name"))
                                     "?")

@@ -3,10 +3,10 @@
   looking at it.
 
   Buzz authenticates nobody. An application has to decide who someone is, and
-  keep everyone else away from the handler. What Buzz gives it is `(request)`:
+  keep everyone else away from the handler. What Buzz gives it is `(buzz/request)`:
   in a slot the request that opened the stream, in a handler the rpc itself,
   so authority is read where it is used and checked again on every action."
-  (:require [buzz.core :as buzz :refer [client defui local-state reply request server server!]]
+  (:require [buzz.core :as buzz :refer [client defui local-state reply server server!]]
             [clojure.string :as str]
             [org.httpkit.server :as http]))
 
@@ -94,12 +94,12 @@
 (defui board []
   (let [draft (local-state "")]
     [:div
-     [:h1 "notes for " (server (whoami (request)))]
+     [:h1 "notes for " (server (whoami (buzz/request)))]
      [:ul
-      (for [[i note] (map-indexed vector (server (get @notes (whoami (request)))))]
+      (for [[i note] (map-indexed vector (server (get @notes (whoami (buzz/request)))))]
         [:li {:key i}
          note
-         [:button {:on-click (fn [_] (server! (let [u (whoami (request))
+         [:button {:on-click (fn [_] (server! (let [u (whoami (buzz/request))
                                                     n (client i)]
                                                 (swap! notes update u
                                                        #(vec (concat (subvec % 0 n)
@@ -109,7 +109,7 @@
               :placeholder "a new note"
               :on-input (fn [e] (reset! draft (.. e -target -value)))}]
      [:button {:on-click (fn [_]
-                           (server! (swap! notes update (whoami (request))
+                           (server! (swap! notes update (whoami (buzz/request))
                                            conj (client @draft)))
                            (reset! draft ""))}
       "add"]
@@ -117,15 +117,15 @@
      ;; not decide what the handler does, so the handler reads the role from
      ;; its own rpc: a role withdrawn between draw and click is refused.
      ;; A boolean rather than the role, because a keyword arrives as a string.
-     (when (server (= :admin (role-of (whoami (request)))))
+     (when (server (= :admin (role-of (whoami (buzz/request)))))
        [:p [:a {:href "/admin"} "everyone's notes"] " "
         [:button {:on-click (fn [_]
-                              (server! (do (admin! (role-of (whoami (request))))
+                              (server! (do (admin! (role-of (whoami (buzz/request))))
                                            (swap! notes update-vals
                                                   #(conj % "remember the milk")))))}
          "remind everyone"]])
      [:p [:button {:on-click (^:async fn [_]
-                              (await (server! (reply :ok (sign-out! (token (request))))))
+                              (await (server! (reply :ok (sign-out! (token (buzz/request))))))
                               (set! js/window.location "/signin"))}
           "sign out"]]]))
 
@@ -193,7 +193,7 @@
                             (sort @notes)))]
       [:li {:key (:who row)}
        [:strong (:who row)] " " (:notes row) " "
-       [:button {:on-click (fn [_] (server! (clear! (role-of (whoami (request)))
+       [:button {:on-click (fn [_] (server! (clear! (role-of (whoami (buzz/request)))
                                                      (client (:who row)))))}
         "clear"]])]
    [:p [:a {:href "/"} "back"]]])
