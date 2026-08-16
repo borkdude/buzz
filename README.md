@@ -122,19 +122,16 @@ The page belongs to the handler, so one application can serve more than one of t
 (defn app [req] (or (admin req) (home req) {:status 404 :body "not found"}))
 ```
 
-## The request
+## Request
 
 Use `(buzz/request)` inside `(server ...)` and `(server! ...)` to read the
 current Ring request. In `(server ...)`, this is the request that opened the
 event stream. In `(server! ...)`, this is the RPC request.
 
-Keep state in application atoms and choose a key for its scope:
-
-| scope | key |
-|-------|-----|
-| user | `(whoami (buzz/request))` |
-| browser | `(buzz/token (buzz/request))` |
-| connection | `(buzz/connection (buzz/request))` |
+Keep state in application atoms. Use `(buzz/token (buzz/request))` as a key for
+browser-scoped state and `(buzz/connection (buzz/request))` for
+connection-scoped state. See [examples/auth](examples/auth) for per-user state
+and authentication.
 
 ```clojure
 (defonce queries (atom {}))   ; connection id -> search text
@@ -150,9 +147,6 @@ Keep state in application atoms and choose a key for its scope:
      ...]))
 ```
 
-`(buzz/request)` and `(client ...)` are compiler forms. Use them in a component
-or part, then pass their values to ordinary server functions.
-
 A reconnect gets a new connection ID. Use `:on-close` to remove
 connection-scoped state. Buzz passes it the request that opened the connection:
 
@@ -160,8 +154,6 @@ connection-scoped state. Buzz passes it the request that opened the connection:
 (buzz/handler {:on-close (fn [req] (swap! queries dissoc (buzz/connection req))) ...})
 ```
 
-See [examples/auth](examples/auth) for request-based authentication and
-per-user state.
 
 ## The page
 

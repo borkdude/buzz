@@ -42,24 +42,23 @@ read or update it.
 A part can contain `(server! ...)`. Wrap browser values in `(client ...)` when
 sending them to the server.
 
-To update a per-connection atom, define the handler in `defui` and pass it to
-the part:
+Use `(buzz/request)` in a part handler to access connection-scoped state:
 
 ```clojure
-(defpart clear-button [clear!]
-  [:button {:on-click clear!} "clear"])
+(defonce carts (atom {}))
 
-(defui cart [items]
-  (let [clear! (fn [_] (server! (reset! items [])))]
-    (clear-button clear!)))
+(defpart clear-button []
+  [:button
+   {:on-click (fn [_]
+                (server! (swap! carts assoc
+                                (buzz/connection (buzz/request))
+                                [])))}
+   "clear"])
 ```
 
-`items` can be an atom from the mount's `:state` map.
+## Editing a part in the REPL
 
-## Editing a part
-
-Re-evaluate a `defpart` to update open pages. Buzz recompiles the components
-that use it only when the number of parameters changes.
+Re-evaluate a `defpart` in the REPL to hot-reload open pages.
 
 ## Limitations
 
