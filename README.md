@@ -186,7 +186,7 @@ fills it in.
 
 - [examples/auth](examples/auth) signs two users in and gives each of them
   their own data.
-- [examples/tap](examples/tap) shows everything the process taps, with a tree
+- [examples/tap-viewer](examples/tap-viewer) shows everything the process taps, with a tree
   the browser folds by itself.
 
 ## Development

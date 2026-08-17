@@ -1,10 +1,10 @@
-(ns taps
+(ns buzz.tap-viewer
   "View `tap>` values in a browser."
   (:require [buzz.core :as buzz :refer [client defpart defui local-state reply request server server!]]
+            [clojure.java.io :as io]
             [clojure.string :as str]
             [org.httpkit.server :as http]))
 
-(def ^:private port 1370)
 (def ^:private nrepl-port 1670)
 
 (def ^:private max-depth 4)
@@ -201,7 +201,7 @@
                                 (let [edn (await (server! (reply (select! (client (:path n))))))]
                                   (await (js/navigator.clipboard.writeText edn))
                                   (reset! said (str "selected " (count edn)
-                                                    " characters and set @taps/selected"))))}
+                                                    " characters and set @buzz.tap-viewer/selected"))))}
        "select"])]
    (when (and (:branch n) (not (get @folded (:path n))))
      [:div.kids (for [c (:children n)] (tree-node c folded said))])])
@@ -218,7 +218,7 @@
                               (let [edn (await (server! (reply (select! (client (:id e))))))]
                                 (await (js/navigator.clipboard.writeText edn))
                                 (reset! said (str "selected " (count edn)
-                                                  " characters and set @taps/selected"))))}
+                                                  " characters and set @buzz.tap-viewer/selected"))))}
      "select"]]
    (when (get @open (:id e))
      [:div.tree (tree-node (:tree e) folded said)])])
@@ -239,10 +239,13 @@
       [:button.clear {:on-click (fn [_] (server! (clear!)))} "clear"]]
      [:p.count n " kept"]
      [:ul.entries (for [e items] (entry-item e open folded said))]
-     [:p.said (or @said "")]]))
+     [:p.said (or @said "")]
+     [:p.credit [:a {:href "https://github.com/borkdude/buzz"} "Made with Buzz"]]]))
 
+;; From the classpath rather than the working directory, so the viewer also
+;; serves its page when pulled into another project as a git dep.
 (def ui
-  (buzz/handler {:index "public/index.html"
+  (buzz/handler {:index (io/file (.toURI (io/resource "taps.html")))
                  :watch [log expanded]
                  :mounts [{:el "app" :ui #'viewer}]
                  :on-close (fn [req] (swap! expanded dissoc (buzz/connection req)))}))
@@ -255,13 +258,21 @@
                       (catch Exception _ nil))]
     (do (start {:port nrepl-port})
         (println (str "nrepl://localhost:" nrepl-port)))
-    (println "no nREPL found. Start one and (require 'taps)")))
+    (println "no nREPL found. Start one and (require 'buzz.tap-viewer)")))
+
+;; For a REPL that is already running. Returns instead of blocking, and
+;; leaves starting an nREPL to the host.
+(defn serve!
+  ([] (serve! nil))
+  ([{:keys [port host] :or {port 1370 host "127.0.0.1"}}]
+   (http/run-server app {:port port :ip host})
+   (println (str "http://" host ":" port))
+   (tap> {:hello "from the server" :at (java.time.LocalTime/now)})
+   nil))
 
 (defn -main [& _]
-  (http/run-server app {:port port :ip "127.0.0.1"})
-  (println (str "http://localhost:" port))
+  (serve!)
   (nrepl!)
-  (tap> {:hello "from the server" :at (java.time.LocalTime/now)})
   @(promise))
 
 
