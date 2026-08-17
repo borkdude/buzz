@@ -263,15 +263,14 @@
 ;; For a REPL that is already running. Returns instead of blocking, and
 ;; leaves starting an nREPL to the host.
 (defn serve!
-  ([] (serve! nil))
-  ([{:keys [port host] :or {port 1370 host "127.0.0.1"}}]
-   (http/run-server app {:port port :ip host})
-   (println (str "http://" host ":" port))
-   (tap> {:hello "from the server" :at (java.time.LocalTime/now)})
-   nil))
+  [{:keys [port host] :or {port 1370 host "127.0.0.1"}}]
+  (http/run-server app {:port port :ip host})
+  (println (str "http://" host ":" port))
+  (tap> {:hello "from the server" :at (java.time.LocalTime/now)})
+  nil)
 
 (defn -main [& _]
-  (serve!)
+  (serve! {})
   (nrepl!)
   @(promise))
 
