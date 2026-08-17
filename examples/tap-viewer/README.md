@@ -32,7 +32,7 @@ Clojure 1.12 or later:
              :git/sha "<sha>"
              :deps/root "examples/tap-viewer"}})
 (require '[buzz.tap-viewer :as viewer])
-(viewer/serve!)
+(viewer/serve! {})
 ```
 
 The `serve!` function takes an optional map, whose values default `{:port 1370 :host "127.0.0.1"}`.
@@ -46,5 +46,5 @@ Babashka:
                          :git/sha "<sha>"
                          :deps/root "examples/tap-viewer"}}})
 (require '[buzz.tap-viewer :as viewer])
-(viewer/serve!)
+(viewer/serve! {})
 ```
