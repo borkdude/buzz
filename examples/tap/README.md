@@ -18,4 +18,31 @@ Long values split into range buckets like the devtools console. Click a
 clipped range to fetch it, for this browser only.
 
 Click `select` on an entry or on any row to copy that value as EDN and put
-it in `@taps/selected`. The value also comes back as a fresh entry on top.
+it in `@buzz.tap-viewer/selected`. The value also comes back as a fresh
+entry on top.
+
+## In a running REPL
+
+Clojure 1.12 or later:
+
+```clojure
+(require '[clojure.repl.deps :refer [add-libs]])
+(add-libs '{io.github.borkdude/buzz-tap
+            {:git/url "https://github.com/borkdude/buzz"
+             :git/sha "<sha>"
+             :deps/root "examples/tap"}})
+(require '[buzz.tap-viewer :as viewer])
+(viewer/serve!)
+```
+
+Babashka:
+
+```clojure
+(require '[babashka.deps :as deps])
+(deps/add-deps '{:deps {io.github.borkdude/buzz-tap
+                        {:git/url "https://github.com/borkdude/buzz"
+                         :git/sha "<sha>"
+                         :deps/root "examples/tap"}}})
+(require '[buzz.tap-viewer :as viewer])
+(viewer/serve!)
+```

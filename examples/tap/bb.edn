@@ -1,5 +1,4 @@
-{:paths ["src"]
- :deps {io.github.borkdude/buzz {:local/root "../.."}}
+{:deps {io.github.borkdude/buzz-tap {:local/root "."}}
  :tasks {dev {:doc "Start the tap viewer on http://localhost:1370, nREPL on 1670"
-              :requires ([taps])
-              :task (taps/-main)}}}
+              :requires ([buzz.tap-viewer :as viewer])
+              :task (viewer/-main)}}}
