@@ -1,7 +1,7 @@
 {:paths ["src" "resources"]
  :deps {;; Capra is used only by tests. bb.edn has no test alias.
         dev.weavejester/capra {:mvn/version "0.1.3"}
-        io.github.borkdude/reagami {:git/sha "07b058931c9ec1caf70327e1532293c4c088c330"}
+        io.github.borkdude/reagami {:git/sha "41fa7ad500202e852944714054619aa0bc7e1cb3"}
         io.github.squint-cljs/squint {:git/tag "v0.14.208"
                                       :git/sha "e83befd03153b842d45cd25a77fefb915f120eb7"}}
  :tasks {
