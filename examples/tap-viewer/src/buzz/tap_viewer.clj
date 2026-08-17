@@ -5,7 +5,6 @@
             [clojure.string :as str]
             [org.httpkit.server :as http]))
 
-(def ^:private port 1370)
 (def ^:private nrepl-port 1670)
 
 (def ^:private max-depth 4)
@@ -240,7 +239,8 @@
       [:button.clear {:on-click (fn [_] (server! (clear!)))} "clear"]]
      [:p.count n " kept"]
      [:ul.entries (for [e items] (entry-item e open folded said))]
-     [:p.said (or @said "")]]))
+     [:p.said (or @said "")]
+     [:p.credit [:a {:href "https://github.com/borkdude/buzz"} "Made with Buzz"]]]))
 
 ;; From the classpath rather than the working directory, so the viewer also
 ;; serves its page when pulled into another project as a git dep.
@@ -262,11 +262,13 @@
 
 ;; For a REPL that is already running. Returns instead of blocking, and
 ;; leaves starting an nREPL to the host.
-(defn serve! []
-  (http/run-server app {:port port :ip "127.0.0.1"})
-  (println (str "http://localhost:" port))
-  (tap> {:hello "from the server" :at (java.time.LocalTime/now)})
-  nil)
+(defn serve!
+  ([] (serve! nil))
+  ([{:keys [port host] :or {port 1370 host "127.0.0.1"}}]
+   (http/run-server app {:port port :ip host})
+   (println (str "http://" host ":" port))
+   (tap> {:hello "from the server" :at (java.time.LocalTime/now)})
+   nil))
 
 (defn -main [& _]
   (serve!)

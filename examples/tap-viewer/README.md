@@ -35,6 +35,8 @@ Clojure 1.12 or later:
 (viewer/serve!)
 ```
 
+`serve!` takes an optional map, default `{:port 1370 :host "127.0.0.1"}`.
+
 Babashka:
 
 ```clojure
