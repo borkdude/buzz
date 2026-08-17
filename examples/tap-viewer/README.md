@@ -30,7 +30,7 @@ Clojure 1.12 or later:
 (add-libs '{io.github.borkdude/buzz-tap
             {:git/url "https://github.com/borkdude/buzz"
              :git/sha "<sha>"
-             :deps/root "examples/tap"}})
+             :deps/root "examples/tap-viewer"}})
 (require '[buzz.tap-viewer :as viewer])
 (viewer/serve!)
 ```
@@ -42,7 +42,7 @@ Babashka:
 (deps/add-deps '{:deps {io.github.borkdude/buzz-tap
                         {:git/url "https://github.com/borkdude/buzz"
                          :git/sha "<sha>"
-                         :deps/root "examples/tap"}}})
+                         :deps/root "examples/tap-viewer"}}})
 (require '[buzz.tap-viewer :as viewer])
 (viewer/serve!)
 ```
