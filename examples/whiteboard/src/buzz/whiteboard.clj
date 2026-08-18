@@ -20,7 +20,9 @@
 (defonce live (atom {}))
 
 ;; One count per `server!` call, so the page shows what a drawing session
-;; costs in messages.
+;; costs in messages. Deliberately not in the handler's `:watch`: watched,
+;; it would broadcast a patch to every connection on every message. The
+;; count rides along whenever another change renders.
 (defonce msgs (atom 0))
 
 (defn- color-of [conn]
@@ -157,7 +159,7 @@
 
 (def ui
   (buzz/handler {:index (io/file (.toURI (io/resource "whiteboard.html")))
-                 :watch [strokes live msgs]
+                 :watch [strokes live]
                  :mounts [{:el "app" :ui #'board}]
                  :on-close (fn [req] (leave! req))}))
 
