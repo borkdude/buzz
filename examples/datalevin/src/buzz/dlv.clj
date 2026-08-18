@@ -122,10 +122,8 @@
                        (str (:count e) " rows · " (:ms e) "ms")])
                     log)]
       [:div.main
-       ;; CodeMirror owns this node's shadow root. `:on-render` is the escape
-       ;; hatch for third-party widgets, but Reagami manages the light
-       ;; children of every node it renders, so the widget's DOM lives in a
-       ;; shadow root, which Reagami never touches. Three more findings from
+       ;; CodeMirror owns this node: since reagami 0.2.41 a childless node's
+       ;; foreign DOM is left alone across renders. Three findings from
        ;; getting here: the editor constructs in a `setTimeout`, because CM's
        ;; extension resolution is deeply recursive and the hook already sits
        ;; at the bottom of the render stack, deep enough together to overflow
@@ -146,7 +144,6 @@
                       hl    (.-highlight js/window.CM)
                       clj   (.-cljMode js/window.CM)
                       nonce (.-content (js/document.querySelector "meta[name=csp-nonce]"))
-                      shadow (.attachShadow node {:mode "open"})
                       EditorView (.-EditorView cm)
                       ;; clojure-mode's bundled theme uses style syntax that
                       ;; modern style-mod rejects, so the language is built
@@ -158,8 +155,7 @@
                       LanguageSupport (.-LanguageSupport lang)
                       view (new EditorView
                                 {:doc (:q (first cans))
-                                 :root shadow
-                                 :parent shadow
+                                 :parent node
                                  :cspNonce nonce
                                  :extensions
                                  [(.of (.-keymap cm) (.-complete_keymap clj))
