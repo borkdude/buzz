@@ -315,11 +315,13 @@
                      @(requiring-resolve 'buzz.httpkit/adapter))
         registry (atom {})
         _      (swap! registries conj registry)
+        ;; Async by default: writes within the window collapse into one
+        ;; render for all of this handler's atoms. `:render-interval-ms 0`
+        ;; renders synchronously on the writing thread instead.
+        interval (or (:render-interval-ms spec) 20)
         _      (let [render (cond-> (broadcast-patch! registry)
-                              ;; writes within the window collapse into one
-                              ;; render for all of this handler's atoms
-                              (:render-interval-ms spec)
-                              (coalesced (:render-interval-ms spec)))]
+                              (pos? interval)
+                              (coalesced interval))]
                  (doseq [a watch]
                    (add-watch a [::render registry] render)))
         mounts (mapv (fn [m] (assoc m ::instance (shared-instance (:ui m)))) mounts)

@@ -827,7 +827,7 @@
 
     (testing "a watched write patches through the same channel"
       (swap! shared inc)
-      (is (str/includes? (last @frames) "\"patch\"")))
+      (is (until 2000 #(str/includes? (str (last @frames)) "\"patch\""))))
 
     (testing "the close callback drops the connection"
       (@closed)
@@ -858,7 +858,10 @@
 
         (testing "a closed client is learned about, and no watch thread blocks"
           (.close sock)
-          (is (until 5000 #(do (swap! shared inc)
+          ;; The pump blocks on its write to the dead socket, so the exit is
+          ;; capra's queue-full timeout. Coalesced renders fill the 256-slot
+          ;; queue at the render rate, which takes about six seconds.
+          (is (until 10000 #(do (swap! shared inc)
                                (empty? (registry-of ui)))))))
       (finally (.close server)))))
 
@@ -987,8 +990,10 @@
         fake   (fn [_req {:keys [status on-open]}]
                  (swap! opens conj on-open)
                  {:status status :body :fake-stream})
+        ;; synchronous renders, so the assertions need no polling
         ui     (handler/handler {:title "isolated"
                                  :watch [beat]
+                                 :render-interval-ms 0
                                  :mounts [{:el "app" :ui #'isolated-ui}]
                                  :adapter fake})
         open!  (fn []

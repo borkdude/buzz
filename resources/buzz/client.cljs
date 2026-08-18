@@ -41,9 +41,13 @@
     (watch-locals! id locals)
     (draw! id)))
 
+;; A patch can arrive for a component whose mount frame is still on its way:
+;; renders and stream opening run on different server threads. The mount that
+;; follows carries the full current state, so an early patch can be dropped.
 (defn- patch! [id vals]
-  (set! (.-vals (.get instances id)) vals)
-  (draw! id))
+  (when-let [entry (.get instances id)]
+    (set! (.-vals entry) vals)
+    (draw! id)))
 
 ;; Live reload. The query string is what makes the browser fetch the module
 ;; again instead of handing back the one it already has.
