@@ -39,17 +39,20 @@
                             (assoc-in [c :stroke] [p])
                             (assoc-in [c :cursor] p))))))
 
-(defn draw! [req p]
+;; `ps` is a vector of points: the client buffers pointer moves and flushes
+;; once per animation frame, so one message carries a frame's worth.
+(defn draw! [req ps]
   (swap! msgs inc)
   (let [c (buzz/connection req)]
-    (swap! live (fn [l] (cond-> (assoc-in (ensure-conn l c) [c :cursor] p)
+    (swap! live (fn [l] (cond-> (assoc-in (ensure-conn l c) [c :cursor] (peek ps))
                           (get-in l [c :stroke])
-                          (update-in [c :stroke] conj p))))))
+                          (update-in [c :stroke] into ps))))))
 
-(defn end! [req]
+(defn end! [req ps]
   (swap! msgs inc)
   (let [c (buzz/connection req)
-        {:keys [stroke color]} (get @live c)]
+        {:keys [stroke color]} (get @live c)
+        stroke (into (or stroke []) ps)]
     (when (> (count stroke) 1)
       (swap! strokes (fn [ss] (vec (take-last max-strokes (conj ss {:color color :points stroke}))))))
     (swap! live update c dissoc :stroke)))
@@ -91,7 +94,12 @@
         others   (server (other-cursors @live (buzz/connection (request))))
         stats    (server {:here (count @live) :strokes (count @strokes) :msgs @msgs})
         my-color (server (color-of (buzz/connection (request))))
-        drawing  (local-state false)]
+        drawing  (local-state false)
+        ;; pointer moves buffer here and flush once per animation frame:
+        ;; stroke points accumulate, a hover cursor only keeps the latest
+        buf       (local-state [])
+        cur       (local-state nil)
+        scheduled (local-state false)]
     [:div.wb
      [:div.bar
       [:span "you draw in "]
@@ -115,18 +123,32 @@
                x (js/Math.round (* (- (.-clientX e) (.-left r)) (/ 900 (.-width r))))
                y (js/Math.round (* (- (.-clientY e) (.-top r)) (/ 560 (.-height r))))]
            (if @drawing
-             (server! (draw! (request) (client [x y])))
-             (server! (cursor! (request) (client [x y]))))))
+             (swap! buf conj [x y])
+             (reset! cur [x y]))
+           (when-not @scheduled
+             (reset! scheduled true)
+             (js/requestAnimationFrame
+              (fn [_]
+                (reset! scheduled false)
+                (let [ps @buf p @cur]
+                  (reset! buf [])
+                  (reset! cur nil)
+                  (cond (seq ps) (server! (draw! (request) (client ps)))
+                        p (server! (cursor! (request) (client p))))))))))
        :on-pointerup
        (fn [_]
          (reset! drawing false)
-         (server! (end! (request))))
+         (let [ps @buf]
+           (reset! buf [])
+           (server! (end! (request) (client ps)))))
        ;; a tab switch or lost capture fires pointercancel instead of
        ;; pointerup; without this the stroke in progress lingers
        :on-pointercancel
        (fn [_]
          (reset! drawing false)
-         (server! (end! (request))))}
+         (let [ps @buf]
+           (reset! buf [])
+           (server! (end! (request) (client ps)))))}
       done wip others]
      [:p.credit [:a {:href "https://github.com/borkdude/buzz"} "Made with Buzz"]]]))
 
