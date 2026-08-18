@@ -903,3 +903,67 @@
       (let [n (count @frames)]
         (Thread/sleep 120)
         (is (= n (count @frames)))))))
+
+(deftest render-interval-survives-concurrent-writers
+  (reset! pulse 0)
+  (let [frames (atom [])
+        opened (atom nil)
+        fake   (fn [_req {:keys [status on-open]}]
+                 (reset! opened on-open)
+                 {:status status :body :fake-stream})
+        ui     (handler/handler {:title "stress"
+                                 :watch [pulse]
+                                 :render-interval-ms 5
+                                 :mounts [{:el "app" :ui #'coalesced-ui}]
+                                 :adapter fake})
+        _      (ui {:uri "/events"})
+        ch     (reify stream/Channel
+                 (send! [_ s] (swap! frames conj s) true)
+                 (close! [_] nil))]
+    (@opened ch)
+    (let [threads 8
+          writes  500
+          workers (mapv (fn [_] (future (dotimes [_ writes] (swap! pulse inc))))
+                        (range threads))]
+      (run! deref workers)
+      (testing "the final state arrives, whatever the interleaving"
+        (is (until 3000 #(str/includes? (str (last @frames))
+                                        (str "[" (* threads writes) "]")))))
+      (testing "far fewer frames than writes"
+        (is (< (count @frames) 400))))))
+
+;; A slot that throws must not kill the scheduler: the failed render is
+;; reported and the next write renders normally.
+(defonce ^:private flaky (atom 0))
+
+(defn- explode-on-neg [n]
+  (if (neg? n) (throw (ex-info "boom" {})) n))
+
+(defui flaky-ui []
+  [:p (server (explode-on-neg @flaky))])
+
+(deftest render-interval-survives-a-throwing-slot
+  (reset! flaky 0)
+  (let [frames (atom [])
+        opened (atom nil)
+        fake   (fn [_req {:keys [status on-open]}]
+                 (reset! opened on-open)
+                 {:status status :body :fake-stream})
+        ui     (handler/handler {:title "flaky"
+                                 :watch [flaky]
+                                 :render-interval-ms 10
+                                 :mounts [{:el "app" :ui #'flaky-ui}]
+                                 :adapter fake})
+        _      (ui {:uri "/events"})
+        ch     (reify stream/Channel
+                 (send! [_ s] (swap! frames conj s) true)
+                 (close! [_] nil))]
+    (@opened ch)
+    (testing "a write whose render throws sends nothing"
+      (let [n (count @frames)]
+        (reset! flaky -1)
+        (Thread/sleep 100)
+        (is (= n (count @frames)))))
+    (testing "the scheduler survives and the next write patches"
+      (reset! flaky 7)
+      (is (until 2000 #(str/includes? (str (last @frames)) "[7]"))))))
