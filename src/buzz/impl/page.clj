@@ -135,6 +135,48 @@
             m mounted]
       (patch! ch m))))
 
+;; One scheduler thread for all coalesced handlers. Daemon, so a process that
+;; stops its server is not kept alive by an idle scheduler.
+(defonce ^:private render-exec
+  (delay (java.util.concurrent.Executors/newSingleThreadScheduledExecutor
+          (reify java.util.concurrent.ThreadFactory
+            (newThread [_ r]
+              (doto (Thread. ^Runnable r "buzz-render")
+                (.setDaemon true)))))))
+
+;; Runs `render` at most once per `interval-ms`. The first write renders
+;; immediately, writes landing inside the window mark dirty and the follow-up
+;; renders them, so the last state always goes out and intermediate states
+;; collapse. Rendering happens on the scheduler thread, so a write returns
+;; without paying for any connection's render. Idle costs nothing: no writes,
+;; no wake-ups.
+(defn- coalesced [render ^long interval-ms]
+  (let [exec @render-exec
+        dirty (atom false)
+        active (atom false)
+        tick (fn tick []
+               (reset! dirty false)
+               (try (render nil nil nil nil)
+                    (catch Throwable e
+                      (println "buzz: render failed -" (ex-message e))))
+               (.schedule ^java.util.concurrent.ScheduledExecutorService exec
+                          ^Runnable
+                          (fn follow-up []
+                            (if @dirty
+                              (tick)
+                              (do (reset! active false)
+                                  ;; a write can land between the check and the
+                                  ;; flag flip; re-arm rather than lose it
+                                  (when (and @dirty
+                                             (compare-and-set! active false true))
+                                    (tick)))))
+                          interval-ms
+                          java.util.concurrent.TimeUnit/MILLISECONDS))]
+    (fn [_ _ _ _]
+      (reset! dirty true)
+      (when (compare-and-set! active false true)
+        (.submit ^java.util.concurrent.ExecutorService exec ^Runnable tick)))))
+
 ;; Rebuild instances and reload open pages after definitions change.
 (defn- reload-all! [_ _ _ rev]
   (doseq [registry @registries
@@ -268,8 +310,13 @@
                      @(requiring-resolve 'buzz.httpkit/adapter))
         registry (atom {})
         _      (swap! registries conj registry)
-        _      (doseq [a watch]
-                 (add-watch a [::render registry] (broadcast-patch! registry)))
+        _      (let [render (cond-> (broadcast-patch! registry)
+                              ;; writes within the window collapse into one
+                              ;; render for all of this handler's atoms
+                              (:render-interval-ms spec)
+                              (coalesced (:render-interval-ms spec)))]
+                 (doseq [a watch]
+                   (add-watch a [::render registry] render)))
         mounts (mapv (fn [m] (assoc m ::instance (shared-instance (:ui m)))) mounts)
         spec   (assoc spec :mounts mounts)
         path   (or path "")
