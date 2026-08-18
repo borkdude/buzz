@@ -516,7 +516,13 @@
        (var ~nm))))
 
 (def handler
-  "Returns a Ring handler for `spec`. See `buzz.stream` for `:adapter`."
+  "Returns a Ring handler for `spec`. See `buzz.stream` for `:adapter`.
+
+  `:render-interval-ms` renders at most once per interval: the first write
+  renders immediately, writes inside the window collapse into one render that
+  carries the latest state. Rendering then happens on a scheduler thread, no
+  longer on the writing thread. Without it every write renders synchronously,
+  as before."
   page/handler)
 
 (def connection

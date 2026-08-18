@@ -861,3 +861,45 @@
           (is (until 5000 #(do (swap! shared inc)
                                (empty? (registry-of ui)))))))
       (finally (.close server)))))
+
+;; :render-interval-ms collapses a burst of writes into a few renders that
+;; carry the last state. Driven through the fake adapter, so the assertions
+;; are on the frames a browser would get.
+(defonce ^:private pulse (atom 0))
+
+(defui coalesced-ui []
+  [:p (server @pulse)])
+
+(deftest render-interval-collapses-a-burst
+  (reset! pulse 0)
+  (let [frames (atom [])
+        opened (atom nil)
+        fake   (fn [_req {:keys [status on-open]}]
+                 (reset! opened on-open)
+                 {:status status :body :fake-stream})
+        ui     (handler/handler {:title "coalesced"
+                                 :watch [pulse]
+                                 :render-interval-ms 25
+                                 :mounts [{:el "app" :ui #'coalesced-ui}]
+                                 :adapter fake})
+        _      (ui {:uri "/events"})
+        ch     (reify stream/Channel
+                 (send! [_ s] (swap! frames conj s) true)
+                 (close! [_] nil))]
+    (@opened ch)
+
+    (testing "a lone write patches promptly"
+      (swap! pulse inc)
+      (is (until 2000 #(str/includes? (str (last @frames)) "\"patch\""))))
+
+    (testing "a burst collapses into a few renders and ends on the last state"
+      (let [start (count @frames)]
+        (dotimes [_ 100] (swap! pulse inc))
+        (is (until 2000 #(str/includes? (str (last @frames)) "[101]")))
+        (testing "far fewer frames than writes"
+          (is (< (- (count @frames) start) 20)))))
+
+    (testing "idle means no further frames"
+      (let [n (count @frames)]
+        (Thread/sleep 120)
+        (is (= n (count @frames)))))))
