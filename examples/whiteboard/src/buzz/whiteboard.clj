@@ -11,7 +11,9 @@
 
 (def ^:private max-strokes 500)
 
-;; Finished strokes, shared by everyone.
+;; Finished strokes, shared by everyone. Stored as ready polyline hiccup:
+;; every message re-renders every slot for every connection, so the work of
+;; turning points into a polyline happens once, when the stroke ends.
 (defonce strokes (atom []))
 
 ;; Per connection: assigned color, cursor position, stroke in progress.
@@ -26,6 +28,11 @@
 
 (defn- ensure-conn [l conn]
   (update l conn (fn [m] (assoc m :color (or (:color m) (color-of conn))))))
+
+(defn- polyline [{:keys [color points]}]
+  [:polyline {:points (str/join " " (map (fn [[x y]] (str x "," y)) points))
+              :fill "none" :stroke color :stroke-width 3
+              :stroke-linecap "round" :stroke-linejoin "round"}])
 
 (defn cursor! [req p]
   (swap! msgs inc)
@@ -54,7 +61,8 @@
         {:keys [stroke color]} (get @live c)
         stroke (into (or stroke []) ps)]
     (when (> (count stroke) 1)
-      (swap! strokes (fn [ss] (vec (take-last max-strokes (conj ss {:color color :points stroke}))))))
+      (let [line (polyline {:color color :points stroke})]
+        (swap! strokes (fn [ss] (vec (take-last max-strokes (conj ss line)))))))
     (swap! live update c dissoc :stroke)))
 
 (defn clear! []
@@ -66,11 +74,6 @@
   (swap! live dissoc (buzz/connection req)))
 
 ;;;; Display data, all computed on the server
-
-(defn- polyline [{:keys [color points]}]
-  [:polyline {:points (str/join " " (map (fn [[x y]] (str x "," y)) points))
-              :fill "none" :stroke color :stroke-width 3
-              :stroke-linecap "round" :stroke-linejoin "round"}])
 
 (defn- wip-lines [l]
   (into [:g]
@@ -89,7 +92,7 @@
 ;;;; UI
 
 (defui board []
-  (let [done     (server (into [:g] (map polyline @strokes)))
+  (let [done     (server (into [:g] @strokes))
         wip      (server (wip-lines @live))
         others   (server (other-cursors @live (buzz/connection (request))))
         stats    (server {:here (count @live) :strokes (count @strokes) :msgs @msgs})
