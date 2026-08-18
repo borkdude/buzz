@@ -1,0 +1,4 @@
+{:deps {io.github.borkdude/buzz-whiteboard {:local/root "."}}
+ :tasks {dev {:doc "Serve the whiteboard on http://localhost:1390"
+              :requires ([buzz.whiteboard :as wb])
+              :task (wb/-main)}}}

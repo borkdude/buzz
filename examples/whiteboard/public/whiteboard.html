@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>whiteboard</title>
+    <style nonce="NONCE">
+      body { font: 15px/1.5 system-ui, sans-serif; max-width: 60rem; margin: 1.5rem auto; padding: 0 1rem; }
+      .bar { display: flex; align-items: center; gap: .5rem; margin-bottom: .5rem; }
+      .bar svg { display: block; }
+      .stats { color: #888; font-size: .85rem; margin-left: auto; }
+      .clear { font: inherit; font-size: .85rem; padding: .1rem .6rem; border: 1px solid #ccc; border-radius: 6px; background: #fafafa; cursor: pointer; }
+      #board { width: 100%; aspect-ratio: 900 / 560; display: block; border: 1px solid #ddd; border-radius: 8px; background: #fff; touch-action: none; cursor: crosshair; }
+      .credit { font-size: .8rem; }
+      .credit a { color: #999; }
+    </style>
+  </head>
+  <body>
+    <div id="app"><!--app--></div>
+    <script type="importmap" nonce="NONCE">
+      {"imports": {"squint-cljs/core.js": "https://esm.sh/squint-cljs@0.14.208/core.js"}}
+    </script>
+    <script type="module" src="/client.mjs"></script>
+  </body>
+</html>

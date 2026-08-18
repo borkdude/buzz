@@ -1,0 +1,2 @@
+{:paths ["src" "public"]
+ :deps {io.github.borkdude/buzz {:local/root "../.."}}}

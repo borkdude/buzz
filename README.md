@@ -188,6 +188,8 @@ fills it in.
   their own data.
 - [examples/tap-viewer](examples/tap-viewer) shows everything the process taps, with a tree
   the browser folds by itself.
+- [examples/whiteboard](examples/whiteboard) is a shared whiteboard with live
+  cursors, one color per connection.
 
 ## Development
 
