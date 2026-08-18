@@ -518,11 +518,12 @@
 (def handler
   "Returns a Ring handler for `spec`. See `buzz.stream` for `:adapter`.
 
-  `:render-interval-ms` renders at most once per interval: the first write
-  renders immediately, writes inside the window collapse into one render that
-  carries the latest state. Rendering then happens on a scheduler thread, no
-  longer on the writing thread. Without it every write renders synchronously,
-  as before."
+  Rendering is asynchronous: a write returns at once and rendering happens on
+  a scheduler thread, at most once per `:render-interval-ms` (default 20).
+  The first write renders immediately, writes inside the window collapse into
+  one render that carries the latest state, so patches are sampled state, not
+  every state. `:render-interval-ms 0` renders synchronously on the writing
+  thread, which some tests want."
   page/handler)
 
 (def connection

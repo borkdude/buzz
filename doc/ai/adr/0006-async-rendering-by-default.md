@@ -2,8 +2,11 @@
 
 Date: 2026-08-18
 
-Status: Accepted as a plan. The opt-in is on the `render-coalescing` branch;
-the items below gate the default flip.
+Status: The flip is implemented on the `async-by-default` branch: default 20,
+`0` for synchronous. The mount race turned out self-healing (the client drops
+a pre-mount patch, the mount carries full state) and the reload gap is
+dev-only, so neither gated the flip after all. Remaining items below are
+demand-driven follow-ups, not gates.
 
 ## Context
 

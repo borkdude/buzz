@@ -160,9 +160,6 @@
 (def ui
   (buzz/handler {:index (io/file (.toURI (io/resource "whiteboard.html")))
                  :watch [strokes live]
-                 ;; writes within the window collapse into one render, so a
-                 ;; drawing burst no longer costs a render per pointer move
-                 :render-interval-ms 20
                  :mounts [{:el "app" :ui #'board}]
                  :on-close (fn [req] (leave! req))}))
 

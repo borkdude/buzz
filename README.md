@@ -106,6 +106,13 @@ To compose the handler with other routes, you can use `or` since the handler ret
 
 Buzz watches each atom in `:watch`. When one of them changes, it re-renders the component and sends a patch to each browser. One mount can hold one component at one element. A page can have more than one mount.
 
+Rendering is asynchronous: a write returns at once, and rendering happens at
+most once per `:render-interval-ms` (default 20). The first write renders
+immediately and writes inside the window collapse into one render carrying the
+latest state, so patches are sampled state, not every state: a counter can
+step from 3 to 7. Pass `:render-interval-ms 0` to render synchronously on the
+writing thread, which makes tests deterministic.
+
 A mount names its component by var, so re-evaluating the component reaches
 the open pages:
 
