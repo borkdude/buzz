@@ -43,12 +43,25 @@ Batching by animation frame delays a lone call by up to one frame. If that
 matters, flush immediately when the queue was empty and only start batching
 under pressure.
 
+**Ordering across batches**: separate POSTs can arrive out of order, the one
+guarantee websockets have that this design lacks. Fixed client side by
+chaining the flushes: keep buffering while a POST is in flight and send the
+next batch when the previous one resolves. At most one request in flight
+means total order with no server cooperation, and batch size adapts to the
+actual round trip for free: slow network, bigger batches. `server!` returns a
+promise, so this is expressible today.
+
 ## Status
 
-Do nothing until someone shows a repro with numbers: messages per second per
-client, payload size, latency budget. First answer stays "put an HTTP/2 proxy
-in front". Batching is the fallback when that is not enough. Websockets only
-if both fail, which is not expected.
+The whiteboard example batches at the application level: pointer moves buffer
+in a client atom and flush once per animation frame as a point array.
+Measured with 20 connections, this and render coalescing together took a
+1000-write burst from 20000 patches and 77MiB to under 40 patches and 191KiB.
+Message overhead after batching, behind the HTTP/2 proxy: a few KB/s, so the
+per-message cost argument for websockets is settled here. Chained flushes
+(ordering) are not implemented anywhere yet. A generic batching layer inside
+`server!` itself stays not-needed until an app cannot do what the whiteboard
+does.
 
 ## References
 
