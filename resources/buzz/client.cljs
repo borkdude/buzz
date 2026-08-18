@@ -3,7 +3,7 @@
 ;; imports, so the page never evaluates anything it was handed at runtime.
 
 (ns client
-  (:require ["https://esm.sh/reagami@0.2.40" :as reagami]
+  (:require ["https://esm.sh/reagami@0.2.41" :as reagami]
             ["/components.mjs" :as components]
             ["/rpc.mjs" :as rpc]))
 
