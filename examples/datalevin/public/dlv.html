@@ -2,6 +2,7 @@
 <html>
   <head>
     <meta charset="utf-8">
+    <meta name="csp-nonce" content="NONCE">
     <title>mbrainz</title>
     <style nonce="NONCE">
       body { font: 15px/1.5 system-ui, sans-serif; max-width: 70rem; margin: 1.5rem auto; padding: 0 1rem; }
@@ -17,9 +18,9 @@
         background: #fafafa; cursor: pointer; }
       .canned:hover, .logq:hover { background: #f0f0f0; }
       .logq { color: #666; font-family: ui-monospace, Menlo, monospace; font-size: .75rem; }
-      textarea { width: 100%; height: 11rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-        font-size: .85rem; padding: .6rem; border: 1px solid #ddd; border-radius: 6px; resize: vertical;
-        box-sizing: border-box; }
+      #editor { border: 1px solid #ddd; border-radius: 6px; }
+      #editor .cm-editor { min-height: 11rem; font-size: .85rem; }
+      #editor .cm-editor.cm-focused { outline: none; }
       .actions { margin: .5rem 0 1rem; }
       .run { font: inherit; padding: .3rem 1.2rem; border: 1px solid #4682b4; border-radius: 6px;
         background: #4682b4; color: #fff; cursor: pointer; }
@@ -38,6 +39,19 @@
     <div id="app"><!--app--></div>
     <script type="importmap" nonce="NONCE">
       {"imports": {"squint-cljs/core.js": "https://esm.sh/squint-cljs@0.14.208/core.js"}}
+    </script>
+    <!-- Module scripts run in order, so window.CM is set before client.mjs.
+         The @lezer/highlight import uses the same range URL that
+         @codemirror/language's esm.sh build imports internally: a pinned
+         version would be a second module instance, whose tags the highlight
+         style would not recognize. -->
+    <script type="module" nonce="NONCE">
+      import * as view from "https://esm.sh/@codemirror/view@6.43.9";
+      import * as language from "https://esm.sh/@codemirror/language@6.11.3";
+      import * as highlight from "https://esm.sh/@lezer/highlight@^1.0.0?target=es2022";
+      import * as autocomplete from "https://esm.sh/@codemirror/autocomplete@6.20.0";
+      import * as cljMode from "https://esm.sh/@nextjournal/clojure-mode@0.3.3";
+      window.CM = {view, language, highlight, autocomplete, cljMode};
     </script>
     <script type="module" src="/client.mjs"></script>
   </body>

@@ -93,7 +93,7 @@
   (let [counts (server (stats))
         cans   (server canned)
         log    (server @query-log)
-        qtext  (local-state (server (:q (first canned))))
+        editor (local-state nil)
         result (local-state nil)]
     [:div.app
      [:div.bar
@@ -105,22 +105,78 @@
        [:h2 "Queries"]
        (for [c cans]
          [:button.canned {:key (:label c)
-                          :on-click (fn [_] (reset! qtext (:q c)))}
+                          :on-click (fn [_]
+                                      (when-let [v @editor]
+                                        (.dispatch v {:changes {:from 0
+                                                                :to (.. v -state -doc -length)
+                                                                :insert (:q c)}})))}
           (:label c)])
        [:h2 "Everyone ran"]
        (map-indexed (fn [i e]
                       [:button.logq {:key i
-                                     :on-click (fn [_] (reset! qtext (:q e)))}
+                                     :on-click (fn [_]
+                                                 (when-let [v @editor]
+                                                   (.dispatch v {:changes {:from 0
+                                                                           :to (.. v -state -doc -length)
+                                                                           :insert (:q e)}})))}
                        (str (:count e) " rows · " (:ms e) "ms")])
                     log)]
       [:div.main
-       [:textarea {:value @qtext
-                   :spellcheck "false"
-                   :on-input (fn [e] (reset! qtext (.. e -target -value)))}]
+       ;; CodeMirror owns this node's shadow root. `:on-render` is the escape
+       ;; hatch for third-party widgets, but Reagami manages the light
+       ;; children of every node it renders, so the widget's DOM lives in a
+       ;; shadow root, which Reagami never touches. Three more findings from
+       ;; getting here: the editor constructs in a `setTimeout`, because CM's
+       ;; extension resolution is deeply recursive and the hook already sits
+       ;; at the bottom of the render stack, deep enough together to overflow
+       ;; it; the CSP nonce rides in a meta tag so CM's injected styles pass
+       ;; the page's CSP; and clojure-mode's bundled theme
+       ;; (`default_extensions`) uses style syntax that modern style-mod
+       ;; rejects, so the language is assembled from its parser and tag map
+       ;; with the standard highlight style instead.
+       [:div#editor
+        {:on-render
+         (fn [{:keys [node lifecycle state save]}]
+           (case lifecycle
+             :mount
+             (js/setTimeout
+              (fn []
+                (let [cm    (.-view js/window.CM)
+                      lang  (.-language js/window.CM)
+                      hl    (.-highlight js/window.CM)
+                      clj   (.-cljMode js/window.CM)
+                      nonce (.-content (js/document.querySelector "meta[name=csp-nonce]"))
+                      shadow (.attachShadow node {:mode "open"})
+                      EditorView (.-EditorView cm)
+                      ;; clojure-mode's bundled theme uses style syntax that
+                      ;; modern style-mod rejects, so the language is built
+                      ;; from its parser and tag map instead, and bracket
+                      ;; auto-closing comes from the standard closeBrackets.
+                      parser (.configure (.-parser clj)
+                                         {:props [((.-styleTags hl) (.-style_tags clj))]})
+                      clj-lang (.define (.-LRLanguage lang) {:parser parser})
+                      LanguageSupport (.-LanguageSupport lang)
+                      view (new EditorView
+                                {:doc (:q (first cans))
+                                 :root shadow
+                                 :parent shadow
+                                 :cspNonce nonce
+                                 :extensions
+                                 [(.of (.-keymap cm) (.-complete_keymap clj))
+                                  (new LanguageSupport clj-lang)
+                                  ((.-closeBrackets (.-autocomplete js/window.CM)))
+                                  ((.-syntaxHighlighting lang) (.-defaultHighlightStyle lang))]})]
+                  (reset! editor view)
+                  (save view)))
+              0)
+             :update (save state)
+             :unmount (when state (.destroy state))))}]
        [:div.actions
         [:button.run {:on-click (^:async fn [_]
-                                  (reset! result
-                                          (await (server! (reply (run-query! (client @qtext)))))))}
+                                  (when-let [v @editor]
+                                    (reset! result
+                                            (await (server! (reply (run-query!
+                                                                    (client (.toString (.. v -state -doc))))))))))}
          "Run"]]
        (result-view @result)]]
      [:p.credit [:a {:href "https://github.com/borkdude/buzz"} "Made with Buzz"]]]))
@@ -133,7 +189,13 @@
 (defn app [req]
   (or (ui req) {:status 404 :body "not found"}))
 
+(defn serve!
+  "Starts the server and returns, for a REPL."
+  [{:keys [port host] :or {port 1395 host "127.0.0.1"}}]
+  (http/run-server app {:port port :ip host})
+  (println (str "http://" host ":" port))
+  nil)
+
 (defn -main [& _]
-  (http/run-server app {:port 1395 :ip "127.0.0.1"})
-  (println "http://127.0.0.1:1395")
+  (serve! {})
   @(promise))
