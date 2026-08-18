@@ -197,6 +197,8 @@ fills it in.
   the browser folds by itself.
 - [examples/whiteboard](examples/whiteboard) is a shared whiteboard with live
   cursors, one color per connection.
+- [examples/datalevin](examples/datalevin) is a Datalevin browser over a
+  MusicBrainz sample, with a query log shared between viewers.
 
 ## Development
 

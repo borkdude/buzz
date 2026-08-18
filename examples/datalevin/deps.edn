@@ -1,0 +1,7 @@
+{:paths ["src" "public" "resources"]
+ :deps {io.github.borkdude/buzz {:local/root "../.."}
+        datalevin/datalevin {:mvn/version "1.0.2"}}
+ ;; datalevin needs these opens on modern JDKs
+ :aliases {:run {:jvm-opts ["--add-opens=java.base/java.nio=ALL-UNNAMED"
+                            "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED"]
+                 :main-opts ["-m" "buzz.dlv"]}}}

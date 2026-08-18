@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>mbrainz</title>
+    <style nonce="NONCE">
+      body { font: 15px/1.5 system-ui, sans-serif; max-width: 70rem; margin: 1.5rem auto; padding: 0 1rem; }
+      .bar { display: flex; align-items: baseline; gap: 1rem; }
+      h1 { font-size: 1.3rem; margin: 0; }
+      h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .05em; color: #888; margin: 1rem 0 .3rem; }
+      .stats { color: #888; font-size: .85rem; }
+      .cols { display: flex; gap: 1.5rem; align-items: flex-start; margin-top: 1rem; }
+      .side { width: 15rem; flex-shrink: 0; }
+      .main { flex: 1; min-width: 0; }
+      .canned, .logq { display: block; width: 100%; text-align: left; font: inherit; font-size: .85rem;
+        padding: .3rem .5rem; margin-bottom: .25rem; border: 1px solid #ddd; border-radius: 6px;
+        background: #fafafa; cursor: pointer; }
+      .canned:hover, .logq:hover { background: #f0f0f0; }
+      .logq { color: #666; font-family: ui-monospace, Menlo, monospace; font-size: .75rem; }
+      textarea { width: 100%; height: 11rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: .85rem; padding: .6rem; border: 1px solid #ddd; border-radius: 6px; resize: vertical;
+        box-sizing: border-box; }
+      .actions { margin: .5rem 0 1rem; }
+      .run { font: inherit; padding: .3rem 1.2rem; border: 1px solid #4682b4; border-radius: 6px;
+        background: #4682b4; color: #fff; cursor: pointer; }
+      .hint, .meta { color: #888; font-size: .85rem; }
+      .error { border: 1px solid #f3c2c2; border-radius: 6px; background: #fdf3f3; color: #a33;
+        padding: .6rem .8rem; font-family: ui-monospace, Menlo, monospace; font-size: .85rem; }
+      table { border-collapse: collapse; width: 100%; font-size: .85rem; }
+      th { text-align: left; font-family: ui-monospace, Menlo, monospace; color: #666;
+        border-bottom: 2px solid #ddd; padding: .25rem .5rem; }
+      td { border-bottom: 1px solid #eee; padding: .25rem .5rem; }
+      .credit { font-size: .8rem; margin-top: 2rem; }
+      .credit a { color: #999; }
+    </style>
+  </head>
+  <body>
+    <div id="app"><!--app--></div>
+    <script type="importmap" nonce="NONCE">
+      {"imports": {"squint-cljs/core.js": "https://esm.sh/squint-cljs@0.14.208/core.js"}}
+    </script>
+    <script type="module" src="/client.mjs"></script>
+  </body>
+</html>
