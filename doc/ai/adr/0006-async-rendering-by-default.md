@@ -53,27 +53,29 @@ breaking release and ships last, smallest and alone.
    only become visible to broadcasts after its mount frames are written, and
    reloads must route through the same serial lane the renders use. This is
    the item that has to be airtight; the rest is trim.
-2. **Per-connection error isolation.** One throwing slot currently aborts the
-   whole broadcast doseq, so later connections silently miss that render.
-   One bad render should cost one connection one frame.
-3. **`:render-error-fn`.** Async demotes slot exceptions from surfacing at the
-   `swap!` site to a println on a background thread. A pluggable hook, with
-   the print as default.
-4. **Flush affordance.** `flush-renders!` (submit a barrier task, wait for it
+
+   Demonstrated, not just suspected: `reload-all!` renders every registry
+   with no per-connection isolation, so one poisoned per-connection slot
+   breaks dev reload for every open page in the process. Found when a test
+   left a slot poisoned and three unrelated reload tests died on it.
+2. **Per-connection error isolation.** Done for the broadcast path
+   ("Contain a failing render to its own connection"). The reload path still
+   needs it, see item 1.
+3. **Flush affordance.** `flush-renders!` (submit a barrier task, wait for it
    and a clear dirty flag) so tests and REPL sessions can assert
    deterministically against the real async config. Documented next to
    `0` = synchronous.
-5. **Executor per handler.** One shared scheduler thread lets a slow slot in
+4. **Executor per handler.** One shared scheduler thread lets a slow slot in
    one handler delay another. Handlers are few, threads are cheap, and
    per-handler serialization is what item 1 wants anyway. A pool like
    hyperlith's is not warranted yet.
-6. **Adapter contract.** `buzz.stream/send!` may be called from several
-   threads and must be frame-atomic. http-kit is; capra needs a look. The
-   heartbeat already relied on this implicitly, async makes it load-bearing.
-7. **Dogfood.** Whiteboard (including the VPS deploy), multi-snake and
+5. **Adapter contract.** Done ("Document that send! must take concurrent
+   calls"). Both bundled adapters comply: http-kit serializes internally,
+   capra funnels through one queue and pump thread.
+6. **Dogfood.** Whiteboard (including the VPS deploy), multi-snake and
    tube-pod at 20ms, for calendar time. Missing affordances should surface
    here, not after the flip.
-8. **Paperwork at the flip.** Default 20, `0` for sync, README paragraph on
+7. **Paperwork at the flip.** Default 20, `0` for sync, README paragraph on
    the rendering model ("patches are sampled state"), breaking CHANGELOG
    line, and 0001 marked resolved.
 
@@ -84,6 +86,11 @@ Frame dropping to slow readers (backpressure) is on the
 queue depth; the reflection it uses now is too brittle to ship and does not
 exist on babashka. Patch size is untouched by all of this: a changed slot
 resends whole, which is [0002](0002-work-after-the-scheduler.md)'s territory.
+
+A `:render-error-fn` hook was started and dropped: the default println lands
+in the container logs, which is the logging story of every current
+deployment. Reconsider when an app with structured logging actually needs to
+route render errors, and design the data shape against that consumer.
 
 ## References
 
