@@ -967,3 +967,56 @@
     (testing "the scheduler survives and the next write patches"
       (reset! flaky 7)
       (is (until 2000 #(str/includes? (str (last @frames)) "[7]"))))))
+
+;; A per-connection slot can throw for one connection while the others are
+;; fine. The failure costs that connection its frame, nobody else's, and the
+;; connection recovers on the next healthy render.
+(defonce ^:private poisoned (atom #{}))
+(defonce ^:private beat (atom 0))
+
+(defn- guard [conn n]
+  (if (@poisoned conn) (throw (ex-info "poisoned" {})) n))
+
+(defui isolated-ui []
+  [:p (server (guard (handler/connection (request)) @beat))])
+
+(deftest a-throwing-connection-does-not-starve-the-others
+  (reset! poisoned #{})
+  (reset! beat 0)
+  (let [opens  (atom [])
+        fake   (fn [_req {:keys [status on-open]}]
+                 (swap! opens conj on-open)
+                 {:status status :body :fake-stream})
+        ui     (handler/handler {:title "isolated"
+                                 :watch [beat]
+                                 :mounts [{:el "app" :ui #'isolated-ui}]
+                                 :adapter fake})
+        open!  (fn []
+                 (ui {:uri "/events"})
+                 (let [frames (atom [])
+                       ch (reify stream/Channel
+                            (send! [_ s] (swap! frames conj s) true)
+                            (close! [_] nil))]
+                   ((last @opens) ch)
+                   {:frames frames
+                    :session (second (json/parse-string (subs (first @frames) 6)))}))
+        one    (open!)
+        two    (open!)]
+
+    (testing "both patch while healthy"
+      (swap! beat inc)
+      (is (str/includes? (str (last @(:frames one))) "[1]"))
+      (is (str/includes? (str (last @(:frames two))) "[1]")))
+
+    (testing "a poisoned connection misses its frame, the other still patches"
+      (swap! poisoned conj (:session two))
+      (let [before (count @(:frames two))]
+        (swap! beat inc)
+        (is (str/includes? (str (last @(:frames one))) "[2]"))
+        (is (= before (count @(:frames two))))))
+
+    (testing "the poisoned connection recovers with the latest state"
+      (reset! poisoned #{})
+      (swap! beat inc)
+      (is (str/includes? (str (last @(:frames one))) "[3]"))
+      (is (str/includes? (str (last @(:frames two))) "[3]")))))

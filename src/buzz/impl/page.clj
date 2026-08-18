@@ -128,12 +128,17 @@
           (json-response 500 {:error "handler failed"})))
       (json-response 404 {:error "no such handler"}))))
 
-;; Patch only connections owned by this handler.
+;; Patch only connections owned by this handler. A slot can be
+;; per-connection, so one connection's render may throw while the others are
+;; fine: the failure is contained to that connection's frame. Its `sent`
+;; state is untouched, so the next healthy render sends the latest state.
 (defn- broadcast-patch! [registry]
   (fn [_ _ _ _]
-    (doseq [{:keys [ch mounted]} (vals @registry)
+    (doseq [[session {:keys [ch mounted]}] @registry
             m mounted]
-      (patch! ch m))))
+      (try (patch! ch m)
+           (catch Throwable e
+             (println "buzz: render failed for" session "-" (ex-message e)))))))
 
 ;; One scheduler thread for all coalesced handlers. Daemon, so a process that
 ;; stops its server is not kept alive by an idle scheduler.
