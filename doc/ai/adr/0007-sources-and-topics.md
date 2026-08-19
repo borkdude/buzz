@@ -131,17 +131,18 @@ two layers are built out of.
 (defprotocol Source
   (-subscribe [source k notify]
     "Calls notify, a function of no arguments, whenever k changes.
-     Returns a handle supporting deref.")
-  (-unsubscribe [source handle]))
+     Returns a handle that deref gives the current value of.")
+  (-unsubscribe [source k handle]))
 ```
 
 Two methods. The handle is derefable, which is the point: the subscription and
 the read cache are the same object.
 
 Buzz keys the subscription by `[source k]` and uses that pair as the topic, so
-`notify` is `#(invalidate! [source-id k])` and nothing else has to be wired. The
-lifetime follows the topic index. A topic gaining its first subscriber opens the
-subscription, and losing its last closes it.
+the `notify` it hands to a source raises that subscription's version and marks
+that topic, and nothing else has to be wired. The lifetime follows the topic
+index. A topic gaining its first subscriber opens the subscription, and losing
+its last closes it after a grace period.
 
 | source | key | handle |
 |---|---|---|
