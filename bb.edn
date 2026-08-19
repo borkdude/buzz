@@ -20,6 +20,10 @@
          bench {:doc "A table of N rows on http://localhost:1342, for measuring"
                 :requires ([buzz.bench :as bench])
                 :task (bench/-main "--nrepl")}
+         bench-topics {:doc "Compare :watch fan out with topic-scoped rendering"
+                       :extra-paths ["test"]
+                       :requires ([buzz.topics-bench :as tb])
+                       :task (tb/-main)}
          split {:doc "Print what the splitter makes of the demo component"
                 :requires ([buzz.app :as app])
                 :task (let [inst (app/todo-app)]

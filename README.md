@@ -129,6 +129,53 @@ The page belongs to the handler, so one application can serve more than one of t
 (defn app [req] (or (admin req) (home req) {:status 404 :body "not found"}))
 ```
 
+## Sources
+
+A `:watch` atom runs the slots of every connection on every write. Read through
+a source instead and a write reaches only the connections that read what
+changed.
+
+```clojure
+(defonce todos (atom {"alice" [] "bob" []}))
+
+(def by-user (buzz/atom-source todos))
+
+(defui board []
+  [:ul (for [t (server (buzz/observe by-user [(whoami (request))]))]
+         [:li t])])
+```
+
+`buzz/observe` reads a key and subscribes the connection to it. What a
+connection holds is whatever its slots read, so there is nothing to declare and
+nothing to keep in step. Adding a note for alice runs alice's slots. Bob's do
+not run.
+
+Buzz keeps one subscription per key per process, shared by every connection
+reading it, and releases it once the last connection lets go.
+
+Use `buzz/invalidate!` for a change that arrives through no source, such as a
+webhook:
+
+```clojure
+(buzz/invalidate! [:todos "alice"])
+```
+
+Give the handler `:topics`, a function of the request, to hold topics a
+connection never reads:
+
+```clojure
+(buzz/handler {:topics (fn [req] [[:user (whoami req)]]) ...})
+```
+
+Every connection also holds `buzz/all` and its own connection id, so
+`(buzz/invalidate! (buzz/connection req))` renders one connection and
+`(buzz/invalidate! buzz/all)` renders all of them. A `:watch` atom invalidates
+`buzz/all`.
+
+Implement `buzz.source/Source` to render from something other than an atom. It
+takes a subscribe and an unsubscribe, and the handle it returns is what
+`observe` derefs.
+
 ## Request
 
 Use `(buzz/request)` inside `(server ...)` and `(server! ...)` to read the

@@ -1,6 +1,7 @@
 (ns buzz.handler-test
   (:require [babashka.fs :as fs]
             [buzz.core :as handler :refer [defpart defui local-state reply request server server!]]
+            [buzz.impl.hub :as hub]
             [buzz.stream :as stream]
             [cheshire.core :as json]
             [clojure.string :as str]
@@ -1025,3 +1026,131 @@
       (swap! beat inc)
       (is (str/includes? (str (last @(:frames one))) "[3]"))
       (is (str/includes? (str (last @(:frames two))) "[3]")))))
+
+;; ---------------------------------------------------------------------------
+;; Sources and topics
+;;
+;; A write reaches the connections that read it and no others. The counter is
+;; what makes "no others" observable: a slot that never runs cannot appear in
+;; it, so this asserts the absence of work rather than the absence of a frame.
+
+(defonce ^:private ledger (atom {"alice" ["water the plants"]
+                                "bob"   ["renew the domain"]}))
+
+(def ^:private ledger-source (handler/atom-source ledger))
+
+(defonce ^:private slot-runs (atom {}))
+
+(defn- user-of [req] (get-in req [:headers "x-user"]))
+
+(defn- ran! [req] (swap! slot-runs update (user-of req) (fnil inc 0)))
+
+(defui observed-notes []
+  [:ul (for [n (server (do (ran! (request))
+                           (handler/observe ledger-source [(user-of (request))])))]
+         [:li n])])
+
+(defui watched-notes []
+  [:ul (for [n (server (do (ran! (request))
+                           (get @ledger (user-of (request)))))]
+         [:li n])])
+
+(defonce ^:private notice (atom "hello"))
+
+(defui bannered []
+  [:p (server (do (ran! (request)) @notice))])
+
+(defn- with-two
+  "Serves `spec` and opens one connection as alice and one as bob, each past
+  its mount frame."
+  [spec f]
+  (let [ui    (handler/handler spec)
+        stop  (http/run-server (fn [req] (or (ui req) {:status 404 :body "no"}))
+                               {:port 0})
+        port  (:local-port (meta stop))
+        alice (open-events port {"X-User" "alice"})
+        bob   (open-events port {"X-User" "bob"})]
+    (next-event (:rdr alice))
+    (next-event (:rdr bob))
+    (reset! slot-runs {})
+    (try
+      (f {:ui ui :port port :alice alice :bob bob})
+      (finally
+        (.close ^java.net.Socket (:sock alice))
+        (.close ^java.net.Socket (:sock bob))
+        (stop)))))
+
+(deftest a-write-reaches-only-the-connections-that-observed-it
+  (with-two {:mounts [{:el "app" :ui #'observed-notes}] :render-interval-ms 0}
+    (fn [{:keys [alice bob]}]
+      (swap! ledger update "alice" conj "call the vet")
+      (testing "the connection that read the changed key is patched"
+        (is (= "patch" (first (next-event (:rdr alice))))))
+      (testing "the other connection is not written to"
+        (is (silent? (:sock bob) (:rdr bob) 300)))
+      (testing "and its slots never ran"
+        (is (= {"alice" 1} @slot-runs))))))
+
+(deftest a-watched-atom-still-runs-every-connection
+  (with-two {:mounts [{:el "app" :ui #'watched-notes}]
+             :watch [ledger]
+             :render-interval-ms 0}
+    (fn [{:keys [alice bob]}]
+      (swap! ledger update "alice" conj "call the vet")
+      (is (= "patch" (first (next-event (:rdr alice)))))
+      (testing "bob's slot runs even though nothing of his changed"
+        (is (= {"alice" 1 "bob" 1} @slot-runs)))
+      (testing "and sends nothing, because the value is the same as last time"
+        (is (silent? (:sock bob) (:rdr bob) 300))))))
+
+(deftest invalidating-a-topic-nobody-holds-does-nothing
+  (with-two {:mounts [{:el "app" :ui #'observed-notes}] :render-interval-ms 0}
+    (fn [{:keys [alice bob]}]
+      (handler/invalidate! [:nobody-holds-this])
+      (is (silent? (:sock alice) (:rdr alice) 300))
+      (is (silent? (:sock bob) (:rdr bob) 300))
+      (is (= {} @slot-runs)))))
+
+(deftest a-declared-topic-reaches-the-connections-holding-it
+  (with-two {:mounts [{:el "app" :ui #'bannered}]
+             :topics (fn [req] [[:user (user-of req)]])
+             :render-interval-ms 0}
+    (fn [{:keys [alice bob]}]
+      (reset! notice "bye")
+      (handler/invalidate! [:user "bob"])
+      (is (= "patch" (first (next-event (:rdr bob)))))
+      (is (silent? (:sock alice) (:rdr alice) 300))
+      (is (= {"bob" 1} @slot-runs)))))
+
+(deftest the-broadcast-topic-reaches-everyone
+  (with-two {:mounts [{:el "app" :ui #'bannered}] :render-interval-ms 0}
+    (fn [{:keys [alice bob]}]
+      (reset! notice "again")
+      (handler/invalidate! handler/all)
+      (is (= "patch" (first (next-event (:rdr alice)))))
+      (is (= "patch" (first (next-event (:rdr bob)))))
+      (is (= {"alice" 1 "bob" 1} @slot-runs)))))
+
+(deftest a-connection-can-be-invalidated-on-its-own
+  (with-two {:mounts [{:el "app" :ui #'bannered}] :render-interval-ms 0}
+    (fn [{:keys [alice bob]}]
+      (reset! notice "just you")
+      (handler/invalidate! (:session alice))
+      (is (= "patch" (first (next-event (:rdr alice)))))
+      (is (silent? (:sock bob) (:rdr bob) 300))
+      (is (= {"alice" 1} @slot-runs)))))
+
+;; One subscription per key per process, however many connections read it, and
+;; released once the last of them lets go.
+(deftest a-source-is-subscribed-once-and-released-after-the-last-connection
+  (let [grace @hub/release-grace-ms]
+    (reset! hub/release-grace-ms 0)
+    (try
+      (with-two {:mounts [{:el "app" :ui #'observed-notes}] :render-interval-ms 0}
+        (fn [_]
+          (testing "one subscription per key, not per connection"
+            (is (= #{["alice"] ["bob"]}
+                   (into #{} (map :k) (hub/subscriptions)))))))
+      (testing "both connections gone, both subscriptions released"
+        (is (until 3000 #(empty? (hub/subscriptions)))))
+      (finally (reset! hub/release-grace-ms grace)))))

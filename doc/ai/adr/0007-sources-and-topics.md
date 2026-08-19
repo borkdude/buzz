@@ -2,7 +2,10 @@
 
 Date: 2026-08-19
 
-Status: Open. Proposed, not implemented.
+Status: Layers 0, 1 and 2 are implemented on the `sources-and-topics` branch.
+`atom-source` is the only source so far. The Rama-backed example and the
+per topic counters are still open, as is the development mode that catches a
+missing `invalidate!`.
 
 ## Context
 
@@ -41,6 +44,37 @@ the same shape once the three jobs are separated.
 So the question is not how to make `:watch` cheaper. It is what the smallest
 thing is that an atom, a Rama PState, a Datalevin database and a Postgres table
 can all be.
+
+## Measured
+
+`bb bench-topics`, babashka, `:render-interval-ms 0` so the write pays for the
+render the way 0001 measured it. N connections, one per user, and the timed
+operation is one write to user-0's data. Median of 201 samples.
+
+Slot is a map lookup:
+
+| connections | :watch us/write | topics us/write | :watch slot runs | topics slot runs |
+|---|---|---|---|---|
+| 1   |  15.0 | 42.6 |   1 | 1 |
+| 10  |  60.0 | 21.9 |  10 | 1 |
+| 25  |  96.7 | 28.0 |  25 | 1 |
+| 50  | 175.2 | 29.6 |  50 | 1 |
+| 100 | 337.6 | 33.1 | 100 | 1 |
+
+Slot does about 60 us of work, standing in for a query:
+
+| connections | :watch us/write | topics us/write | :watch slot runs | topics slot runs |
+|---|---|---|---|---|
+| 1   |   91.4 |  95.2 |   1 | 1 |
+| 10  |  678.2 |  94.8 |  10 | 1 |
+| 25  | 1646.3 |  98.1 |  25 | 1 |
+| 50  | 3247.1 | 101.1 |  50 | 1 |
+| 100 | 6449.9 | 113.0 | 100 | 1 |
+
+The slot runs columns are the mechanism: N against 1, whatever the slot costs.
+The clock only makes it visible once a slot costs something, which is why the
+first table barely moves and the second is 57 times apart at 100 connections.
+An application whose slots query a database is the second table.
 
 ## Decision
 
@@ -220,9 +254,11 @@ interval both stay as they are.
 `:on-close` removes the session from both maps, which is also what closes the
 last subscription on a topic.
 
-`observe` needs a dynamic read set bound around each slot evaluation.
-`split-body` already walks the slot expressions, so this is a binding at the
-call site rather than analysis.
+`observe` needs a dynamic read set bound around a connection's slots. Binding it
+around the whole session render, rather than around each slot, needs no change
+to `defui` or `split-body` at all: `observe` is an ordinary function call inside
+a slot expression, so runtime tracking is enough and the topics come out per
+connection, which is the grain the index wants.
 
 Rendering stays single threaded per handler. Parallel rendering across topics
 needs the per connection serialisation that 0006 item 1 wants first, or it
@@ -319,8 +355,9 @@ Redis is a source like any other and does not need its own step.
 
 ## References
 
-- `broadcast-patch!`, `coalesced`, `open-stream`, `handler` in `src/buzz/impl/page.clj`
-- `split-body` in `src/buzz/core.clj`, where the read set binding goes
+- `src/buzz/source.clj`, the protocol an integration implements
+- `src/buzz/impl/hub.clj`, the topic index, the subscription registry and `observe`
+- `render-session!`, `broadcast-patch!`, `coalesced`, `handler` in `src/buzz/impl/page.clj`
 - [0001](0001-render-scheduling.md) for the measurements and for option C
 - [0002](0002-work-after-the-scheduler.md) sections 1, 2, 6 and 7
 - [0004](0004-the-request-is-the-only-ambient-thing.md) for the registry per handler this indexes

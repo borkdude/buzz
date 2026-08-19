@@ -13,7 +13,8 @@
 
   What remains is compiled to JavaScript by Squint. Later renders send only
   server values."
-  (:require [buzz.impl.page :as page]
+  (:require [buzz.impl.hub :as hub]
+            [buzz.impl.page :as page]
             [buzz.impl.parts :as parts]
             [clojure.string :as str]
             [clojure.walk :as walk]
@@ -535,3 +536,29 @@
   "Returns the Buzz browser token in `req`. The token persists across tabs and
   reconnects."
   page/token)
+
+(def all
+  "The topic every connection holds. Invalidating it renders every connection,
+  which is what a `:watch` atom does."
+  hub/all)
+
+(def invalidate!
+  "Marks topics changed. Only the connections holding one of them render, so a
+  topic nobody holds costs nothing.
+
+    (invalidate! [:todos \"alice\"])"
+  hub/invalidate!)
+
+(def observe
+  "Reads `k` from a source and subscribes the current connection to it. Use it
+  inside `(server ...)`, where the topics a connection holds are whatever its
+  slots read.
+
+    (server (observe todos [:todos (whoami (request))]))"
+  hub/observe)
+
+(def atom-source
+  "A source over an atom, keyed by a path into it."
+  hub/atom-source)
+
+;; `buzz.source/Source` is the protocol an integration implements.

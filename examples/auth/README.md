@@ -8,6 +8,24 @@ To run the example, use the following commands:
 
 Sign in as alice with the password wonderland, or as bob with builder. Open a second (or igcognito) browser, sign in as the other one, and add a note in each.
 
+## Per user data
+
+Notes are read through a source keyed by user name, so a write reaches the
+connections of that user and nobody else:
+
+```clojure
+(def by-user (buzz/atom-source notes))
+
+(buzz/observe by-user [(whoami req)])
+```
+
+The page prints how often its own slots have run. Sign in as alice in one
+browser and as bob in another, then add notes as alice. Her count climbs and
+his does not move.
+
+The admin page reads the empty key, which is the whole map, so it sees every
+user's writes.
+
 ## Reading identity
 
 Read the current identity from `(request)`:
