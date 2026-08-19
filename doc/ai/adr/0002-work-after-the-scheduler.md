@@ -45,6 +45,33 @@ declared dependencies did not would turn silent staleness into a warning.
 Needs the scheduler's dirty marking to be per slot rather than per handler, so
 it is genuinely after 0001 rather than beside it.
 
+### Superseded by 0007
+
+Everything above describes a slot that declares what it reads.
+[0007](0007-sources-and-topics.md) makes a second version possible, and the
+second version carries none of the drift this section warns about.
+
+`observe` discovers what a slot read by running it, and every subscription
+carries a version that goes up before each notification. So a slot's inputs and
+whether they moved are both known without anyone declaring anything. Skipping a
+slot then means keeping the read set and the versions per slot rather than per
+connection, and reusing the last value when nothing it read has moved. The last
+values are already there: `sent` is the vector of them.
+
+One rule keeps it safe. A slot that reads state outside any source has an empty
+read set, so it would look like a slot that never changes and would be skipped
+for good. A render caused by a `:watch` write therefore runs every slot, and
+only a render caused by named source topics skips. That leaves `:watch` as the
+coarse path that is always right.
+
+This is downstream of 0007 rather than beside it, since three of the four pieces
+it needs are 0007's: the read set, the versions, and the topics that caused a
+render. The fourth is a thunk per slot out of `split-body`, which is the only
+change to `defui` in any of this.
+
+The development mode above is worth building either way, and it becomes the
+check on the read set rather than on a declaration.
+
 ## 2. Shared computation across connections
 
 A slot that does not depend on the connection should be computed once,
