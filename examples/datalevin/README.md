@@ -1,17 +1,36 @@
 # datalevin
 
 A [Datalevin](https://github.com/juji-io/datalevin) browser over a MusicBrainz
-sample: a query editor with canned queries, results as a table, and a query
-log shared live between every viewer. Datalevin runs as a pod on babashka and
-as a library on the JVM; both use the same database directory.
+sample: a query editor with canned queries, results as a table, and a query log
+shared live between every viewer.
 
 Run it:
 
-    bb dev                              # http://localhost:1395
+    clojure -M:run                      # http://localhost:1395
 
-or on the JVM:
+JVM only. The page updates from `datalevin.core/listen!`, and the babashka pod
+exports that var but cannot take a callback across the pod boundary.
 
-    clojure -M:run
+## A source over the database
+
+`src/buzz/dlv/source.clj` implements `buzz.source/Source` over a Datalevin
+connection, keyed by a datalog query. Subscribing runs the query and keeps the
+result. One listener on the connection turns each transaction into
+notifications: the attributes the transaction wrote are intersected with the
+attributes each subscribed query reads, and only the overlapping queries run
+again.
+
+The page reads through it, so it has no `:watch`:
+
+```clojure
+(server (observe db log-q))
+```
+
+The query log is in the database rather than in an atom, so running a query is
+a transaction on `:query/*`. The three count queries read `:artist/name`,
+`:release/title` and `:track/title`, which no run ever writes. The "re-run"
+line above the log shows it: the log count climbs and the other three stay at
+zero.
 
 The first start seeds `db/` from `resources/seed.edn`: 8 artists, their studio
 albums, and the tracks of each artist's first album, fetched once from the
