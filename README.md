@@ -156,19 +156,6 @@ reading it, and releases it once the last connection lets go.
 A key decides which connections render, not which slots. A connection runs all
 of its slots whenever any key it reads changes.
 
-Turn on `buzz/check-topics!` while developing. A slot that reads mutable state
-without going through a source holds nothing for it, so nothing marks that
-connection and the browser keeps a value that is no longer true. Nothing in the
-mechanism can notice that, so the check works from the outside: it renders
-every connection on a timer, patches the ones that had something to send, and
-names them.
-
-```clojure
-(buzz/check-topics! true)
-;; buzz: missed update for 35cb9f0c - its value changed and no source it
-;; reads said so. It observes []
-```
-
 Implement `buzz.source/Source` to render from something other than an atom. It
 takes a subscribe and an unsubscribe, and the handle it returns is what
 `observe` derefs. `examples/datalevin` has one over a database, driven by the

@@ -51,14 +51,11 @@
   [{:keys [instance req]}]
   (if (:request instance) ((:slots instance) req) ((:slots instance))))
 
-;; Returns the mount id when a frame went out, so a caller can tell a
-;; connection that had something to say from one that did not.
 (defn- patch! [ch {:keys [instance sent] :as mount}]
   (let [vals (slot-vals mount)]
     (when (not= vals @sent)
       (reset! sent vals)
-      (event! ch ["patch" (:id instance) vals])
-      (:id instance))))
+      (event! ch ["patch" (:id instance) vals]))))
 
 ;; Cache one component instance per revision.
 (defn- shared-instance [ui]
@@ -84,16 +81,15 @@
 ;; the versions they were read at, or nil if a mount threw.
 (defn- render-pass! [{:keys [index]} session {:keys [ch mounted]} render!]
   (let [ok (volatile! true)
-        wrote (volatile! [])
         [_ reads] (hub/with-reads
                     (doseq [m mounted]
-                      (try (when-let [id (render! ch m)] (vswap! wrote conj id))
+                      (try (render! ch m)
                            (catch Throwable e
                              (vreset! ok false)
                              (println "buzz: render failed for" session "-" (ex-message e))))))]
     (when @ok
       (hub/set-topics! index session (into base-topics (keys reads)))
-      {:reads reads :wrote @wrote})))
+      reads)))
 
 ;; A key can change between the moment a slot reads it and the moment this
 ;; connection is written into the topic index. Until it is in the index nothing
@@ -106,23 +102,10 @@
 (def ^:private max-passes 3)
 
 (defn- render-session! [entry session conn render!]
-  (loop [n 0, render! render!, wrote []]
-    (if-let [{:keys [reads] :as pass} (render-pass! entry session conn render!)]
-      (let [wrote (into wrote (:wrote pass))]
-        (if (and (< (inc n) max-passes) (hub/stale? reads))
-          (recur (inc n) patch! wrote)
-          wrote))
-      wrote)))
-
-;; What the development check runs. Renders every connection whatever the
-;; topics say, and reports the ones that had something to send, since nothing
-;; marked them and nothing would have.
-(defn- sweep! [{:keys [registry index] :as entry}]
-  (doseq [[session conn] @registry]
-    (when (seq (render-session! entry session conn patch!))
-      (println "buzz: missed update for" session
-               "- its value changed and no source it reads said so."
-               "It observes" (pr-str (hub/observed-keys index session))))))
+  (loop [n 0, render! render!]
+    (when-let [reads (render-pass! entry session conn render!)]
+      (when (and (< (inc n) max-passes) (hub/stale? reads))
+        (recur (inc n) patch!)))))
 
 (defn- open-stream [{:keys [registry] :as entry} session ch req mounts token]
   ;; Register the session before sending its ID.
@@ -134,8 +117,7 @@
                      (fn [ch {:keys [el instance sent] :as m}]
                        (let [vals (slot-vals m)]
                          (reset! sent vals)
-                         (event! ch ["mount" (:id instance) el vals])
-                         (:id instance))))))
+                         (event! ch ["mount" (:id instance) el vals]))))))
 
 (defn- events [{:keys [registry index] :as entry} adapter req mounts on-close]
   (let [session (str (random-uuid))
@@ -227,12 +209,10 @@
                         (when (and (seq @dirty)
                                    (compare-and-set! active false true))
                           (tick)))))))]
-    {:dirty? (fn [] (boolean (seq @dirty)))
-     :mark! (fn [topics]
-              (swap! dirty into topics)
-              (when (compare-and-set! active false true)
-                (.submit ^java.util.concurrent.ExecutorService @hub/scheduler
-                         ^Runnable tick)))}))
+    (fn [topics]
+      (swap! dirty into topics)
+      (when (compare-and-set! active false true)
+        (.submit ^java.util.concurrent.ExecutorService @hub/scheduler ^Runnable tick)))))
 
 ;; Rebuild instances and reload open pages after definitions change.
 (defn- reload-all! [_ _ _ rev]
@@ -245,8 +225,7 @@
                        (fn [ch {:keys [instance sent] :as m}]
                          (let [vals (slot-vals m)]
                            (reset! sent vals)
-                           (event! ch ["reload" rev (:id instance) vals])
-                           (:id instance)))))))
+                           (event! ch ["reload" rev (:id instance) vals])))))))
 
 ;; Keep idle EventSource connections open through proxies.
 (defonce ^:private heartbeat
@@ -373,15 +352,12 @@
         ;; render of the connections holding them. `:render-interval-ms 0`
         ;; renders synchronously on the invalidating thread instead.
         interval (or (:render-interval-ms spec) 20)
-        base     {:registry registry :index index :spec spec}
-        render   (broadcast-patch! base)
-        {:keys [mark! dirty?]} (if (pos? interval)
-                                 (coalesced render interval)
-                                 {:mark! render :dirty? (constantly false)})
+        render   (-> (broadcast-patch! {:registry registry :index index :spec spec})
+                     (cond-> (pos? interval) (coalesced interval)))
         entry    (hub/register-handler!
-                  (assoc base :mark! mark! :dirty? dirty? :sweep! #(sweep! base)))
+                  {:registry registry :index index :spec spec :mark! render})
         _      (doseq [a watch]
-                 (add-watch a [::render registry] (fn [_ _ _ _] (mark! #{hub/all}))))
+                 (add-watch a [::render registry] (fn [_ _ _ _] (render #{hub/all}))))
         mounts (mapv (fn [m] (assoc m ::instance (shared-instance (:ui m)))) mounts)
         spec   (assoc spec :mounts mounts)
         path   (or path "")
