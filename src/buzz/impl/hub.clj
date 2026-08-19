@@ -130,10 +130,20 @@
   []
   (set (keys @open-subs)))
 
-(defn handle-for
-  "The shared handle for `t`, subscribing on first use."
+
+;; Every subscription carries a version that goes up before each notification.
+;; A reader records the version it read at, so it can find out afterwards
+;; whether the value moved under it.
+(defn- new-sub [t]
+  (let [version (atom 0)]
+    {:version version
+     :handle  (-subscribe (:source t) (:k t)
+                          (fn [] (swap! version inc) (invalidate! t)))}))
+
+(defn sub-for
+  "The shared subscription for `t`, subscribing on first use."
   [t]
-  (let [pending (delay (-subscribe (:source t) (:k t) #(invalidate! t)))]
+  (let [pending (delay (new-sub t))]
     @(get (swap! open-subs update t #(or % pending)) t)))
 
 (defn- held-anywhere? [t]
@@ -142,8 +152,8 @@
 (defn- release! [t]
   (when-not (held-anywhere? t)
     (let [[old _] (swap-vals! open-subs dissoc t)]
-      (when-let [handle (get old t)]
-        (-unsubscribe (:source t) (:k t) @handle)))))
+      (when-let [sub (get old t)]
+        (-unsubscribe (:source t) (:k t) (:handle @sub))))))
 
 (defn- maybe-release! [topics]
   (doseq [t topics :when (source-topic? t)]
@@ -167,7 +177,8 @@
 
 (def ^:dynamic *reads*
   "Bound to an atom while a connection's slots run. Every `observe` records the
-  topic it read here, and the union becomes what that connection holds."
+  topic it read and the version it read it at. The keys become what that
+  connection holds, and the versions say whether the read is still current."
   nil)
 
 (defn observe
@@ -177,13 +188,24 @@
     (server (observe todos [:todos (whoami (request))]))"
   [source k]
   (let [t (->SourceTopic source k)
-        h (handle-for t)]
-    (when *reads* (swap! *reads* conj t))
-    @h))
+        {:keys [handle version]} (sub-for t)]
+    ;; the version first: a change between the two reads then reports a stale
+    ;; read, which costs one render, rather than a current one, which loses it
+    (when *reads* (swap! *reads* assoc t @version))
+    @handle))
+
+(defn stale?
+  "Whether any of `reads` has changed since it was read."
+  [reads]
+  (boolean (some (fn [[t v]]
+                   (when-let [sub (get @open-subs t)]
+                     (not= v @(:version @sub))))
+                 reads)))
 
 (defmacro with-reads
-  "Runs `body` with read tracking on. Returns [result reads]."
+  "Runs `body` with read tracking on. Returns [result reads], where reads maps
+  each topic to the version it was read at."
   [& body]
-  `(let [reads# (atom #{})]
+  `(let [reads# (atom {})]
      (binding [*reads* reads#]
        [(do ~@body) @reads#])))

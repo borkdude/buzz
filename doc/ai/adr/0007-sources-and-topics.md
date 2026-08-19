@@ -213,9 +213,32 @@ slots run.
 
 **Subscribe before reading.** Read first and subscribe second and a change
 landing in between is lost, leaving that connection on a stale value with
-nothing to notice it by. Subscribe first and read after, or read a version along
-with the value and re-check it once subscribed. This is the classic bug in
-systems of this shape and it is the one to write a test for first.
+nothing to notice it by. This is the classic bug in systems of this shape, and
+it appears at two levels.
+
+Inside a source it is ordered away. `-subscribe` puts the subscription in place
+before it caches the first value, so no change falls between them.
+
+Between the read set and the index it cannot be ordered away, because the read
+set is only known once the slots have run. A change landing between the read
+and the index write is marked while nothing holds the topic, so the mark is
+dropped where it is made and no later render corrects it. It only bites when no
+other connection holds that key, which is exactly the first connection to read
+it.
+
+The fix is a version on each subscription, raised before each notification.
+`observe` records the version it read at, the version first and the value
+second, so a change between the two reports a stale read rather than a current
+one. After the index write the versions are compared, and a connection that
+read a version that has moved renders again. The follow-up pass patches rather
+than mounts, since the first pass already sent the frame the browser starts
+from. Two passes are enough in practice, because every change after the first
+index write marks this connection through the normal path.
+
+`a-change-during-the-first-render-is-not-lost` in `test/buzz/handler_test.clj`
+holds this. Its slot writes the atom it just read, which puts a change inside
+exactly that window. Without the version check the browser never receives the
+new value.
 
 **Read sets change between renders.** `(if admin? (observe a k) (observe b k))`
 subscribes to different things on different renders, so each render diffs the

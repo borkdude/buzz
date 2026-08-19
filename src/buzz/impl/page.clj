@@ -77,8 +77,9 @@
 ;; Run one connection's mounts with read tracking on, then replace the topics
 ;; it holds with everything `observe` read. A mount that throws is contained to
 ;; its own frame, and a session that saw a failure keeps the topics it had
-;; rather than reconciling against a partial read set.
-(defn- render-session! [{:keys [index]} session {:keys [ch mounted]} render!]
+;; rather than reconciling against a partial read set. Returns the reads and
+;; the versions they were read at, or nil if a mount threw.
+(defn- render-pass! [{:keys [index]} session {:keys [ch mounted]} render!]
   (let [ok (volatile! true)
         [_ reads] (hub/with-reads
                     (doseq [m mounted]
@@ -87,7 +88,24 @@
                              (vreset! ok false)
                              (println "buzz: render failed for" session "-" (ex-message e))))))]
     (when @ok
-      (hub/set-topics! index session (into base-topics reads)))))
+      (hub/set-topics! index session (into base-topics (keys reads)))
+      reads)))
+
+;; A key can change between the moment a slot reads it and the moment this
+;; connection is written into the topic index. Until it is in the index nothing
+;; holds that topic, so the mark is dropped where it is made and no later
+;; render corrects it. Comparing the versions after the index write closes that
+;; window, and the follow-up passes patch rather than mount, since the first
+;; pass already sent the frame the browser starts from. The read set converges
+;; in one or two passes: after the first index write every further change marks
+;; this connection through the normal path.
+(def ^:private max-passes 3)
+
+(defn- render-session! [entry session conn render!]
+  (loop [n 0, render! render!]
+    (when-let [reads (render-pass! entry session conn render!)]
+      (when (and (< (inc n) max-passes) (hub/stale? reads))
+        (recur (inc n) patch!)))))
 
 (defn- open-stream [{:keys [registry] :as entry} session ch req mounts token]
   ;; Register the session before sending its ID.

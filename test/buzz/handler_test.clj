@@ -1134,3 +1134,27 @@
       (testing "both connections gone, both subscriptions released"
         (is (until 3000 #(empty? (hub/subscriptions)))))
       (finally (reset! hub/release-grace-ms grace)))))
+
+;; A source can change between the moment a slot reads it and the moment the
+;; connection is written into the topic index. Nothing holds the topic yet, so
+;; the mark is dropped where it is made. The slot writes the atom it just read
+;; to put the change inside exactly that window.
+(defonce ^:private race-state (atom {:x 0}))
+(def ^:private race-source (handler/atom-source race-state))
+(defonce ^:private race-armed (atom true))
+
+(defui racer []
+  [:p (server (let [v (handler/observe race-source [:x])]
+                (when (compare-and-set! race-armed true false)
+                  (swap! race-state update :x inc))
+                v))])
+
+(deftest a-change-during-the-first-render-is-not-lost
+  (reset! race-state {:x 0})
+  (reset! race-armed true)
+  (with-connection {:mounts [{:el "app" :ui #'racer}] :render-interval-ms 0}
+    (fn [{:keys [rdr]}]
+      (testing "the mount frame carries what the slot read"
+        (is (= ["mount" "racer" "app" [0]] (next-event rdr))))
+      (testing "the change that landed during that render still arrives"
+        (is (= ["patch" "racer" [1]] (next-event rdr)))))))
