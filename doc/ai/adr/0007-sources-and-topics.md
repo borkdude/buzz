@@ -2,10 +2,11 @@
 
 Date: 2026-08-19
 
-Status: Layers 0, 1 and 2 are implemented on the `sources-and-topics` branch.
-`atom-source` is the only source so far. The Rama-backed example and the
-per topic counters are still open, as is the development mode that catches a
-missing `invalidate!`.
+Status: Layers 0, 1 and 2 are implemented on the `sources-and-topics` branch,
+with two sources: `atom-source` in core and a Datalevin source keyed by a
+datalog query in `examples/datalevin`, which derives its notifications from
+the transaction report. The per topic counters are still open, as is the
+development mode that catches a missing `invalidate!`.
 
 ## Context
 
