@@ -3,12 +3,14 @@
   over HTTP so the browser knows when it asked, and can time the whole loop:
   server work, wire, and render."
   (:require [babashka.nrepl.server :as nrepl]
-            [buzz.core :as buzz :refer [client defpart defui server server!]]
+            [buzz.core :as buzz :refer [client defpart defui observe server server!]]
             [clojure.string :as str]
             [org.httpkit.server :as http]))
 
 (defonce rows (atom []))
 (defonce next-id (atom 0))
+
+(def ^:private rows-source (buzz/atom-source rows))
 
 (def ^:private words
   ["quiet" "loud" "red" "blue" "fast" "slow" "table" "chair" "wire" "signal"])
@@ -42,8 +44,8 @@
    [:td [:button.rm {:on-click (fn [_] (server! (remove-row! (client id))))} "x"]]])
 
 (defui table []
-  (let [items (server @rows)
-        n     (server (count @rows))]
+  (let [items (server (observe rows-source []))
+        n     (server (count (observe rows-source [])))]
     [:div
      [:p.count n " rows"]
      [:table [:tbody.rows (for [r items] (row r))]]]))
@@ -69,7 +71,6 @@
 
 (def ui
   (buzz/handler {:index "public/bench.html"
-                 :watch [rows]
                  :mounts [{:el "app" :ui #'table}]}))
 
 (defn app [req]

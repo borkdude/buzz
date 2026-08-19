@@ -45,7 +45,7 @@
   [ch msg]
   (stream/send! ch (str "data: " (json/generate-string msg) "\n\n")))
 
-;; Recompute slots after a watched change and suppress unchanged patches.
+;; Recompute slots after a change and suppress unchanged patches.
 (defn- slot-vals
   "Returns the current slot values for one mount."
   [{:keys [instance req]}]
@@ -70,10 +70,6 @@
   {:el el :spec spec :sent (atom ::none) :req req
    :instance ((::instance spec))})
 
-;; Every connection holds the broadcast topic, which is what a `:watch` atom
-;; marks. Everything else it holds comes from what its slots read.
-(def ^:private base-topics #{hub/all})
-
 ;; Run one connection's mounts with read tracking on, then replace the topics
 ;; it holds with everything `observe` read. A mount that throws is contained to
 ;; its own frame, and a session that saw a failure keeps the topics it had
@@ -88,7 +84,7 @@
                              (vreset! ok false)
                              (println "buzz: render failed for" session "-" (ex-message e))))))]
     (when @ok
-      (hub/set-topics! index session (into base-topics (keys reads)))
+      (hub/set-topics! index session (set (keys reads)))
       reads)))
 
 ;; A key can change between the moment a slot reads it and the moment this
@@ -333,8 +329,8 @@
 (defn handler
   "Returns a Ring handler for one page. Unknown routes return nil. `:path`
   prefixes all page routes. `:adapter` provides the event stream and defaults
-  to http-kit. Calling this function installs watches and starts the heartbeat."
-  [{:keys [watch mounts path] :as spec}]
+  to http-kit. Calling this function starts the heartbeat."
+  [{:keys [mounts path] :as spec}]
   (doseq [m mounts]
     (when (or (:state m) (:component m))
       (throw (ex-info (str ":state and :component are no longer supported. "
@@ -356,8 +352,6 @@
                      (cond-> (pos? interval) (coalesced interval)))
         entry    (hub/register-handler!
                   {:registry registry :index index :spec spec :mark! render})
-        _      (doseq [a watch]
-                 (add-watch a [::render registry] (fn [_ _ _ _] (render #{hub/all}))))
         mounts (mapv (fn [m] (assoc m ::instance (shared-instance (:ui m)))) mounts)
         spec   (assoc spec :mounts mounts)
         path   (or path "")

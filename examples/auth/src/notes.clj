@@ -35,6 +35,9 @@
 ;; restart signs everyone out.
 (defonce sessions (atom {}))
 
+;; Signing out changes this, so the pages of open sessions redraw.
+(def ^:private by-token (buzz/atom-source sessions))
+
 (defn- pbkdf2 [password salt]
   (-> (javax.crypto.SecretKeyFactory/getInstance "PBKDF2WithHmacSHA256")
       (.generateSecret (javax.crypto.spec.PBEKeySpec. (.toCharArray password) salt 100000 256))
@@ -68,7 +71,7 @@
            second))
 
 (defn- whoami [req]
-  (get @sessions (token req)))
+  (buzz/observe by-token [(token req)]))
 
 (defn- cookie [value]
   (str "notes-session=" value "; Path=/; HttpOnly; SameSite=Strict"))
@@ -136,7 +139,6 @@
 (def ^:private notes-ui
   (buzz/handler
    {:title "notes"
-    :watch [sessions]
     :mounts [{:el "app" :ui #'board}]}))
 
 ;; Route checks protect the page, event stream, and RPC endpoint.
@@ -187,7 +189,6 @@
 (def ^:private admin-ui
   (buzz/handler {:title "everyone's notes"
                  :path "/admin"
-                 :watch [sessions]
                  :mounts [{:el "admin" :ui #'console}]}))
 
 (defn app [req]

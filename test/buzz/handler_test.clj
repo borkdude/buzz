@@ -1,6 +1,7 @@
 (ns buzz.handler-test
   (:require [babashka.fs :as fs]
-            [buzz.core :as handler :refer [defpart defui local-state reply request server server!]]
+            [buzz.core :as handler :refer [defpart defui local-state observe reply request
+                                           server server!]]
             [buzz.impl.hub :as hub]
             [buzz.stream :as stream]
             [cheshire.core :as json]
@@ -100,12 +101,13 @@
 
 ;; Two slots over a watched atom. Redefining this is the reload.
 (def ^:private panel-q (atom 0))
+(def ^:private panel-src (handler/atom-source panel-q))
 
 (defui panel []
-  [:p (server @panel-q) (server (inc @panel-q))])
+  [:p (server (observe panel-src [])) (server (inc (observe panel-src [])))])
 
-(def ^:private two-slots '(defui panel [] [:p (server @panel-q) (server (inc @panel-q))]))
-(def ^:private one-slot '(defui panel [] [:p (server @panel-q)]))
+(def ^:private two-slots '(defui panel [] [:p (server (observe panel-src [])) (server (inc (observe panel-src [])))]))
+(def ^:private one-slot '(defui panel [] [:p (server (observe panel-src []))]))
 
 (defn- redefine!
   "Re-evaluates a defui here, which is what a REPL does. The runner is in
@@ -116,7 +118,6 @@
 
 (def ^:private panel-spec
   {:title "panel"
-   :watch [panel-q]
    :mounts [{:el "app" :ui #'panel}]})
 
 ;; Re-evaluating a defui rebuilds every open connection. The instance a
@@ -150,13 +151,13 @@
 ;; The slot reads one key. The other is there to be written without the browser
 ;; hearing about it.
 (def ^:private board-st (atom {:shown 0 :hidden 0}))
+(def ^:private board-src (handler/atom-source board-st))
 
 (defui board []
-  [:p (server (:shown @board-st))])
+  [:p (server (:shown (observe board-src [])))])
 
 (def ^:private board-spec
   {:title "board"
-   :watch [board-st]
    :mounts [{:el "app" :ui #'board}]})
 
 ;; A watched atom says something was written, not that this mount has anything
@@ -311,16 +312,17 @@
 ;; own slots, so nothing one does reaches the other.
 (def ^:private left-n (atom 0))
 (def ^:private right-n (atom 100))
+(def ^:private left-src (handler/atom-source left-n))
+(def ^:private right-src (handler/atom-source right-n))
 
 (defui left-tally []
-  [:p (server @left-n) [:button {:on-click (fn [_] (server! (swap! left-n inc)))} "+"]])
+  [:p (server (observe left-src [])) [:button {:on-click (fn [_] (server! (swap! left-n inc)))} "+"]])
 
 (defui right-tally []
-  [:p (server @right-n) [:button {:on-click (fn [_] (server! (swap! right-n dec)))} "-"]])
+  [:p (server (observe right-src [])) [:button {:on-click (fn [_] (server! (swap! right-n dec)))} "-"]])
 
 (def ^:private two-mounts-spec
   {:title "two"
-   :watch [left-n right-n]
    :mounts [{:el "left" :ui #'left-tally}
             {:el "right" :ui #'right-tally}]})
 
@@ -348,15 +350,16 @@
 ;; The headline the readme makes: state the server owns is the same for every
 ;; browser, and state a browser owns is its own.
 (def ^:private shared (atom 0))
+(def ^:private shared-src (handler/atom-source shared))
 
 (def ^:private seen (atom {}))
+(def ^:private seen-src (handler/atom-source seen))
 
 (defui ticker []
-  [:p (server @shared) (server (get @seen (handler/connection (request)) 0))])
+  [:p (server (observe shared-src [])) (server (or (observe seen-src [(handler/connection (request))]) 0))])
 
 (def ^:private ticker-spec
   {:title "ticker"
-   :watch [shared seen]
    :mounts [{:el "app" :ui #'ticker}]})
 
 (deftest a-watched-atom-reaches-every-connection
@@ -428,16 +431,16 @@
   [:em n])
 
 (def ^:private card-q (atom 0))
+(def ^:private card-src (handler/atom-source card-q))
 
 (defui card []
-  [:p (badge (server @card-q))])
+  [:p (badge (server (observe card-src [])))])
 
 (def ^:private louder-badge '(defpart badge [n] [:em n "!"]))
 (def ^:private plain-badge  '(defpart badge [n] [:em n]))
 
 (def ^:private card-spec
   {:title "card"
-   :watch [card-q]
    :mounts [{:el "app" :ui #'card}]})
 
 (deftest editing-a-part-reloads-the-pages-that-show-it
@@ -462,16 +465,16 @@
         (finally (redefine! plain-badge))))))
 
 (def ^:private steps (atom 0))
+(def ^:private steps-src (handler/atom-source steps))
 
 (defpart step-button [label]
   [:button {:on-click (fn [_] (server! (swap! steps inc)))} label])
 
 (defui stepped-panel []
-  [:div (server @steps) (step-button "go")])
+  [:div (server (observe steps-src [])) (step-button "go")])
 
 (def ^:private stepped-spec
   {:title "stepped"
-   :watch [steps]
    :mounts [{:el "app" :ui #'stepped-panel}]})
 
 (deftest a-function-part-serves-and-answers-through-its-component
@@ -573,14 +576,14 @@
 ;; `.-f`, `.-init` and `.-nlocals`, so the names here are a contract between two
 ;; files that nothing else holds together.
 (def ^:private gauge-q (atom 0))
+(def ^:private gauge-src (handler/atom-source gauge-q))
 
 (defui gauge []
   (let [seen (local-state 0)]
-    [:p (server @gauge-q) @seen]))
+    [:p (server (observe gauge-src [])) @seen]))
 
 (def ^:private gauge-spec
   {:title "gauge"
-   :watch [gauge-q]
    :mounts [{:el "app" :ui #'gauge}]})
 
 (deftest the-browser-is-served-the-modules-it-imports
@@ -794,11 +797,10 @@
 ;; of what an adapter provides. A fake one drives a page with no server and no
 ;; socket, which is also what running Buzz on another server looks like.
 (defui faked []
-  [:p (server @shared)])
+  [:p (server (observe shared-src []))])
 
 (def ^:private faked-spec
   {:title "faked"
-   :watch [shared]
    :mounts [{:el "app" :ui #'faked}]})
 
 (deftest the-stream-is-served-through-an-adapter
@@ -870,9 +872,10 @@
 ;; carry the last state. Driven through the fake adapter, so the assertions
 ;; are on the frames a browser would get.
 (defonce ^:private pulse (atom 0))
+(def ^:private pulse-src (handler/atom-source pulse))
 
 (defui coalesced-ui []
-  [:p (server @pulse)])
+  [:p (server (observe pulse-src []))])
 
 (deftest render-interval-collapses-a-burst
   (reset! pulse 0)
@@ -882,7 +885,6 @@
                  (reset! opened on-open)
                  {:status status :body :fake-stream})
         ui     (handler/handler {:title "coalesced"
-                                 :watch [pulse]
                                  :render-interval-ms 25
                                  :mounts [{:el "app" :ui #'coalesced-ui}]
                                  :adapter fake})
@@ -916,7 +918,6 @@
                  (reset! opened on-open)
                  {:status status :body :fake-stream})
         ui     (handler/handler {:title "stress"
-                                 :watch [pulse]
                                  :render-interval-ms 5
                                  :mounts [{:el "app" :ui #'coalesced-ui}]
                                  :adapter fake})
@@ -939,12 +940,13 @@
 ;; A slot that throws must not kill the scheduler: the failed render is
 ;; reported and the next write renders normally.
 (defonce ^:private flaky (atom 0))
+(def ^:private flaky-src (handler/atom-source flaky))
 
 (defn- explode-on-neg [n]
   (if (neg? n) (throw (ex-info "boom" {})) n))
 
 (defui flaky-ui []
-  [:p (server (explode-on-neg @flaky))])
+  [:p (server (explode-on-neg (observe flaky-src [])))])
 
 (deftest render-interval-survives-a-throwing-slot
   (reset! flaky 0)
@@ -954,7 +956,6 @@
                  (reset! opened on-open)
                  {:status status :body :fake-stream})
         ui     (handler/handler {:title "flaky"
-                                 :watch [flaky]
                                  :render-interval-ms 10
                                  :mounts [{:el "app" :ui #'flaky-ui}]
                                  :adapter fake})
@@ -977,12 +978,13 @@
 ;; connection recovers on the next healthy render.
 (defonce ^:private poisoned (atom #{}))
 (defonce ^:private beat (atom 0))
+(def ^:private beat-src (handler/atom-source beat))
 
 (defn- guard [conn n]
   (if (@poisoned conn) (throw (ex-info "poisoned" {})) n))
 
 (defui isolated-ui []
-  [:p (server (guard (handler/connection (request)) @beat))])
+  [:p (server (guard (handler/connection (request)) (observe beat-src [])))])
 
 (deftest a-throwing-connection-does-not-starve-the-others
   (reset! poisoned #{})
@@ -993,7 +995,6 @@
                  {:status status :body :fake-stream})
         ;; synchronous renders, so the assertions need no polling
         ui     (handler/handler {:title "isolated"
-                                 :watch [beat]
                                  :render-interval-ms 0
                                  :mounts [{:el "app" :ui #'isolated-ui}]
                                  :adapter fake})
@@ -1047,18 +1048,19 @@
 
 (defui observed-notes []
   [:ul (for [n (server (do (ran! (request))
-                           (handler/observe ledger-source [(user-of (request))])))]
+                           (observe ledger-source [(user-of (request))])))]
          [:li n])])
 
-(defui watched-notes []
+(defui coarse-notes []
   [:ul (for [n (server (do (ran! (request))
-                           (get @ledger (user-of (request)))))]
+                           (get (observe ledger-source []) (user-of (request)))))]
          [:li n])])
 
-(defonce ^:private notice (atom "hello"))
-
-(defui bannered []
-  [:p (server (do (ran! (request)) @notice))])
+(defn- ledger-subscriptions
+  "The keys of `ledger-source` that are subscribed right now."
+  []
+  (into #{} (comp (filter #(= ledger-source (:source %))) (map :k))
+        (hub/subscriptions)))
 
 (defn- with-two
   "Serves `spec` and opens one connection as alice and one as bob, each past
@@ -1091,9 +1093,11 @@
       (testing "and its slots never ran"
         (is (= {"alice" 1} @slot-runs))))))
 
-(deftest a-watched-atom-still-runs-every-connection
-  (with-two {:mounts [{:el "app" :ui #'watched-notes}]
-             :watch [ledger]
+;; The same data read through the widest key. Every connection reads the whole
+;; map, so every connection holds the one key that changes and every one of
+;; them runs. This is what `observe` costs when the key is not narrowed.
+(deftest a-coarse-key-runs-every-connection-that-reads-it
+  (with-two {:mounts [{:el "app" :ui #'coarse-notes}]
              :render-interval-ms 0}
     (fn [{:keys [alice bob]}]
       (swap! ledger update "alice" conj "call the vet")
@@ -1111,15 +1115,6 @@
       (is (silent? (:sock bob) (:rdr bob) 300))
       (is (= {} @slot-runs)))))
 
-(deftest the-broadcast-topic-reaches-everyone
-  (with-two {:mounts [{:el "app" :ui #'bannered}] :render-interval-ms 0}
-    (fn [{:keys [alice bob]}]
-      (reset! notice "again")
-      (hub/invalidate! hub/all)
-      (is (= "patch" (first (next-event (:rdr alice)))))
-      (is (= "patch" (first (next-event (:rdr bob)))))
-      (is (= {"alice" 1 "bob" 1} @slot-runs)))))
-
 ;; One subscription per key per process, however many connections read it, and
 ;; released once the last of them lets go.
 (deftest a-source-is-subscribed-once-and-released-after-the-last-connection
@@ -1129,10 +1124,9 @@
       (with-two {:mounts [{:el "app" :ui #'observed-notes}] :render-interval-ms 0}
         (fn [_]
           (testing "one subscription per key, not per connection"
-            (is (= #{["alice"] ["bob"]}
-                   (into #{} (map :k) (hub/subscriptions)))))))
+            (is (= #{["alice"] ["bob"]} (ledger-subscriptions))))))
       (testing "both connections gone, both subscriptions released"
-        (is (until 3000 #(empty? (hub/subscriptions)))))
+        (is (until 3000 #(empty? (ledger-subscriptions)))))
       (finally (reset! hub/release-grace-ms grace)))))
 
 ;; A source can change between the moment a slot reads it and the moment the
@@ -1144,7 +1138,7 @@
 (defonce ^:private race-armed (atom true))
 
 (defui racer []
-  [:p (server (let [v (handler/observe race-source [:x])]
+  [:p (server (let [v (observe race-source [:x])]
                 (when (compare-and-set! race-armed true false)
                   (swap! race-state update :x inc))
                 v))])

@@ -20,10 +20,6 @@
   (.schedule ^java.util.concurrent.ScheduledExecutorService @scheduler
              ^Runnable f ms java.util.concurrent.TimeUnit/MILLISECONDS))
 
-(def all
-  "The topic every connection holds."
-  ::all)
-
 ;; ---------------------------------------------------------------------------
 ;; Sources
 
@@ -37,6 +33,11 @@
 (defn- path-of [k]
   (if (sequential? k) (vec k) [k]))
 
+;; Identity, not equality. A path nobody wrote keeps the same object through a
+;; swap, so `identical?` answers "did this key change" without walking a large
+;; value. A write that lands on an equal but fresh value notifies once too
+;; often, which costs a render and no frame, since the values compare equal
+;; where they are sent.
 (defrecord AtomSource [a]
   Source
   (-subscribe [_ k notify]
@@ -45,7 +46,7 @@
       (add-watch a [::observe path]
                  (fn [_ _ _ new]
                    (let [v (get-in new path)]
-                     (when (not= v @cache)
+                     (when-not (identical? v @cache)
                        (reset! cache v)
                        (notify)))))
       cache))

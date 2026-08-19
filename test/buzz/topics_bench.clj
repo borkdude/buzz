@@ -1,14 +1,14 @@
 (ns buzz.topics-bench
   "Reproduces the connections vs us/rpc table in
   doc/ai/adr/0001-render-scheduling.md and puts the topic mechanism beside it.
-  :watch reruns every connection's slots on a write. observe reruns only the
-  connections that read the key that changed.
+  Reading the whole atom reruns every connection's slots on a write. Reading
+  one user's key reruns only that user's connection.
 
   Two tables, same scenarios and connection counts, different slot cost. The
   first slot is a map lookup, cheap enough that fan out barely shows on the
   clock. The second does real work standing in for a database query, which is
-  where 0001's point shows up: :watch us/write grows with the connection
-  count, topics stays flat. Slot runs, not the clock, are what proves the
+  where 0001's point shows up: the wide key grows with the connection count
+  and the narrow one stays flat. Slot runs, not the clock, are what proves the
   fan out either way.
 
   Every scenario runs with :render-interval-ms 0, which makes a write render
@@ -28,21 +28,20 @@
 ;; ---------------------------------------------------------------------------
 ;; Slot cost: a map lookup
 
-(defui watch-lookup []
+(defui wide-lookup []
   [:p (server (do (swap! slot-runs inc)
-                  (get @state (user-of (request)))))])
+                  (get (buzz/observe state-source []) (user-of (request)))))])
 
-(defui topic-lookup []
+(defui narrow-lookup []
   [:p (server (do (swap! slot-runs inc)
                   (buzz/observe state-source [(user-of (request))])))])
 
-(defn- watch-lookup-spec []
-  {:mounts [{:el "app" :ui #'watch-lookup}]
-   :watch [state]
+(defn- wide-lookup-spec []
+  {:mounts [{:el "app" :ui #'wide-lookup}]
    :render-interval-ms 0})
 
-(defn- topic-lookup-spec []
-  {:mounts [{:el "app" :ui #'topic-lookup}]
+(defn- narrow-lookup-spec []
+  {:mounts [{:el "app" :ui #'narrow-lookup}]
    :render-interval-ms 0})
 
 ;; ---------------------------------------------------------------------------
@@ -59,23 +58,22 @@
       (recur (inc i) (unchecked-add acc (unchecked-multiply acc 2654435761)))
       acc)))
 
-(defui watch-query []
+(defui wide-query []
   [:p (server (do (swap! slot-runs inc)
                   (churn (hash (user-of (request))) @work-n)
-                  (get @state (user-of (request)))))])
+                  (get (buzz/observe state-source []) (user-of (request)))))])
 
-(defui topic-query []
+(defui narrow-query []
   [:p (server (do (swap! slot-runs inc)
                   (churn (hash (user-of (request))) @work-n)
                   (buzz/observe state-source [(user-of (request))])))])
 
-(defn- watch-query-spec []
-  {:mounts [{:el "app" :ui #'watch-query}]
-   :watch [state]
+(defn- wide-query-spec []
+  {:mounts [{:el "app" :ui #'wide-query}]
    :render-interval-ms 0})
 
-(defn- topic-query-spec []
-  {:mounts [{:el "app" :ui #'topic-query}]
+(defn- narrow-query-spec []
+  {:mounts [{:el "app" :ui #'narrow-query}]
    :render-interval-ms 0})
 
 ;; ---------------------------------------------------------------------------
@@ -189,18 +187,18 @@
 (defn- row [& cols]
   (apply str (map #(format "%-20s" (str %)) cols)))
 
-(defn- print-table [label watch-spec-fn topic-spec-fn]
+(defn- print-table [label wide-spec-fn narrow-spec-fn]
   (println label)
-  (println (row "connections" ":watch us/write" "topics us/write"
-                ":watch slot runs" "topics slot runs"))
+  (println (row "connections" "wide key us/write" "narrow key us/write"
+                "wide slot runs" "narrow slot runs"))
   (doseq [n sizes]
-    (let [[watch-us watch-runs] (run-scenario (watch-spec-fn) n)
-          [topic-us topic-runs] (run-scenario (topic-spec-fn) n)]
+    (let [[wide-us wide-runs] (run-scenario (wide-spec-fn) n)
+          [narrow-us narrow-runs] (run-scenario (narrow-spec-fn) n)]
       (println (row n
-                    (format "%.1f" watch-us)
-                    (format "%.1f" topic-us)
-                    (format "%.1f" watch-runs)
-                    (format "%.1f" topic-runs)))))
+                    (format "%.1f" wide-us)
+                    (format "%.1f" narrow-us)
+                    (format "%.1f" wide-runs)
+                    (format "%.1f" narrow-runs)))))
   (println))
 
 (defn -main [& _]
@@ -209,8 +207,8 @@
                         "jvm"))
   (println "render-interval-ms 0: a write renders synchronously on the writing thread")
   (println)
-  (print-table "slot: a map lookup" watch-lookup-spec topic-lookup-spec)
+  (print-table "slot: a map lookup" wide-lookup-spec narrow-lookup-spec)
   (let [query-us (calibrate-work! 60)]
     (print-table (format "slot: about %.1fus of work, standing in for a query" query-us)
-                 watch-query-spec topic-query-spec))
+                 wide-query-spec narrow-query-spec))
   (System/exit 0))

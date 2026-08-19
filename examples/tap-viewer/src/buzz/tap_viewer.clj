@@ -54,6 +54,10 @@
 ;; How far each viewer opened each path: connection -> path -> clicks.
 (defonce expanded (atom {}))
 
+(def ^:private taps (buzz/atom-source log))
+;; Keyed by connection, so folding a node wakes the one browser that folded it.
+(def ^:private folds (buzz/atom-source expanded))
+
 (defn show-more! [req path]
   (swap! expanded update-in [(buzz/connection req) path] (fnil inc 0)))
 
@@ -224,8 +228,9 @@
      [:div.tree (tree-node (:tree e) folded said)])])
 
 (defui viewer []
-  (let [items  (server (shown @log (get @expanded (buzz/connection (request)))))
-        n      (server (count @log))
+  (let [items  (server (shown (buzz/observe taps [])
+                              (buzz/observe folds [(buzz/connection (request))])))
+        n      (server (count (buzz/observe taps [])))
         open   (local-state {})
         folded (local-state {})
         said   (local-state nil)]
@@ -246,7 +251,6 @@
 ;; serves its page when pulled into another project as a git dep.
 (def ui
   (buzz/handler {:index (io/file (.toURI (io/resource "taps.html")))
-                 :watch [log expanded]
                  :mounts [{:el "app" :ui #'viewer}]
                  :on-close (fn [req] (swap! expanded dissoc (buzz/connection req)))}))
 

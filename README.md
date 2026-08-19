@@ -32,13 +32,15 @@ Create a project with two files. `deps.edn`:
 
 ```clojure
 (ns counter
-  (:require [buzz.core :as buzz :refer [client defui local-state server server!]]
+  (:require [buzz.core :as buzz :refer [client defui local-state observe server server!]]
             [org.httpkit.server :as http]))
 
 (defonce clicks (atom 0))
 
+(def counter-source (buzz/atom-source clicks))
+
 (defui counter []
-  (let [n    (server @clicks)
+  (let [n    (server (observe counter-source []))
         step (local-state 1)]
     [:div
      [:p "clicked " n " times"]
@@ -47,7 +49,6 @@ Create a project with two files. `deps.edn`:
 
 (def ui
   (buzz/handler {:title "counter"
-                 :watch [clicks]
                  :mounts [{:el "app" :ui #'counter}]}))
 
 (defn -main [& _]
@@ -66,7 +67,8 @@ The count is a server value, so it is the same for all browsers. The step is a b
 The body of a component is client side code. In the body you can use four marks to communicate with the server or to make local state.
 
 - `(server expr)` is a value from the server. The server runs the expression again
-after each change to an observed atom and the result is sent to the browser.
+after each change to something the expression read through `observe`, and the
+result is sent to the browser. See [Sources](#sources).
 
 - `(server! expr)` is way to make the server do something. It is a side effect, not a value. The return value is a promise. Using the special `reply` form, you can send a value back to the browser. Give `reply` a second argument to add to the http response the value arrives in, which is how a handler sets a cookie.
 
@@ -104,7 +106,7 @@ To compose the handler with other routes, you can use `or` since the handler ret
   (or (ui req) (my-other-routes req)))
 ```
 
-Buzz watches each atom in `:watch`. When one of them changes, it re-renders the component and sends a patch to each browser. One mount can hold one component at one element. A page can have more than one mount.
+One mount can hold one component at one element. A page can have more than one mount.
 
 Rendering is asynchronous: a write returns at once, and rendering happens at
 most once per `:render-interval-ms` (default 20). The first write renders
@@ -131,9 +133,9 @@ The page belongs to the handler, so one application can serve more than one of t
 
 ## Sources
 
-A `:watch` atom runs the slots of every connection on every write. Read through
-a source instead and a write reaches only the connections that read what
-changed.
+A slot reads server state through a source, and reading a key subscribes the
+connection to it. A write then reaches the connections that read the key it
+changed, and no others.
 
 ```clojure
 (defonce todos (atom {"alice" [] "bob" []}))
@@ -155,6 +157,14 @@ reading it, and releases it once the last connection lets go.
 
 A key decides which connections render, not which slots. A connection runs all
 of its slots whenever any key it reads changes.
+
+Read a wide key and you get a wide fan out. `(observe by-user [])` is the whole
+map, so every connection reading it renders on every write. Narrow the key and
+the fan out narrows with it.
+
+State a slot reads any other way has nothing watching it, so nothing will ever
+update that connection. Read it through a source, or accept that it is fixed
+for the life of the page.
 
 Implement `buzz.source/Source` to render from something other than an atom. It
 takes a subscribe and an unsubscribe, and the handle it returns is what

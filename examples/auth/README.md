@@ -92,8 +92,9 @@ handler:
 
 ## Signing out reaches open pages
 
-`sessions` is in `:watch`, so signing out redraws open pages. The session cookie
-no longer resolves to a user, and protected content disappears.
+`whoami` reads the session map through a source keyed by the cookie, so signing
+out redraws the pages of that browser. The cookie no longer resolves to a user,
+and protected content disappears.
 
 ## Signing in
 

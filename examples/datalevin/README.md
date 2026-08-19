@@ -20,7 +20,7 @@ notifications: the attributes the transaction wrote are intersected with the
 attributes each subscribed query reads, and only the overlapping queries run
 again.
 
-The page reads through it, so it has no `:watch`:
+The page reads through it, and holds no atom of its own:
 
 ```clojure
 (server (observe db log-q))

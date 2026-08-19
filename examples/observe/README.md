@@ -42,8 +42,8 @@ The atom changed three times and page a never ran. Its key did not change, so
 its connection was never woken. Page b went to 3 and page a stayed where it
 was.
 
-Swap `buzz/observe` for `(get @state k)` and add `:watch [state]` to both
-handlers, and every line above appears twice.
+Widen the key to `[]`, which is the whole atom, and every line above appears
+twice. Both pages read the whole map, so both hold the key that changed.
 
 ## The grain
 
