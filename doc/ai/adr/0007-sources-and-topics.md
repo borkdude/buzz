@@ -6,9 +6,9 @@ Status: Layers 0, 1 and 2 are implemented on the `sources-and-topics` branch,
 with two sources: `atom-source` in core and a Datalevin source keyed by a
 datalog query in `examples/datalevin`, which derives its notifications from
 the transaction report. Layer 0 is internal, so the public API is `observe`,
-`atom-source` and the `Source` protocol. The per topic counters are still open,
-as is the development mode that catches a slot whose value changed while its
-source stayed quiet.
+`atom-source`, `check-topics!` and the `Source` protocol. The development check
+is built. The per topic counters are still open, as is removing `:watch` and
+indexing `atom-source` by the first key of a path.
 
 ## Context
 

@@ -549,4 +549,13 @@
   "A source over an atom, keyed by a path into it."
   hub/atom-source)
 
+(def check-topics!
+  "Starts or stops the development check. While it runs, every connection is
+  rendered on a timer and any whose value had changed without a source saying
+  so is reported. That is a slot reading mutable state outside a source, which
+  nothing else can notice. Off by default, and never for production.
+
+    (buzz/check-topics! true)"
+  hub/check-topics!)
+
 ;; `buzz.source/Source` is the protocol an integration implements.

@@ -209,3 +209,55 @@
   `(let [reads# (atom {})]
      (binding [*reads* reads#]
        [(do ~@body) @reads#])))
+
+;; ---------------------------------------------------------------------------
+;; The development check
+;;
+;; A connection holds what its slots read through `observe`. A slot that reads
+;; mutable state some other way holds nothing for it, so nothing marks that
+;; connection and the browser keeps a value that is no longer true. Nothing in
+;; the mechanism can notice this, because the mechanism only ever looks at
+;; connections that hold a marked topic.
+;;
+;; So the check works from the outside. It renders every connection on a timer,
+;; whatever the topics say, and reports the ones whose values had changed. It
+;; also sends the patch, so a development session behaves as if every write
+;; reached every connection.
+
+(defonce ^:private check-task (atom nil))
+
+(defn checking?
+  "Whether the development check is running."
+  []
+  (some? @check-task))
+
+(defn- sweep-all! []
+  (doseq [{:keys [dirty? sweep!]} @handlers]
+    (try
+      ;; a render already on its way is not a missed one
+      (when-not (and dirty? (dirty?))
+        (when sweep! (sweep!)))
+      (catch Throwable e
+        (println "buzz: check failed -" (ex-message e))))))
+
+(defn check-topics!
+  "Starts or stops the development check. While it runs, every connection is
+  rendered on a timer and any whose value had changed without a source saying
+  so is reported. Off by default, and never for production."
+  ([on?] (check-topics! on? 1000))
+  ([on? ^long ms]
+   (swap! check-task
+          (fn [task]
+            (when task (.cancel ^java.util.concurrent.ScheduledFuture task false))
+            (when on?
+              (.scheduleWithFixedDelay
+               ^java.util.concurrent.ScheduledExecutorService @scheduler
+               ^Runnable sweep-all!
+               ms ms java.util.concurrent.TimeUnit/MILLISECONDS))))
+   on?))
+
+(defn observed-keys
+  "The source keys `session` holds, for a report."
+  [index session]
+  (into [] (comp (filter source-topic?) (map :k))
+        (get (:by-session @index) session)))
