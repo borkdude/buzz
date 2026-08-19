@@ -153,28 +153,16 @@ not run.
 Buzz keeps one subscription per key per process, shared by every connection
 reading it, and releases it once the last connection lets go.
 
-Use `buzz/invalidate!` for a change that arrives through no source, such as a
-webhook:
-
-```clojure
-(buzz/invalidate! [:todos "alice"])
-```
-
-Give the handler `:topics`, a function of the request, to hold topics a
-connection never reads:
-
-```clojure
-(buzz/handler {:topics (fn [req] [[:user (whoami req)]]) ...})
-```
-
-Every connection also holds `buzz/all` and its own connection id, so
-`(buzz/invalidate! (buzz/connection req))` renders one connection and
-`(buzz/invalidate! buzz/all)` renders all of them. A `:watch` atom invalidates
-`buzz/all`.
+A key decides which connections render, not which slots. A connection runs all
+of its slots whenever any key it reads changes.
 
 Implement `buzz.source/Source` to render from something other than an atom. It
 takes a subscribe and an unsubscribe, and the handle it returns is what
-`observe` derefs.
+`observe` derefs. `examples/datalevin` has one over a database, driven by the
+transaction report.
+
+See [examples/observe](examples/observe) for the smallest version of all of
+this.
 
 ## Request
 
@@ -238,6 +226,8 @@ fills it in.
 
 ## Examples
 
+- [examples/observe](examples/observe) is two pages over one atom, each
+  reading one key of it.
 - [examples/auth](examples/auth) signs two users in and gives each of them
   their own data.
 - [examples/tap-viewer](examples/tap-viewer) shows everything the process taps, with a tree
@@ -245,7 +235,8 @@ fills it in.
 - [examples/whiteboard](examples/whiteboard) is a shared whiteboard with live
   cursors, one color per connection.
 - [examples/datalevin](examples/datalevin) is a Datalevin browser over a
-  MusicBrainz sample, with a query log shared between viewers.
+  MusicBrainz sample, with a query log shared between viewers. It has a source
+  over the database.
 
 ## Development
 

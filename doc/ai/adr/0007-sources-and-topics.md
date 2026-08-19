@@ -5,8 +5,10 @@ Date: 2026-08-19
 Status: Layers 0, 1 and 2 are implemented on the `sources-and-topics` branch,
 with two sources: `atom-source` in core and a Datalevin source keyed by a
 datalog query in `examples/datalevin`, which derives its notifications from
-the transaction report. The per topic counters are still open, as is the
-development mode that catches a missing `invalidate!`.
+the transaction report. Layer 0 is internal, so the public API is `observe`,
+`atom-source` and the `Source` protocol. The per topic counters are still open,
+as is the development mode that catches a slot whose value changed while its
+source stayed quiet.
 
 ## Context
 
@@ -83,12 +85,12 @@ Three layers. Each is useful on its own and each is a strict addition to the one
 below it.
 
 **Layer 0, topics.** A topic is a value naming what changed. Connections hold
-topics, `invalidate!` marks them, and only the connections holding a marked
-topic render.
+topics, and marking a topic renders the connections holding it and nobody else.
+Internal, for the reason under its own heading below.
 
-**Layer 1, sources.** A `Source` turns changes in an external system into
-`invalidate!` calls, with a subscription whose lifetime follows the topic index.
-This is the integration seam.
+**Layer 1, sources.** A `Source` turns changes in an external system into marked
+topics, with a subscription whose lifetime follows the topic index. This is the
+integration seam, and the whole public API together with layer 2.
 
 **Layer 2, `observe`.** A slot's reads through a source become its topics, so
 subscriptions are derived rather than declared.
@@ -98,33 +100,27 @@ subscriptions are derived rather than declared.
 ## Layer 0: topics
 
 A topic is any EDN value compared with `=`. Nothing about it is tied to an atom,
-a var or a namespace.
+a var or a namespace. A connection holds a set of them, and marking a topic
+renders the connections holding it and nobody else.
 
-```clojure
-(buzz/invalidate! [:todos "alice"])
-(buzz/invalidate! [:todos "alice"] [:team 3])
-```
+**This layer is internal.** An earlier draft made it public, as `invalidate!`
+and a `:topics` function on the handler spec, so an application could name its
+own topics and mark them by hand. That pair carries the exact defect
+[0002](0002-work-after-the-scheduler.md) section 1 rejected: a forgotten mark
+leaves a browser on a value that is no longer true, with nothing to notice it
+by. `observe` does not, because the declaration and the read are the same
+expression.
 
-A plain function, callable from an RPC handler, a background job, a scheduled
-task or a webhook. Invalidating a topic nobody holds is a no-op.
+Keeping both would put two mechanisms in the public API, one safe and one not,
+and the unsafe one only covered cases a small source covers better. So the
+public API is `observe`, `atom-source` and the `Source` protocol, and nothing
+else. `:watch` marks one internal topic that every connection holds.
 
-`:topics` on the handler spec declares what a connection holds. It is a function
-of the request, run when the stream opens and again after each render of that
-connection.
-
-```clojure
-(buzz/handler
- {:topics (fn [req] [[:todos (whoami req)] :announcements])
-  :mounts [{:el "app" :ui #'todo-app}]})
-```
-
-`::buzz/all` reaches every connection of the handler. Every connection also
-holds its own session id, so `(buzz/invalidate! (buzz/connection req))` renders
-exactly one connection.
-
-Topics come from the request. Never accept one from the browser. A client chosen
-topic reveals names and is a wake up vector, even though the slots still run
-against the caller's own identity.
+What this gives up is an escape hatch for a change that arrives through no
+source at all, a webhook being the example. The answer is to write the source:
+whatever the webhook carries has to be readable for a slot to render it, so
+there is a source, it just has not been written yet. A source that is told its
+new value is about fifteen lines.
 
 Layer 0 alone is the whole win for a single process, and it is what the other
 two layers are built out of.
@@ -184,35 +180,34 @@ dependencies:**
 > its slots actually do, run the slots and send nothing when the values are the
 > same as last time.
 
-The drift is real, and it applies to `:topics`. It does not apply to `observe`,
-because the declaration and the read are the same expression. A slot cannot
-subscribe to the wrong thing without also reading the wrong thing, which is a
-bug the browser shows rather than hides.
+The drift is real, and it applies to any topic named apart from the read. It
+does not apply to `observe`, because the declaration and the read are the same
+expression. A slot cannot subscribe to the wrong thing without also reading the
+wrong thing, which is a bug the browser shows rather than hides.
 
-So `:topics` remains the escape hatch for changes that arrive through no source
-at all, and `observe` is the normal path.
+`observe` is therefore the only way an application names a topic, and layer 0
+stays behind it.
 
-Naming is open. `read` shadows `clojure.core/read`.
+`read` was the first name and shadows `clojure.core/read`.
 
 ## Working example
 
 ```clojure
+(defonce state (atom {"alice" [] "bob" []}))
+
 (def todos (buzz/atom-source state))
 
 (defui todo-app []
-  (let [me    (server (whoami (request)))
-        items (server (observe todos [:todos (whoami (request))]))]
+  (let [items (server (observe todos [(whoami (request))]))]
     [:ul
-     (for [{:keys [id title done]} items]
-       [:li {:on-click (fn [_] (server! (do (toggle! (whoami (request)) (client id))
-                                            (invalidate! [:todos (whoami (request))]))))}
+     (for [{:keys [id title]} items]
+       [:li {:on-click (fn [_] (server! (toggle! (whoami (request)) (client id))))}
         title])]))
 ```
 
-Every tab and device of that user refreshes. Nobody else's slots run.
-
-With a source that pushes its own changes, the `invalidate!` in the handler goes
-away and the source does it.
+The handler writes the atom and says nothing else. The source notices the write,
+marks the key, and every tab and device of that user refreshes. Nobody else's
+slots run.
 
 ## The three hazards
 
@@ -306,9 +301,10 @@ integrating anything means writing the same subscribe, cache and refcount code
 per application. The protocol is two methods, so there is little to save by
 leaving it out.
 
-**C. Sources without `observe`.** Layers 0 and 1 only. Every connection declares
-`:topics` by hand and carries the drift risk 0002 section 1 named. This is a
-real intermediate state rather than an alternative, since layer 2 is additive.
+**C. Sources without `observe`.** Layers 0 and 1 only, with an application that
+names its own topics and marks them by hand. Built first and then withdrawn, for
+the reason under layer 0: it carries the drift risk 0002 section 1 named, and it
+covered nothing a small source does not cover better.
 
 **D. Track reads without a protocol.** Intercept `deref` or instrument the
 storage layer to derive the read set from ordinary code. Convex does the
@@ -339,9 +335,9 @@ Applications using `:watch` and nothing else behave exactly as they do today.
 
 ## Build order
 
-1. Layer 0. Index, `invalidate!`, topic set in `coalesced`, `:topics` on the
-   handler spec, `:watch` as sugar for `::buzz/all`. In process, no protocol.
-   This is the whole win for a single node.
+1. Layer 0. Index, marking, topic set in `coalesced`, `:watch` marking the
+   broadcast topic. In process, no protocol. This is the whole win for a single
+   node.
 2. Layer 1. The `Source` protocol, the refcounted handle registry, and
    `atom-source` as the first implementation, which reduces `:watch` to a
    special case of it.

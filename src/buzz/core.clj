@@ -537,18 +537,6 @@
   reconnects."
   page/token)
 
-(def all
-  "The topic every connection holds. Invalidating it renders every connection,
-  which is what a `:watch` atom does."
-  hub/all)
-
-(def invalidate!
-  "Marks topics changed. Only the connections holding one of them render, so a
-  topic nobody holds costs nothing.
-
-    (invalidate! [:todos \"alice\"])"
-  hub/invalidate!)
-
 (def observe
   "Reads `k` from a source and subscribes the current connection to it. Use it
   inside `(server ...)`, where the topics a connection holds are whatever its

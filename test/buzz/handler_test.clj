@@ -1106,39 +1106,19 @@
 (deftest invalidating-a-topic-nobody-holds-does-nothing
   (with-two {:mounts [{:el "app" :ui #'observed-notes}] :render-interval-ms 0}
     (fn [{:keys [alice bob]}]
-      (handler/invalidate! [:nobody-holds-this])
+      (hub/invalidate! [:nobody-holds-this])
       (is (silent? (:sock alice) (:rdr alice) 300))
       (is (silent? (:sock bob) (:rdr bob) 300))
       (is (= {} @slot-runs)))))
-
-(deftest a-declared-topic-reaches-the-connections-holding-it
-  (with-two {:mounts [{:el "app" :ui #'bannered}]
-             :topics (fn [req] [[:user (user-of req)]])
-             :render-interval-ms 0}
-    (fn [{:keys [alice bob]}]
-      (reset! notice "bye")
-      (handler/invalidate! [:user "bob"])
-      (is (= "patch" (first (next-event (:rdr bob)))))
-      (is (silent? (:sock alice) (:rdr alice) 300))
-      (is (= {"bob" 1} @slot-runs)))))
 
 (deftest the-broadcast-topic-reaches-everyone
   (with-two {:mounts [{:el "app" :ui #'bannered}] :render-interval-ms 0}
     (fn [{:keys [alice bob]}]
       (reset! notice "again")
-      (handler/invalidate! handler/all)
+      (hub/invalidate! hub/all)
       (is (= "patch" (first (next-event (:rdr alice)))))
       (is (= "patch" (first (next-event (:rdr bob)))))
       (is (= {"alice" 1 "bob" 1} @slot-runs)))))
-
-(deftest a-connection-can-be-invalidated-on-its-own
-  (with-two {:mounts [{:el "app" :ui #'bannered}] :render-interval-ms 0}
-    (fn [{:keys [alice bob]}]
-      (reset! notice "just you")
-      (handler/invalidate! (:session alice))
-      (is (= "patch" (first (next-event (:rdr alice)))))
-      (is (silent? (:sock bob) (:rdr bob) 300))
-      (is (= {"alice" 1} @slot-runs)))))
 
 ;; One subscription per key per process, however many connections read it, and
 ;; released once the last of them lets go.

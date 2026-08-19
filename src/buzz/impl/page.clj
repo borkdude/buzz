@@ -70,17 +70,15 @@
   {:el el :spec spec :sent (atom ::none) :req req
    :instance ((::instance spec))})
 
-;; What a connection holds before its slots have said anything: the broadcast
-;; topic, its own session id, and whatever `:topics` declares.
-(defn- base-topics [spec req session]
-  (into #{hub/all session}
-        (when-let [f (:topics spec)] (f req))))
+;; Every connection holds the broadcast topic, which is what a `:watch` atom
+;; marks. Everything else it holds comes from what its slots read.
+(def ^:private base-topics #{hub/all})
 
 ;; Run one connection's mounts with read tracking on, then replace the topics
-;; it holds with the declared ones plus everything `observe` read. A mount that
-;; throws is contained to its own frame, and a session that saw a failure keeps
-;; the topics it had rather than reconciling against a partial read set.
-(defn- render-session! [{:keys [index spec]} session {:keys [ch mounted req]} render!]
+;; it holds with everything `observe` read. A mount that throws is contained to
+;; its own frame, and a session that saw a failure keeps the topics it had
+;; rather than reconciling against a partial read set.
+(defn- render-session! [{:keys [index]} session {:keys [ch mounted]} render!]
   (let [ok (volatile! true)
         [_ reads] (hub/with-reads
                     (doseq [m mounted]
@@ -89,10 +87,7 @@
                              (vreset! ok false)
                              (println "buzz: render failed for" session "-" (ex-message e))))))]
     (when @ok
-      (try
-        (hub/set-topics! index session (into (base-topics spec req session) reads))
-        (catch Throwable e
-          (println "buzz: topics failed for" session "-" (ex-message e)))))))
+      (hub/set-topics! index session (into base-topics reads)))))
 
 (defn- open-stream [{:keys [registry] :as entry} session ch req mounts token]
   ;; Register the session before sending its ID.
