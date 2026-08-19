@@ -2,7 +2,13 @@
 
 Date: 2026-08-19
 
-Status: Open. Proposed, not implemented.
+Status: Layers 0, 1 and 2 are implemented on the `sources-and-topics` branch,
+with two sources: `atom-source` in core and a Datalevin source keyed by a
+datalog query in `examples/datalevin`, which derives its notifications from
+the transaction report. Layer 0 is internal, so the public API is `observe`,
+`atom-source` and the `Source` protocol. The per topic counters are still open,
+as is the development mode that catches a slot whose value changed while its
+source stayed quiet.
 
 ## Context
 
@@ -42,18 +48,49 @@ So the question is not how to make `:watch` cheaper. It is what the smallest
 thing is that an atom, a Rama PState, a Datalevin database and a Postgres table
 can all be.
 
+## Measured
+
+`bb bench-topics`, babashka, `:render-interval-ms 0` so the write pays for the
+render the way 0001 measured it. N connections, one per user, and the timed
+operation is one write to user-0's data. Median of 201 samples.
+
+Slot is a map lookup:
+
+| connections | :watch us/write | topics us/write | :watch slot runs | topics slot runs |
+|---|---|---|---|---|
+| 1   |  15.0 | 42.6 |   1 | 1 |
+| 10  |  60.0 | 21.9 |  10 | 1 |
+| 25  |  96.7 | 28.0 |  25 | 1 |
+| 50  | 175.2 | 29.6 |  50 | 1 |
+| 100 | 337.6 | 33.1 | 100 | 1 |
+
+Slot does about 60 us of work, standing in for a query:
+
+| connections | :watch us/write | topics us/write | :watch slot runs | topics slot runs |
+|---|---|---|---|---|
+| 1   |   91.4 |  95.2 |   1 | 1 |
+| 10  |  678.2 |  94.8 |  10 | 1 |
+| 25  | 1646.3 |  98.1 |  25 | 1 |
+| 50  | 3247.1 | 101.1 |  50 | 1 |
+| 100 | 6449.9 | 113.0 | 100 | 1 |
+
+The slot runs columns are the mechanism: N against 1, whatever the slot costs.
+The clock only makes it visible once a slot costs something, which is why the
+first table barely moves and the second is 57 times apart at 100 connections.
+An application whose slots query a database is the second table.
+
 ## Decision
 
 Three layers. Each is useful on its own and each is a strict addition to the one
 below it.
 
 **Layer 0, topics.** A topic is a value naming what changed. Connections hold
-topics, `invalidate!` marks them, and only the connections holding a marked
-topic render.
+topics, and marking a topic renders the connections holding it and nobody else.
+Internal, for the reason under its own heading below.
 
-**Layer 1, sources.** A `Source` turns changes in an external system into
-`invalidate!` calls, with a subscription whose lifetime follows the topic index.
-This is the integration seam.
+**Layer 1, sources.** A `Source` turns changes in an external system into marked
+topics, with a subscription whose lifetime follows the topic index. This is the
+integration seam, and the whole public API together with layer 2.
 
 **Layer 2, `observe`.** A slot's reads through a source become its topics, so
 subscriptions are derived rather than declared.
@@ -63,33 +100,27 @@ subscriptions are derived rather than declared.
 ## Layer 0: topics
 
 A topic is any EDN value compared with `=`. Nothing about it is tied to an atom,
-a var or a namespace.
+a var or a namespace. A connection holds a set of them, and marking a topic
+renders the connections holding it and nobody else.
 
-```clojure
-(buzz/invalidate! [:todos "alice"])
-(buzz/invalidate! [:todos "alice"] [:team 3])
-```
+**This layer is internal.** An earlier draft made it public, as `invalidate!`
+and a `:topics` function on the handler spec, so an application could name its
+own topics and mark them by hand. That pair carries the exact defect
+[0002](0002-work-after-the-scheduler.md) section 1 rejected: a forgotten mark
+leaves a browser on a value that is no longer true, with nothing to notice it
+by. `observe` does not, because the declaration and the read are the same
+expression.
 
-A plain function, callable from an RPC handler, a background job, a scheduled
-task or a webhook. Invalidating a topic nobody holds is a no-op.
+Keeping both would put two mechanisms in the public API, one safe and one not,
+and the unsafe one only covered cases a small source covers better. So the
+public API is `observe`, `atom-source` and the `Source` protocol, and nothing
+else. `:watch` marks one internal topic that every connection holds.
 
-`:topics` on the handler spec declares what a connection holds. It is a function
-of the request, run when the stream opens and again after each render of that
-connection.
-
-```clojure
-(buzz/handler
- {:topics (fn [req] [[:todos (whoami req)] :announcements])
-  :mounts [{:el "app" :ui #'todo-app}]})
-```
-
-`::buzz/all` reaches every connection of the handler. Every connection also
-holds its own session id, so `(buzz/invalidate! (buzz/connection req))` renders
-exactly one connection.
-
-Topics come from the request. Never accept one from the browser. A client chosen
-topic reveals names and is a wake up vector, even though the slots still run
-against the caller's own identity.
+What this gives up is an escape hatch for a change that arrives through no
+source at all, a webhook being the example. The answer is to write the source:
+whatever the webhook carries has to be readable for a slot to render it, so
+there is a source, it just has not been written yet. A source that is told its
+new value is about fifteen lines.
 
 Layer 0 alone is the whole win for a single process, and it is what the other
 two layers are built out of.
@@ -100,17 +131,18 @@ two layers are built out of.
 (defprotocol Source
   (-subscribe [source k notify]
     "Calls notify, a function of no arguments, whenever k changes.
-     Returns a handle supporting deref.")
-  (-unsubscribe [source handle]))
+     Returns a handle that deref gives the current value of.")
+  (-unsubscribe [source k handle]))
 ```
 
 Two methods. The handle is derefable, which is the point: the subscription and
 the read cache are the same object.
 
 Buzz keys the subscription by `[source k]` and uses that pair as the topic, so
-`notify` is `#(invalidate! [source-id k])` and nothing else has to be wired. The
-lifetime follows the topic index. A topic gaining its first subscriber opens the
-subscription, and losing its last closes it.
+the `notify` it hands to a source raises that subscription's version and marks
+that topic, and nothing else has to be wired. The lifetime follows the topic
+index. A topic gaining its first subscriber opens the subscription, and losing
+its last closes it after a grace period.
 
 | source | key | handle |
 |---|---|---|
@@ -149,43 +181,65 @@ dependencies:**
 > its slots actually do, run the slots and send nothing when the values are the
 > same as last time.
 
-The drift is real, and it applies to `:topics`. It does not apply to `observe`,
-because the declaration and the read are the same expression. A slot cannot
-subscribe to the wrong thing without also reading the wrong thing, which is a
-bug the browser shows rather than hides.
+The drift is real, and it applies to any topic named apart from the read. It
+does not apply to `observe`, because the declaration and the read are the same
+expression. A slot cannot subscribe to the wrong thing without also reading the
+wrong thing, which is a bug the browser shows rather than hides.
 
-So `:topics` remains the escape hatch for changes that arrive through no source
-at all, and `observe` is the normal path.
+`observe` is therefore the only way an application names a topic, and layer 0
+stays behind it.
 
-Naming is open. `read` shadows `clojure.core/read`.
+`read` was the first name and shadows `clojure.core/read`.
 
 ## Working example
 
 ```clojure
+(defonce state (atom {"alice" [] "bob" []}))
+
 (def todos (buzz/atom-source state))
 
 (defui todo-app []
-  (let [me    (server (whoami (request)))
-        items (server (observe todos [:todos (whoami (request))]))]
+  (let [items (server (observe todos [(whoami (request))]))]
     [:ul
-     (for [{:keys [id title done]} items]
-       [:li {:on-click (fn [_] (server! (do (toggle! (whoami (request)) (client id))
-                                            (invalidate! [:todos (whoami (request))]))))}
+     (for [{:keys [id title]} items]
+       [:li {:on-click (fn [_] (server! (toggle! (whoami (request)) (client id))))}
         title])]))
 ```
 
-Every tab and device of that user refreshes. Nobody else's slots run.
-
-With a source that pushes its own changes, the `invalidate!` in the handler goes
-away and the source does it.
+The handler writes the atom and says nothing else. The source notices the write,
+marks the key, and every tab and device of that user refreshes. Nobody else's
+slots run.
 
 ## The three hazards
 
 **Subscribe before reading.** Read first and subscribe second and a change
 landing in between is lost, leaving that connection on a stale value with
-nothing to notice it by. Subscribe first and read after, or read a version along
-with the value and re-check it once subscribed. This is the classic bug in
-systems of this shape and it is the one to write a test for first.
+nothing to notice it by. This is the classic bug in systems of this shape, and
+it appears at two levels.
+
+Inside a source it is ordered away. `-subscribe` puts the subscription in place
+before it caches the first value, so no change falls between them.
+
+Between the read set and the index it cannot be ordered away, because the read
+set is only known once the slots have run. A change landing between the read
+and the index write is marked while nothing holds the topic, so the mark is
+dropped where it is made and no later render corrects it. It only bites when no
+other connection holds that key, which is exactly the first connection to read
+it.
+
+The fix is a version on each subscription, raised before each notification.
+`observe` records the version it read at, the version first and the value
+second, so a change between the two reports a stale read rather than a current
+one. After the index write the versions are compared, and a connection that
+read a version that has moved renders again. The follow-up pass patches rather
+than mounts, since the first pass already sent the frame the browser starts
+from. Two passes are enough in practice, because every change after the first
+index write marks this connection through the normal path.
+
+`a-change-during-the-first-render-is-not-lost` in `test/buzz/handler_test.clj`
+holds this. Its slot writes the atom it just read, which puts a change inside
+exactly that window. Without the version check the browser never receives the
+new value.
 
 **Read sets change between renders.** `(if admin? (observe a k) (observe b k))`
 subscribes to different things on different renders, so each render diffs the
@@ -220,9 +274,11 @@ interval both stay as they are.
 `:on-close` removes the session from both maps, which is also what closes the
 last subscription on a topic.
 
-`observe` needs a dynamic read set bound around each slot evaluation.
-`split-body` already walks the slot expressions, so this is a binding at the
-call site rather than analysis.
+`observe` needs a dynamic read set bound around a connection's slots. Binding it
+around the whole session render, rather than around each slot, needs no change
+to `defui` or `split-body` at all: `observe` is an ordinary function call inside
+a slot expression, so runtime tracking is enough and the topics come out per
+connection, which is the grain the index wants.
 
 Rendering stays single threaded per handler. Parallel rendering across topics
 needs the per connection serialisation that 0006 item 1 wants first, or it
@@ -269,9 +325,10 @@ integrating anything means writing the same subscribe, cache and refcount code
 per application. The protocol is two methods, so there is little to save by
 leaving it out.
 
-**C. Sources without `observe`.** Layers 0 and 1 only. Every connection declares
-`:topics` by hand and carries the drift risk 0002 section 1 named. This is a
-real intermediate state rather than an alternative, since layer 2 is additive.
+**C. Sources without `observe`.** Layers 0 and 1 only, with an application that
+names its own topics and marks them by hand. Built first and then withdrawn, for
+the reason under layer 0: it carries the drift risk 0002 section 1 named, and it
+covered nothing a small source does not cover better.
 
 **D. Track reads without a protocol.** Intercept `deref` or instrument the
 storage layer to derive the read set from ordinary code. Convex does the
@@ -302,9 +359,9 @@ Applications using `:watch` and nothing else behave exactly as they do today.
 
 ## Build order
 
-1. Layer 0. Index, `invalidate!`, topic set in `coalesced`, `:topics` on the
-   handler spec, `:watch` as sugar for `::buzz/all`. In process, no protocol.
-   This is the whole win for a single node.
+1. Layer 0. Index, marking, topic set in `coalesced`, `:watch` marking the
+   broadcast topic. In process, no protocol. This is the whole win for a single
+   node.
 2. Layer 1. The `Source` protocol, the refcounted handle registry, and
    `atom-source` as the first implementation, which reduces `:watch` to a
    special case of it.
@@ -319,8 +376,9 @@ Redis is a source like any other and does not need its own step.
 
 ## References
 
-- `broadcast-patch!`, `coalesced`, `open-stream`, `handler` in `src/buzz/impl/page.clj`
-- `split-body` in `src/buzz/core.clj`, where the read set binding goes
+- `src/buzz/source.clj`, the protocol an integration implements
+- `src/buzz/impl/hub.clj`, the topic index, the subscription registry and `observe`
+- `render-session!`, `broadcast-patch!`, `coalesced`, `handler` in `src/buzz/impl/page.clj`
 - [0001](0001-render-scheduling.md) for the measurements and for option C
 - [0002](0002-work-after-the-scheduler.md) sections 1, 2, 6 and 7
 - [0004](0004-the-request-is-the-only-ambient-thing.md) for the registry per handler this indexes
