@@ -15,7 +15,11 @@ older value over a newer one, a delayed release could close a subscription
 taken since, closing a handle could close a newer one for the same key, and
 concurrent atom callbacks could finish out of order and leave the older value
 on top. The seven contract rules are on `buzz.source/Source` and tested against
-two implementations. Still
+two implementations.
+[0008](0008-a-render-lane-per-connection.md) later replaced the shared render
+scheduler with a lane per connection and deleted the version machinery: the
+hazards section below explains the window the versions guarded, which a lane
+closes by construction. Still
 open: the per topic
 counters, indexing `atom-source` by the first key of a path, and per slot
 skipping, which is [0002](0002-work-after-the-scheduler.md) section 1.
