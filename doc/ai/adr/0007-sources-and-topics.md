@@ -173,6 +173,17 @@ its last closes it after a grace period.
 | Redis | channel name | cached result, notified from pub sub |
 | HTTP API | endpoint | cached result, notified from a poller or a webhook |
 
+A callback already running when `-unsubscribe` returns may still call `notify`,
+and closing that window would mean waiting for callbacks that can themselves
+render, from the thread that schedules releases. Nothing it does is wrong. The
+version it raises belongs to a released subscription, and `stale?` treats a
+missing entry as stale rather than reading it. The mark that follows is
+dropped when nothing holds the topic, since `holds-any?` is false. The cost is
+therefore an invalidation rather than a render: if a replacement subscription
+has been taken and several connections hold that topic, across any handler,
+they all render, and all of them read the current handle. Redundant, bounded,
+and never a wrong value.
+
 One handle per `[source k]` per process, shared by every connection holding that
 topic. Alice with three tabs has one subscription and one materialised value.
 That is a piece of [0002](0002-work-after-the-scheduler.md) section 2 falling

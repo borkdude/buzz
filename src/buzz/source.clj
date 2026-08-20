@@ -26,11 +26,7 @@
      version and marks a topic inside `notify`, and the render that follows
      reads the handle.
   3. After `-unsubscribe` returns, a later change does not start a new call to
-     `notify`. A callback already in flight may finish. Closing that window
-     would mean waiting for callbacks that can render, from the thread that
-     schedules releases, and a late `notify` costs at most one render: it
-     raises a version nothing can reach any more, and marking a topic no
-     connection holds does nothing.
+     `notify`. A callback already in flight may finish.
   4. `-unsubscribe` closes only the handle it is given. Two subscriptions to
      one key overlap while an old one is being released, so a source that keys
      its own bookkeeping by `k` has one of them close the other. Key it by the
