@@ -1244,7 +1244,7 @@
         (is (= [2] @seen))
         (is (= 2 @h)))
 
-      (testing "nothing is called after unsubscribe"
+      (testing "a change after unsubscribe does not notify"
         (source/-unsubscribe source k h)
         (write! 3)
         (is (= [2] @seen))))
