@@ -7,7 +7,12 @@ with two sources: `atom-source` in core and a Datalevin source keyed by a
 datalog query in `examples/datalevin`, which derives its notifications from
 the transaction report. Layer 0 is internal, so the public API is `observe`,
 `atom-source` and the `Source` protocol. `:watch` is gone, so a slot reads
-server state through a source or not at all. Still open: the per topic
+server state through a source or not at all. The subscription lifecycle was
+reviewed and three leaks and races were fixed: an untracked read left a
+subscription nothing would release, `atom-source` read before it subscribed,
+and a delayed release could close a subscription taken since. The five contract
+rules are on `buzz.source/Source` and tested against two implementations. Still
+open: the per topic
 counters, indexing `atom-source` by the first key of a path, and per slot
 skipping, which is [0002](0002-work-after-the-scheduler.md) section 1.
 

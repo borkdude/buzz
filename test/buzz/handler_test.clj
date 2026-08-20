@@ -3,6 +3,7 @@
             [buzz.core :as handler :refer [defpart defui local-state observe reply request
                                            server server!]]
             [buzz.impl.hub :as hub]
+            [buzz.source :as source]
             [buzz.stream :as stream]
             [cheshire.core :as json]
             [clojure.string :as str]
@@ -1216,3 +1217,129 @@
       (testing "and then a tracked write carries them along, which is what hides the bug"
         (swap! ways update :future inc)
         (is (= ["patch" "reader-ways" [2 [1] 1 1]] (next-event rdr)))))))
+
+;; ---------------------------------------------------------------------------
+;; The Source contract
+;;
+;; Every source has to hold these, or the machinery above cannot rely on it.
+;; Rule one, that the subscription is in place before the first value is read,
+;; is a matter of construction: there is no way to force a write into the gap
+;; from outside, so it is enforced by reading the implementation. The rest are
+;; here.
+
+(defn- check-source
+  "Runs the contract against `source`. `write!` puts a value at `k`."
+  [label source k write!]
+  (testing label
+    (write! 1)
+    (let [handle (atom nil)
+          seen   (atom [])
+          h      (source/-subscribe source k (fn [] (swap! seen conj @@handle)))]
+      (reset! handle h)
+      (testing "the handle holds the current value once subscribed"
+        (is (= 1 @h)))
+
+      (testing "the handle holds the new value before notify is called"
+        (write! 2)
+        (is (= [2] @seen))
+        (is (= 2 @h)))
+
+      (testing "nothing is called after unsubscribe"
+        (source/-unsubscribe source k h)
+        (write! 3)
+        (is (= [2] @seen))))))
+
+;; A source with no store behind it, so the contract is run against something
+;; that is not an atom.
+(defonce ^:private pushed (atom {}))
+(defonce ^:private pushes (atom {}))
+
+(defrecord PushSource []
+  source/Source
+  (-subscribe [_ k notify]
+    (let [cache (atom ::none)]
+      (swap! pushes assoc k {:cache cache :notify notify})
+      (reset! cache (get @pushed k))
+      cache))
+  (-unsubscribe [_ k _]
+    (swap! pushes dissoc k)))
+
+(defn- push! [k v]
+  (swap! pushed assoc k v)
+  (when-let [{:keys [cache notify]} (get @pushes k)]
+    (reset! cache v)
+    (notify)))
+
+(deftest sources-hold-the-contract
+  (let [a (atom {})]
+    (check-source "atom-source" (handler/atom-source a) [:k]
+                  #(swap! a assoc :k %)))
+  (reset! pushed {})
+  (reset! pushes {})
+  (check-source "a source with no store" (->PushSource) :k #(push! :k %)))
+
+;; ---------------------------------------------------------------------------
+;; Subscription lifecycle
+
+(defonce ^:private lease (atom {:x 0}))
+(def ^:private lease-source (handler/atom-source lease))
+
+(defn- lease-subs []
+  (into #{} (comp (filter #(= lease-source (:source %))) (map :k))
+        (hub/subscriptions)))
+
+(defmacro ^:private with-short-grace [& body]
+  `(let [was# @hub/release-grace-ms]
+     (reset! hub/release-grace-ms 20)
+     (try ~@body (finally (reset! hub/release-grace-ms was#)))))
+
+(deftest a-read-outside-a-render-does-not-leak-a-subscription
+  (with-short-grace
+    (testing "a router or an rpc handler reads a key nothing will ever hold"
+      (dotimes [i 20] (observe lease-source [(str "tok-" i)]))
+      (is (= 20 (count (lease-subs))))
+      (is (until 3000 #(empty? (lease-subs)))))))
+
+(defui lease-page []
+  [:p (server (observe lease-source [:x]))])
+
+(deftest a-page-request-without-a-stream-does-not-leak-a-subscription
+  (with-short-grace
+    (let [ui (handler/handler {:title "lease" :mounts [{:el "app" :ui #'lease-page}]})]
+      (ui {:uri "/" :headers {}})
+      (is (until 3000 #(empty? (lease-subs)))))))
+
+(deftest a-delayed-release-does-not-close-a-subscription-taken-since
+  (with-short-grace
+    (let [t (hub/->SourceTopic lease-source [:x])]
+      (observe lease-source [:x])       ; takes it and schedules a release
+      (Thread/sleep 5)
+      (hub/sub-for t)                   ; takes it again, before that release runs
+      (Thread/sleep 60)                 ; the first release has now had its turn
+      (testing "the release was scheduled for a generation that is no longer current"
+        (is (contains? (hub/subscriptions) t)))
+      (testing "so the source still notifies the reader that took it since"
+        (let [version (:version (hub/sub-for t))
+              before  @version]
+          (swap! lease update :x inc)
+          (is (< before @version))))
+      (observe lease-source [:x])       ; schedules one for the current generation
+      (is (until 3000 #(empty? (lease-subs)))))))
+
+(deftest keys-of-different-shapes-do-not-fight-over-one-watch
+  (with-short-grace
+    (let [scalar (hub/->SourceTopic lease-source :x)
+          vector (hub/->SourceTopic lease-source [:x])]
+      (observe lease-source :x)
+      (observe lease-source [:x])
+      ;; hold the version atoms, so the assertions do not take the
+      ;; subscriptions again and keep them alive past their release
+      (let [v1 (:version (hub/sub-for scalar))
+            v2 (:version (hub/sub-for vector))]
+        (swap! lease update :x inc)
+        (testing "both topics saw the write"
+          (is (= 1 @v1))
+          (is (= 1 @v2))))
+      (observe lease-source :x)
+      (observe lease-source [:x])
+      (is (until 3000 #(empty? (lease-subs)))))))

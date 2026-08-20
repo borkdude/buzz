@@ -40,18 +40,26 @@
 ;; where they are sent.
 (defrecord AtomSource [a]
   Source
+  ;; The watch goes on before the first value is read. A write landing between
+  ;; the two fires the watch and our read then sees the same value, so the
+  ;; worst case is one notification too many. Reading first would lose it.
+  ;;
+  ;; The watch is keyed by `k` and not by the path it normalizes to, or
+  ;; `(observe src :x)` and `(observe src [:x])` would be two topics fighting
+  ;; over one watch, and the loser would never be notified again.
   (-subscribe [_ k notify]
     (let [path  (path-of k)
-          cache (atom (get-in @a path))]
-      (add-watch a [::observe path]
+          cache (atom ::unread)]
+      (add-watch a [::observe k]
                  (fn [_ _ _ new]
                    (let [v (get-in new path)]
                      (when-not (identical? v @cache)
                        (reset! cache v)
                        (notify)))))
+      (reset! cache (get-in @a path))
       cache))
   (-unsubscribe [_ k _]
-    (remove-watch a [::observe (path-of k)])))
+    (remove-watch a [::observe k])))
 
 (defn atom-source
   "A source over `a`, keyed by a path into it. `(observe src [:todos \"alice\"])`
@@ -141,24 +149,49 @@
      :handle  (-subscribe (:source t) (:k t)
                           (fn [] (swap! version inc) (invalidate! t)))}))
 
+;; Every acquisition raises the entry's generation. A release is scheduled for
+;; the generation that was current when the last holder let go, so an
+;; acquisition in the meantime makes the release a no-op. Without it a render
+;; can take the handle a moment before a delayed release closes it, and end up
+;; holding a topic whose source is gone.
+(defn- acquire [m t]
+  (if-let [e (get m t)]
+    (assoc m t (update e :gen inc))
+    (assoc m t {:gen 0 :sub (delay (new-sub t))})))
+
 (defn sub-for
   "The shared subscription for `t`, subscribing on first use."
   [t]
-  (let [pending (delay (new-sub t))]
-    @(get (swap! open-subs update t #(or % pending)) t)))
+  @(:sub (get (swap! open-subs acquire t) t)))
+
+(defn- generation [t]
+  (:gen (get @open-subs t)))
 
 (defn- held-anywhere? [t]
   (boolean (some #(seq (get (:by-topic @(:index %)) t)) @handlers)))
 
-(defn- release! [t]
-  (when-not (held-anywhere? t)
-    (let [[old _] (swap-vals! open-subs dissoc t)]
-      (when-let [sub (get old t)]
-        (-unsubscribe (:source t) (:k t) (:handle @sub))))))
+(defn- release! [t gen]
+  (let [[old _] (swap-vals! open-subs
+                            (fn [m]
+                              (if (and (= gen (:gen (get m t)))
+                                       (not (held-anywhere? t)))
+                                (dissoc m t)
+                                m)))]
+    (when-let [e (get old t)]
+      (when (and (= gen (:gen e)) (not (contains? @open-subs t)))
+        (-unsubscribe (:source t) (:k t) (:handle @(:sub e)))))))
 
 (defn- maybe-release! [topics]
   (doseq [t topics :when (source-topic? t)]
-    (schedule! @release-grace-ms #(release! t))))
+    (when-let [gen (generation t)]
+      (schedule! @release-grace-ms #(release! t gen)))))
+
+(defn release-unheld!
+  "Schedules a release for topics nothing is holding. `observe` uses it for a
+  read outside a render, which subscribes like any other read but leaves no
+  connection behind to let go."
+  [topics]
+  (maybe-release! topics))
 
 (defn set-topics!
   "Replaces the topics `session` holds. Releases source subscriptions no
@@ -192,15 +225,23 @@
         {:keys [handle version]} (sub-for t)]
     ;; the version first: a change between the two reads then reports a stale
     ;; read, which costs one render, rather than a current one, which loses it
-    (when *reads* (swap! *reads* assoc t @version))
+    (if *reads*
+      (swap! *reads* assoc t @version)
+      ;; A read from a router, an rpc handler or the first paint subscribes
+      ;; like any other, and no connection will ever drop it. Schedule the
+      ;; release here, or every distinct key ever read leaks a subscription.
+      (release-unheld! [t]))
     @handle))
 
 (defn stale?
-  "Whether any of `reads` has changed since it was read."
+  "Whether any of `reads` has changed since it was read. A subscription that is
+  gone counts as stale: the read cannot be trusted and the topic has to be
+  taken again."
   [reads]
   (boolean (some (fn [[t v]]
-                   (when-let [sub (get @open-subs t)]
-                     (not= v @(:version @sub))))
+                   (if-let [e (get @open-subs t)]
+                     (not= v @(:version @(:sub e)))
+                     true))
                  reads)))
 
 (defmacro with-reads
