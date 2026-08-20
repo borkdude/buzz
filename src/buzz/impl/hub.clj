@@ -40,26 +40,28 @@
 ;; where they are sent.
 (defrecord AtomSource [a]
   Source
-  ;; The watch goes on before the first value is read. A write landing between
-  ;; the two fires the watch and our read then sees the same value, so the
-  ;; worst case is one notification too many. Reading first would lose it.
+  ;; The watch goes on before the first value is read, and the first value is
+  ;; stored with a compare-and-set. Reading and storing are two steps, so a
+  ;; write between them fires the watch with the newer value and a plain
+  ;; `reset!` would put the older one back on top of it. The version would then
+  ;; say current while the handle was stale, which no later check can repair.
   ;;
-  ;; The watch is keyed by `k` and not by the path it normalizes to, or
-  ;; `(observe src :x)` and `(observe src [:x])` would be two topics fighting
-  ;; over one watch, and the loser would never be notified again.
+  ;; The watch is keyed by the handle rather than by `k`. Two subscriptions to
+  ;; one key can overlap while an old one is being released, and a watch keyed
+  ;; by `k` would let either one remove the other's callback.
   (-subscribe [_ k notify]
     (let [path  (path-of k)
           cache (atom ::unread)]
-      (add-watch a [::observe k]
+      (add-watch a cache
                  (fn [_ _ _ new]
                    (let [v (get-in new path)]
                      (when-not (identical? v @cache)
                        (reset! cache v)
                        (notify)))))
-      (reset! cache (get-in @a path))
+      (compare-and-set! cache ::unread (get-in @a path))
       cache))
-  (-unsubscribe [_ k _]
-    (remove-watch a [::observe k])))
+  (-unsubscribe [_ _ handle]
+    (remove-watch a handle)))
 
 (defn atom-source
   "A source over `a`, keyed by a path into it. `(observe src [:todos \"alice\"])`
@@ -149,6 +151,12 @@
      :handle  (-subscribe (:source t) (:k t)
                           (fn [] (swap! version inc) (invalidate! t)))}))
 
+;; Creating and closing a subscription for one topic are one transition, so a
+;; source that keys its own bookkeeping by `k` cannot have an old close remove
+;; a new callback. Only those two paths take it, so an `observe` of a key that
+;; is already subscribed never waits.
+(defonce ^:private lifecycle (Object.))
+
 ;; Every acquisition raises the entry's generation. A release is scheduled for
 ;; the generation that was current when the last holder let go, so an
 ;; acquisition in the meantime makes the release a no-op. Without it a render
@@ -162,7 +170,11 @@
 (defn sub-for
   "The shared subscription for `t`, subscribing on first use."
   [t]
-  @(:sub (get (swap! open-subs acquire t) t)))
+  (let [[old new] (swap-vals! open-subs acquire t)
+        entry (get new t)]
+    (if (contains? old t)
+      @(:sub entry)
+      (locking lifecycle @(:sub entry)))))
 
 (defn- generation [t]
   (:gen (get @open-subs t)))
@@ -171,15 +183,17 @@
   (boolean (some #(seq (get (:by-topic @(:index %)) t)) @handlers)))
 
 (defn- release! [t gen]
-  (let [[old _] (swap-vals! open-subs
-                            (fn [m]
-                              (if (and (= gen (:gen (get m t)))
-                                       (not (held-anywhere? t)))
-                                (dissoc m t)
-                                m)))]
-    (when-let [e (get old t)]
-      (when (and (= gen (:gen e)) (not (contains? @open-subs t)))
-        (-unsubscribe (:source t) (:k t) (:handle @(:sub e)))))))
+  (locking lifecycle
+    (let [[old _] (swap-vals! open-subs
+                              (fn [m]
+                                (if (and (= gen (:gen (get m t)))
+                                         (not (held-anywhere? t)))
+                                  (dissoc m t)
+                                  m)))
+          entry (get old t)]
+      ;; only ever close the handle this release was scheduled for
+      (when (and entry (= gen (:gen entry)))
+        (-unsubscribe (:source t) (:k t) (:handle @(:sub entry)))))))
 
 (defn- maybe-release! [topics]
   (doseq [t topics :when (source-topic? t)]

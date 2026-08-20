@@ -13,22 +13,25 @@
       (-subscribe [_ path notify] (foreign-proxy pstate path {:callback notify}))
       (-unsubscribe [_ _ proxy] (close! proxy)))
 
-  Five rules. `sources-hold-the-contract` in `test/buzz/handler_test.clj` runs
-  the last four against `atom-source` and against a source with no store behind
+  Six rules. `sources-hold-the-contract` in `test/buzz/handler_test.clj` runs
+  the last five against `atom-source` and against a source with no store behind
   it. The first is a matter of construction: there is no way to force a write
   into the gap from outside, so it is enforced by reading the implementation.
 
-  1. The subscription is in place before the first value is read. A source that
-     reads first loses a change landing in between, and the connection stays on
-     a stale value with nothing to notice it by.
+  1. The subscription is in place before the first value is read, and the first
+     value is stored so that it cannot land on top of a newer one the
+     subscription has already delivered. Reading and storing are two steps.
   2. The handle holds the new value before `notify` is called. Buzz raises a
      version and marks a topic inside `notify`, and the render that follows
      reads the handle.
   3. Nothing calls `notify` after `-unsubscribe` returns.
-  4. Key equality is the source's business. Two keys that are `=` are one
-     subscription. Two keys that are not must not share whatever the source
-     keys its own bookkeeping on, or one of them stops being notified.
-  5. Notifying more often than necessary is allowed. It costs a render and no
+  4. `-unsubscribe` closes only the handle it is given. Two subscriptions to
+     one key overlap while an old one is being released, so a source that keys
+     its own bookkeeping by `k` has one of them close the other. Key it by the
+     handle.
+  5. Key equality is the source's business. Two keys that are `=` are one
+     subscription.
+  6. Notifying more often than necessary is allowed. It costs a render and no
      frame, since unchanged values are compared away before anything is sent.")
 
 (defprotocol Source

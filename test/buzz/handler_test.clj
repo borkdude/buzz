@@ -1247,28 +1247,40 @@
       (testing "nothing is called after unsubscribe"
         (source/-unsubscribe source k h)
         (write! 3)
-        (is (= [2] @seen))))))
+        (is (= [2] @seen))))
+
+    (testing "closing one handle leaves another for the same key alone"
+      (let [first-h (source/-subscribe source k (fn []))
+            seen    (atom 0)
+            second-h (source/-subscribe source k (fn [] (swap! seen inc)))]
+        (source/-unsubscribe source k first-h)
+        (write! 5)
+        (is (= 1 @seen))
+        (is (= 5 @second-h))
+        (source/-unsubscribe source k second-h)))))
 
 ;; A source with no store behind it, so the contract is run against something
 ;; that is not an atom.
 (defonce ^:private pushed (atom {}))
 (defonce ^:private pushes (atom {}))
 
+;; Keyed by handle rather than by k, and registered before the first read, so
+;; it holds the same rules the contract asks of any other source.
 (defrecord PushSource []
   source/Source
   (-subscribe [_ k notify]
     (let [cache (atom ::none)]
-      (swap! pushes assoc k {:cache cache :notify notify})
-      (reset! cache (get @pushed k))
+      (swap! pushes assoc cache {:k k :notify notify})
+      (compare-and-set! cache ::none (get @pushed k))
       cache))
-  (-unsubscribe [_ k _]
-    (swap! pushes dissoc k)))
+  (-unsubscribe [_ _ handle]
+    (swap! pushes dissoc handle)))
 
 (defn- push! [k v]
   (swap! pushed assoc k v)
-  (when-let [{:keys [cache notify]} (get @pushes k)]
+  (doseq [[cache sub] @pushes :when (= k (:k sub))]
     (reset! cache v)
-    (notify)))
+    ((:notify sub))))
 
 (deftest sources-hold-the-contract
   (let [a (atom {})]
@@ -1288,13 +1300,16 @@
   (into #{} (comp (filter #(= lease-source (:source %))) (map :k))
         (hub/subscriptions)))
 
-(defmacro ^:private with-short-grace [& body]
+;; The grace period has to be long enough that a loaded machine cannot release
+;; a subscription before the assertion that counts it, and short enough that
+;; the polls afterwards do not drag.
+(defmacro ^:private with-grace [ms & body]
   `(let [was# @hub/release-grace-ms]
-     (reset! hub/release-grace-ms 20)
+     (reset! hub/release-grace-ms ~ms)
      (try ~@body (finally (reset! hub/release-grace-ms was#)))))
 
 (deftest a-read-outside-a-render-does-not-leak-a-subscription
-  (with-short-grace
+  (with-grace 500
     (testing "a router or an rpc handler reads a key nothing will ever hold"
       (dotimes [i 20] (observe lease-source [(str "tok-" i)]))
       (is (= 20 (count (lease-subs))))
@@ -1304,18 +1319,18 @@
   [:p (server (observe lease-source [:x]))])
 
 (deftest a-page-request-without-a-stream-does-not-leak-a-subscription
-  (with-short-grace
+  (with-grace 200
     (let [ui (handler/handler {:title "lease" :mounts [{:el "app" :ui #'lease-page}]})]
       (ui {:uri "/" :headers {}})
       (is (until 3000 #(empty? (lease-subs)))))))
 
 (deftest a-delayed-release-does-not-close-a-subscription-taken-since
-  (with-short-grace
+  (with-grace 50
     (let [t (hub/->SourceTopic lease-source [:x])]
       (observe lease-source [:x])       ; takes it and schedules a release
-      (Thread/sleep 5)
+      (Thread/sleep 10)
       (hub/sub-for t)                   ; takes it again, before that release runs
-      (Thread/sleep 60)                 ; the first release has now had its turn
+      (Thread/sleep 200)                ; the first release has now had its turn
       (testing "the release was scheduled for a generation that is no longer current"
         (is (contains? (hub/subscriptions) t)))
       (testing "so the source still notifies the reader that took it since"
@@ -1327,7 +1342,7 @@
       (is (until 3000 #(empty? (lease-subs)))))))
 
 (deftest keys-of-different-shapes-do-not-fight-over-one-watch
-  (with-short-grace
+  (with-grace 500
     (let [scalar (hub/->SourceTopic lease-source :x)
           vector (hub/->SourceTopic lease-source [:x])]
       (observe lease-source :x)
