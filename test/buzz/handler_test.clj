@@ -1075,6 +1075,12 @@
         bob   (open-events port {"X-User" "bob"})]
     (next-event (:rdr alice))
     (next-event (:rdr bob))
+    ;; a mount whose read moved under it runs a second pass, and that pass
+    ;; lands on the adapter thread just after the mount frame. Let both
+    ;; streams go quiet before counting slot runs, or the count starts while
+    ;; a mount is still finishing.
+    (silent? (:sock alice) (:rdr alice) 200)
+    (silent? (:sock bob) (:rdr bob) 200)
     (reset! slot-runs {})
     (try
       (f {:ui ui :port port :alice alice :bob bob})
