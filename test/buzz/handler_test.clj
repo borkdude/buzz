@@ -804,6 +804,13 @@
   {:title "faked"
    :mounts [{:el "app" :ui #'faked}]})
 
+(defn- mounted?
+  "Whether a fake stream has received its mount frame. The lane writes the
+  session and mount frames after `on-open` returns, so a fake adapter awaits
+  them where a socket test blocks on the read."
+  [frames]
+  (str/includes? (str (last @frames)) "\"mount\""))
+
 (deftest the-stream-is-served-through-an-adapter
   (reset! shared 0)
   (let [frames  (atom [])
@@ -825,7 +832,7 @@
     (@opened ch)
 
     (testing "the session and the mount arrive as frames"
-      (is (= 2 (count @frames)))
+      (is (until 2000 #(= 2 (count @frames))))
       (is (str/starts-with? (first @frames) "data: [\"session\""))
       (is (str/includes? (second @frames) "\"mount\"")))
 
@@ -894,6 +901,7 @@
                  (send! [_ s] (swap! frames conj s) true)
                  (close! [_] nil))]
     (@opened ch)
+    (is (until 2000 #(mounted? frames)))
 
     (testing "a lone write patches promptly"
       (swap! pulse inc)
@@ -927,6 +935,7 @@
                  (send! [_ s] (swap! frames conj s) true)
                  (close! [_] nil))]
     (@opened ch)
+    (is (until 2000 #(mounted? frames)))
     (let [threads 8
           writes  500
           workers (mapv (fn [_] (future (dotimes [_ writes] (swap! pulse inc))))
@@ -965,6 +974,7 @@
                  (send! [_ s] (swap! frames conj s) true)
                  (close! [_] nil))]
     (@opened ch)
+    (is (until 2000 #(mounted? frames)))
     (testing "a write whose render throws sends nothing"
       (let [n (count @frames)]
         (reset! flaky -1)
@@ -1006,6 +1016,7 @@
                             (send! [_ s] (swap! frames conj s) true)
                             (close! [_] nil))]
                    ((last @opens) ch)
+                   (is (until 2000 #(mounted? frames)))
                    {:frames frames
                     :session (second (json/parse-string (subs (first @frames) 6)))}))
         one    (open!)

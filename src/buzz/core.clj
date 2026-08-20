@@ -519,8 +519,8 @@
 (def handler
   "Returns a Ring handler for `spec`. See `buzz.stream` for `:adapter`.
 
-  Rendering is asynchronous: a write returns at once and rendering happens on
-  a scheduler thread, at most once per `:render-interval-ms` (default 20).
+  Rendering is asynchronous: a write returns at once and each connection
+  renders on its own lane, at most once per `:render-interval-ms` (default 20).
   The first write renders immediately, writes inside the window collapse into
   one render that carries the latest state, so patches are sampled state, not
   every state. `:render-interval-ms 0` renders synchronously on the writing

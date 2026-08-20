@@ -103,19 +103,96 @@
       (when (and (< (inc n) max-passes) (hub/stale? reads))
         (recur (inc n) patch!)))))
 
-(defn- open-stream [{:keys [registry] :as entry} session ch req mounts token]
-  ;; Register the session before sending its ID.
-  (let [mounted (mapv #(build % req) mounts)
-        conn    {:ch ch :mounted mounted :owner token :req req}]
-    (swap! registry assoc session conn)
-    (event! ch ["session" session])
-    (render-session! entry session conn
-                     (fn [ch {:keys [el instance sent] :as m}]
-                       (let [vals (slot-vals m)]
-                         (reset! sent vals)
-                         (event! ch ["mount" (:id instance) el vals]))))))
+;; Every frame of a connection is written by its lane: a virtual thread that
+;; parks on a semaphore, drains its job queue and dirty set, renders, sleeps
+;; the coalescing interval, and parks again. One writer per stream, so mounts,
+;; patches and reloads cannot interleave. Renders for different connections
+;; run in parallel. Idle costs nothing: no marks, no wake-ups.
 
-(defn- events [{:keys [registry index] :as entry} adapter req mounts on-close]
+(def ^:private ^:dynamic *in-lane*
+  ;; Bound on lane threads. A mark made from a lane never blocks on another
+  ;; lane, which is what keeps a slot that writes state free of deadlock.
+  false)
+
+(defn- new-lane []
+  {:sem (java.util.concurrent.Semaphore. 0)
+   :jobs (atom []) :dirty (atom #{}) :waits (atom []) :open (atom true)})
+
+(defn- signal! [lane]
+  (.release ^java.util.concurrent.Semaphore (:sem lane)))
+
+(defn- lane-loop [{:keys [registry] :as entry} session lane ^long interval]
+  (try
+    (loop []
+      (.acquire ^java.util.concurrent.Semaphore (:sem lane))
+      (.drainPermits ^java.util.concurrent.Semaphore (:sem lane))
+      ;; waits first: a writer adds its topics before its wait, so a wait in
+      ;; this batch has its topics in the dirty drain that follows
+      (let [[waits _]  (reset-vals! (:waits lane) [])
+            [jobs _]   (reset-vals! (:jobs lane) [])
+            [topics _] (reset-vals! (:dirty lane) #{})]
+        (doseq [job jobs]
+          (try (job)
+               (catch Throwable e
+                 (println "buzz: render failed for" session "-" (ex-message e)))))
+        (when (seq topics)
+          (when-let [conn (get @registry session)]
+            (render-session! entry session conn patch!)))
+        ;; after the render, failed or not, or an interval-0 writer hangs
+        (run! #(deliver % :done) waits))
+      (when (and @(:open lane) (pos? interval))
+        (Thread/sleep interval))
+      (when @(:open lane) (recur)))
+    (finally
+      (run! #(deliver % :done) @(:waits lane)))))
+
+(defn- start-lane! [entry session interval first-job]
+  (let [lane (new-lane)]
+    (Thread/startVirtualThread
+     (fn [] (binding [*in-lane* true] (lane-loop entry session lane interval))))
+    (swap! (:jobs lane) conj first-job)
+    (signal! lane)
+    lane))
+
+(defn- close-lane! [lane]
+  (reset! (:open lane) false)
+  (signal! lane))
+
+;; Resolves topics to the connections holding them and wakes each one's lane.
+;; The write pays for an index lookup and a semaphore release per affected
+;; connection, never for a render. At interval 0 a writer that is not a lane
+;; blocks until every lane it marked has rendered, so a returning `swap!`
+;; means the patches are written, which is what synchronous mode promises.
+(defn- mark! [{:keys [registry index]} ^long interval topics]
+  (let [conns @registry
+        lanes (into [] (keep #(:lane (get conns %)))
+                    (hub/sessions-for index topics))]
+    (doseq [lane lanes]
+      (swap! (:dirty lane) into topics)
+      (signal! lane))
+    (when (and (zero? interval) (not *in-lane*))
+      (doseq [lane lanes :when @(:open lane)]
+        (let [p (promise)]
+          (swap! (:waits lane) conj p)
+          (signal! lane)
+          @p)))))
+
+(defn- mount! [ch {:keys [el instance sent] :as m}]
+  (let [vals (slot-vals m)]
+    (reset! sent vals)
+    (event! ch ["mount" (:id instance) el vals])))
+
+(defn- open-stream [{:keys [registry] :as entry} session ch req mounts token interval]
+  ;; Register the session before its lane sends the ID.
+  (let [mounted (mapv #(build % req) mounts)
+        conn    {:ch ch :mounted mounted :owner token :req req}
+        lane    (start-lane! entry session interval
+                             (fn []
+                               (event! ch ["session" session])
+                               (render-session! entry session conn mount!)))]
+    (swap! registry assoc session (assoc conn :lane lane))))
+
+(defn- events [{:keys [registry index] :as entry} adapter req mounts on-close interval]
   (let [session (str (random-uuid))
         held    (browser-token req)
         token   (or held (str (random-uuid)))
@@ -127,8 +204,10 @@
                                 "Cache-Control" "no-cache"
                                 "X-Accel-Buffering" "no"}
                          (nil? held) (merge (token-headers token)))
-              :on-open  (fn [ch] (open-stream entry session ch req mounts token))
+              :on-open  (fn [ch] (open-stream entry session ch req mounts token interval))
               :on-close (fn []
+                          (when-let [lane (:lane (get @registry session))]
+                            (close-lane! lane))
                           (swap! registry dissoc session)
                           (hub/drop-session! index session)
                           (when on-close (on-close req)))})))
@@ -165,63 +244,24 @@
           (json-response 500 {:error "handler failed"})))
       (json-response 404 {:error "no such handler"}))))
 
-;; Patch only the connections of this handler that hold one of the invalidated
-;; topics. Idle connections are never looked at. A slot can be per-connection,
-;; so one connection's render may throw while the others are fine: the failure
-;; is contained to that connection's frame. Its `sent` state is untouched, so
-;; the next healthy render sends the latest state.
-(defn- broadcast-patch! [{:keys [registry index] :as entry}]
-  (fn [topics]
-    (let [conns @registry]
-      (doseq [session (hub/sessions-for index topics)
-              :let [conn (get conns session)]
-              :when conn]
-        (render-session! entry session conn patch!)))))
-
-;; Runs `render` at most once per `interval-ms`. The first invalidation renders
-;; immediately, ones landing inside the window join the dirty set and the
-;; follow-up renders them, so the last state always goes out and intermediate
-;; states collapse. The set is swapped out rather than cleared after rendering,
-;; so a topic arriving mid render is carried to the next tick instead of being
-;; lost. Rendering happens on the scheduler thread, so a write returns without
-;; paying for any connection's render. Idle costs nothing: no writes, no
-;; wake-ups.
-(defn- coalesced [render ^long interval-ms]
-  (let [dirty (atom #{})
-        active (atom false)
-        tick (fn tick []
-               (let [[topics _] (reset-vals! dirty #{})]
-                 (try (render topics)
-                      (catch Throwable e
-                        (println "buzz: render failed -" (ex-message e)))))
-               (hub/schedule!
-                interval-ms
-                (fn follow-up []
-                  (if (seq @dirty)
-                    (tick)
-                    (do (reset! active false)
-                        ;; a write can land between the check and the flag
-                        ;; flip; re-arm rather than lose it
-                        (when (and (seq @dirty)
-                                   (compare-and-set! active false true))
-                          (tick)))))))]
-    (fn [topics]
-      (swap! dirty into topics)
-      (when (compare-and-set! active false true)
-        (.submit ^java.util.concurrent.ExecutorService @hub/scheduler ^Runnable tick)))))
-
-;; Rebuild instances and reload open pages after definitions change.
+;; Rebuild instances and reload open pages after definitions change. The
+;; frames go out through each connection's lane, so a reload cannot interleave
+;; with a patch.
 (defn- reload-all! [_ _ _ rev]
   (doseq [{:keys [registry] :as entry} (hub/entries)
           [session conn] @registry]
     (let [rebuilt (mapv (fn [m] (assoc m :instance ((::instance (:spec m))))) (:mounted conn))]
       (swap! registry assoc-in [session :mounted] rebuilt)
-      ;; the slots may have changed shape, so this one always goes out
-      (render-session! entry session (assoc conn :mounted rebuilt)
-                       (fn [ch {:keys [instance sent] :as m}]
-                         (let [vals (slot-vals m)]
-                           (reset! sent vals)
-                           (event! ch ["reload" rev (:id instance) vals])))))))
+      (when-let [lane (:lane conn)]
+        (swap! (:jobs lane) conj
+               (fn []
+                 ;; the slots may have changed shape, so this one always goes out
+                 (render-session! entry session (get @registry session)
+                                  (fn [ch {:keys [instance sent] :as m}]
+                                    (let [vals (slot-vals m)]
+                                      (reset! sent vals)
+                                      (event! ch ["reload" rev (:id instance) vals]))))))
+        (signal! lane)))))
 
 ;; Keep idle EventSource connections open through proxies.
 (defonce ^:private heartbeat
@@ -348,10 +388,9 @@
         ;; render of the connections holding them. `:render-interval-ms 0`
         ;; renders synchronously on the invalidating thread instead.
         interval (or (:render-interval-ms spec) 20)
-        render   (-> (broadcast-patch! {:registry registry :index index :spec spec})
-                     (cond-> (pos? interval) (coalesced interval)))
+        base     {:registry registry :index index :spec spec}
         entry    (hub/register-handler!
-                  {:registry registry :index index :spec spec :mark! render})
+                  (assoc base :mark! (fn [topics] (mark! base interval topics))))
         mounts (mapv (fn [m] (assoc m ::instance (shared-instance (:ui m)))) mounts)
         spec   (assoc spec :mounts mounts)
         path   (or path "")
@@ -370,7 +409,7 @@
           :client     (runtime-module "client.cljs" path)
           :rpc-module (runtime-module "rpc.cljs" path)
           :components (components-module mounts path)
-          :events     (events entry adapter req mounts (:on-close spec))
+          :events     (events entry adapter req mounts (:on-close spec) interval)
           :rpc        (rpc entry req)
           nil))
       {:buzz.core/registry registry})))
