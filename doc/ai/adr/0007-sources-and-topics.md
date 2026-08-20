@@ -221,7 +221,7 @@ The handler writes the atom and says nothing else. The source notices the write,
 marks the key, and every tab and device of that user refreshes. Nobody else's
 slots run.
 
-## The three hazards
+## The hazards
 
 **Subscribe before reading.** Read first and subscribe second and a change
 landing in between is lost, leaving that connection on a stale value with
@@ -261,8 +261,31 @@ condition opens and closes the same Rama proxy on every click.
 establishes the set, so a slot that reads conditionally is only fully subscribed
 after the second render. Normal for reactive systems, worth stating.
 
-None of the three is a reason not to build this. All three are a reason to build
-layers 1 and 2 separately, with their own tests.
+**A read that leaves the render thread is not recorded.** `observe` writes into
+a dynamic binding, so whether a read counts depends on where it runs. Measured,
+not guessed:
+
+| how the slot reads the key | recorded | why |
+|---|---|---|
+| `(observe src k)` | yes | |
+| inside a `future`, awaited | yes | Clojure conveys bindings into `future` |
+| inside a lazy sequence | yes | the render realises it, when comparing and encoding |
+| on a `Thread` or executor of our own | **no** | it starts from the root bindings |
+| `@some-atom`, no source at all | **no** | nothing to record |
+
+The lazy case holds by where the work sits rather than by design. Move the
+encoding to another thread and it stops being true, which is what
+`a-lost-read-never-reaches-the-browser` in `test/buzz/handler_test.clj` is
+there to catch.
+
+The two that are not recorded fail the same way: the value is right at mount
+and never changes again. And a page hides it, because a slot that is not
+subscribed still runs whenever some other slot wakes the connection, so a
+broken value catches up at a rate that depends on what else is happening. The
+test asserts that too, since it is the reason this survives in production.
+
+None of the four is a reason not to build this. All of them are a reason to
+build layers 1 and 2 separately, with their own tests.
 
 ## Implementation sketch
 

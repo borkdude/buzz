@@ -1152,3 +1152,67 @@
         (is (= ["mount" "racer" "app" [0]] (next-event rdr))))
       (testing "the change that landed during that render still arrives"
         (is (= ["patch" "racer" [1]] (next-event rdr)))))))
+
+;; ---------------------------------------------------------------------------
+;; Which reads register
+;;
+;; `observe` records what it read in a dynamic binding, so a read that leaves
+;; the thread the render is on leaves the record behind. These four say which
+;; ways of reading are tracked today and which are not. The two that are not
+;; are silent: the value is right at mount and never changes again.
+
+(defonce ^:private ways (atom {:direct 0 :thread 0 :future 0 :lazy 0}))
+(def ^:private ways-source (handler/atom-source ways))
+
+(defui reader-ways []
+  [:div
+   [:p (server @(future (observe ways-source [:future])))]
+   [:p (server (vec (map (fn [k] (observe ways-source [k])) [:lazy])))]
+   [:p (server (let [p (promise)]
+                 (.start (Thread. ^Runnable
+                                  (fn [] (deliver p (observe ways-source [:thread])))))
+                 @p))]
+   [:p (server (:direct @ways))]])
+
+(defn- registered-keys
+  "The source keys the connections of `ui` hold."
+  [ui]
+  (let [registry (::handler/registry (meta ui))
+        index (:index (first (filter #(= registry (:registry %)) (hub/entries))))]
+    (into (sorted-set)
+          (comp (filter hub/source-topic?) (map (comp first :k)))
+          (mapcat val (:by-session @index)))))
+
+(deftest which-reads-register
+  (reset! ways {:direct 0 :thread 0 :future 0 :lazy 0})
+  (with-connection {:mounts [{:el "app" :ui #'reader-ways}] :render-interval-ms 0}
+    (fn [{:keys [rdr ui]}]
+      (is (= ["mount" "reader-ways" "app" [0 [0] 0 0]] (next-event rdr)))
+      (testing "a future conveys the binding, and a lazy seq is realised in the render"
+        (is (= #{:future :lazy} (registered-keys ui))))
+      (testing "a thread of our own starts from the root bindings, so its read is lost"
+        (is (not (contains? (registered-keys ui) :thread))))
+      (testing "a read that never touches a source registers nothing"
+        (is (not (contains? (registered-keys ui) :direct)))))))
+
+(deftest a-lost-read-never-reaches-the-browser
+  (reset! ways {:direct 0 :thread 0 :future 0 :lazy 0})
+  (with-connection {:mounts [{:el "app" :ui #'reader-ways}] :render-interval-ms 0}
+    (fn [{:keys [sock rdr]}]
+      (next-event rdr)
+
+      (testing "the tracked reads wake the connection"
+        (swap! ways update :future inc)
+        (is (= ["patch" "reader-ways" [1 [0] 0 0]] (next-event rdr)))
+        (swap! ways update :lazy inc)
+        (is (= ["patch" "reader-ways" [1 [1] 0 0]] (next-event rdr))))
+
+      (testing "the lost reads do not"
+        (swap! ways update :thread inc)
+        (is (silent? sock rdr 300))
+        (swap! ways update :direct inc)
+        (is (silent? sock rdr 300)))
+
+      (testing "and then a tracked write carries them along, which is what hides the bug"
+        (swap! ways update :future inc)
+        (is (= ["patch" "reader-ways" [2 [1] 1 1]] (next-event rdr)))))))
