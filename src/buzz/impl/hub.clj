@@ -151,15 +151,6 @@
   (set (keys @open-subs)))
 
 
-;; Every subscription carries a version that goes up before each notification.
-;; A reader records the version it read at, so it can find out afterwards
-;; whether the value moved under it.
-(defn- new-sub [t]
-  (let [version (atom 0)]
-    {:version version
-     :handle  (-subscribe (:source t) (:k t)
-                          (fn [] (swap! version inc) (invalidate! t)))}))
-
 ;; Every acquisition raises the entry's generation. A release is scheduled for
 ;; the generation that was current when the last holder let go, so an
 ;; acquisition in the meantime makes the release a no-op. Without it a render
@@ -168,7 +159,8 @@
 (defn- acquire [m t]
   (if-let [e (get m t)]
     (assoc m t (update e :gen inc))
-    (assoc m t {:gen 0 :sub (delay (new-sub t))})))
+    (assoc m t {:gen 0 :sub (delay (-subscribe (:source t) (:k t)
+                                               #(invalidate! t)))})))
 
 ;; Nothing serializes creating against closing. Rule four of the contract is
 ;; what makes that safe: `-unsubscribe` closes only the handle it is given, so
@@ -177,7 +169,7 @@
 ;; slowest one, which is the wrong price for defending against a source that
 ;; breaks a rule the suite already tests.
 (defn sub-for
-  "The shared subscription for `t`, subscribing on first use."
+  "The shared handle for `t`, subscribing on first use."
   [t]
   @(:sub (get (swap! open-subs acquire t) t)))
 
@@ -197,7 +189,7 @@
         entry (get old t)]
     ;; only ever close the handle this release was scheduled for
     (when (and entry (= gen (:gen entry)))
-      (-unsubscribe (:source t) (:k t) (:handle @(:sub entry))))))
+      (-unsubscribe (:source t) (:k t) @(:sub entry)))))
 
 (defn- maybe-release! [topics]
   (doseq [t topics :when (source-topic? t)]
@@ -227,11 +219,21 @@
 ;; ---------------------------------------------------------------------------
 ;; Read tracking
 
-(def ^:dynamic *reads*
-  "Bound to an atom while a connection's slots run. Every `observe` records the
-  topic it read and the version it read it at. The keys become what that
-  connection holds, and the versions say whether the read is still current."
+(def ^:dynamic *tracking*
+  "Bound to {:reads atom :index index :session session} while a connection's
+  slots run. `observe` registers each topic in the index before it reads, so a
+  change the read does not see arrives as a mark: `notify` follows the store
+  by contract rule 2, so a value the deref missed implies a mark made after
+  the index entry."
   nil)
+
+(defn add-topic!
+  "Adds one topic to what `session` holds."
+  [index session t]
+  (swap! index (fn [m]
+                 (-> m
+                     (update-in [:by-session session] (fnil conj #{}) t)
+                     (update-in [:by-topic t] (fnil conj #{}) session)))))
 
 (defn observe
   "Reads `k` from `source` and subscribes the current connection to it. Outside
@@ -240,32 +242,15 @@
     (server (observe todos [:todos (whoami (request))]))"
   [source k]
   (let [t (->SourceTopic source k)
-        {:keys [handle version]} (sub-for t)]
-    ;; the version first: a change between the two reads then reports a stale
-    ;; read, which costs one render, rather than a current one, which loses it
-    (if *reads*
-      (swap! *reads* assoc t @version)
+        handle (sub-for t)]
+    (if-let [{:keys [reads index session]} *tracking*]
+      ;; into the index before the deref below, or a change landing between
+      ;; the two is marked while nothing holds the topic and is dropped
+      (when-not (contains? @reads t)
+        (swap! reads conj t)
+        (add-topic! index session t))
       ;; A read from a router, an rpc handler or the first paint subscribes
       ;; like any other, and no connection will ever drop it. Schedule the
       ;; release here, or every distinct key ever read leaks a subscription.
       (release-unheld! [t]))
     @handle))
-
-(defn stale?
-  "Whether any of `reads` has changed since it was read. A subscription that is
-  gone counts as stale: the read cannot be trusted and the topic has to be
-  taken again."
-  [reads]
-  (boolean (some (fn [[t v]]
-                   (if-let [e (get @open-subs t)]
-                     (not= v @(:version @(:sub e)))
-                     true))
-                 reads)))
-
-(defmacro with-reads
-  "Runs `body` with read tracking on. Returns [result reads], where reads maps
-  each topic to the version it was read at."
-  [& body]
-  `(let [reads# (atom {})]
-     (binding [*reads* reads#]
-       [(do ~@body) @reads#])))

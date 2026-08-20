@@ -1086,12 +1086,6 @@
         bob   (open-events port {"X-User" "bob"})]
     (next-event (:rdr alice))
     (next-event (:rdr bob))
-    ;; a mount whose read moved under it runs a second pass, and that pass
-    ;; lands on the adapter thread just after the mount frame. Let both
-    ;; streams go quiet before counting slot runs, or the count starts while
-    ;; a mount is still finishing.
-    (silent? (:sock alice) (:rdr alice) 200)
-    (silent? (:sock bob) (:rdr bob) 200)
     (reset! slot-runs {})
     (try
       (f {:ui ui :port port :alice alice :bob bob})
@@ -1350,11 +1344,10 @@
       (Thread/sleep 200)                ; the first release has now had its turn
       (testing "the release was scheduled for a generation that is no longer current"
         (is (contains? (hub/subscriptions) t)))
-      (testing "so the source still notifies the reader that took it since"
-        (let [version (:version (hub/sub-for t))
-              before  @version]
+      (testing "so the source still feeds the reader that took it since"
+        (let [handle (hub/sub-for t)]
           (swap! lease update :x inc)
-          (is (< before @version))))
+          (is (= (:x @lease) @handle))))
       (observe lease-source [:x])       ; schedules one for the current generation
       (is (until 3000 #(empty? (lease-subs)))))))
 
@@ -1364,14 +1357,14 @@
           vector (hub/->SourceTopic lease-source [:x])]
       (observe lease-source :x)
       (observe lease-source [:x])
-      ;; hold the version atoms, so the assertions do not take the
-      ;; subscriptions again and keep them alive past their release
-      (let [v1 (:version (hub/sub-for scalar))
-            v2 (:version (hub/sub-for vector))]
+      ;; hold the handles, so the assertions do not take the subscriptions
+      ;; again and keep them alive past their release
+      (let [h1 (hub/sub-for scalar)
+            h2 (hub/sub-for vector)]
         (swap! lease update :x inc)
         (testing "both topics saw the write"
-          (is (= 1 @v1))
-          (is (= 1 @v2))))
+          (is (= (:x @lease) @h1))
+          (is (= (:x @lease) @h2))))
       (observe lease-source :x)
       (observe lease-source [:x])
       (is (until 3000 #(empty? (lease-subs)))))))

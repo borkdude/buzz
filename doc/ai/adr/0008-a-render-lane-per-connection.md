@@ -89,11 +89,25 @@ which errs toward extra renders rather than missed ones.
 write to user-0's data, median of 201 samples, `:render-interval-ms 0` so the
 write waits for every render it caused.
 
-<!-- BENCH -->
+Slot does about 60 us of work, standing in for a query:
 
-The narrow key column is the same story as 0007. The wide key column now also
-benefits from lanes rendering in parallel, which the single scheduler thread
-could not do.
+| connections | wide us/write | narrow us/write | wide slot runs | narrow slot runs |
+|---|---|---|---|---|
+| 1   |  408.7 | 415.2 |   1 | 1 |
+| 10  |  721.9 | 434.4 |  10 | 1 |
+| 25  | 1453.1 | 430.5 |  25 | 1 |
+| 50  | 2411.8 | 420.3 |  50 | 1 |
+| 100 | 5317.4 | 418.2 | 100 | 1 |
+
+The slot runs columns are unchanged from 0007: N against 1. The wall clock now
+measures something different, and the comparison with 0007's tables has to say
+so. Synchronous mode used to render inline on the writing thread, and now it
+is a handshake: park a lane, render there, wake the writer. That round trip is
+a few hundred microseconds under babashka and it is the price of synchronous
+semantics only. At the default interval the writer pays a semaphore release
+per affected connection and never waits. The wide column grows slower than
+0007's because a hundred lanes render in parallel where the scheduler thread
+rendered them one after another.
 
 ## References
 
