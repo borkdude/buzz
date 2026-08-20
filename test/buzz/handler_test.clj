@@ -1358,3 +1358,21 @@
       (observe lease-source :x)
       (observe lease-source [:x])
       (is (until 3000 #(empty? (lease-subs)))))))
+
+;; Rule seven. Atom watches run on the writing threads, so two writes that land
+;; in order can have their callbacks finish in the opposite order, and a
+;; callback that stored the value it was handed would leave the older one on
+;; top. This exercises the path rather than forcing the interleaving, which
+;; cannot be done from outside the implementation: the window is a few
+;; instructions wide and four hundred attempts never hit it. What it does catch
+;; is a handle that fails to settle at all.
+(deftest a-handle-settles-on-the-latest-value-under-concurrent-writers
+  (dotimes [_ 20]
+    (let [a   (atom {:x 0})
+          src (handler/atom-source a)
+          h   (source/-subscribe src [:x] (fn []))
+          ws  (doall (for [_ (range 4)]
+                       (future (dotimes [_ 200] (swap! a update :x inc)))))]
+      (doseq [w ws] @w)
+      (is (= (:x @a) @h))
+      (source/-unsubscribe src [:x] h))))

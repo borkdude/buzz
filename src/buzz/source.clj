@@ -13,10 +13,11 @@
       (-subscribe [_ path notify] (foreign-proxy pstate path {:callback notify}))
       (-unsubscribe [_ _ proxy] (close! proxy)))
 
-  Six rules. `sources-hold-the-contract` in `test/buzz/handler_test.clj` runs
-  the last five against `atom-source` and against a source with no store behind
-  it. The first is a matter of construction: there is no way to force a write
-  into the gap from outside, so it is enforced by reading the implementation.
+  Seven rules. `sources-hold-the-contract` in `test/buzz/handler_test.clj` runs
+  five of them against `atom-source` and against a source with no store behind
+  it. Rules one and seven are matters of construction: their interleavings
+  cannot be forced from outside an implementation, so they are enforced by
+  reading it.
 
   1. The subscription is in place before the first value is read, and the first
      value is stored so that it cannot land on top of a newer one the
@@ -32,7 +33,11 @@
   5. Key equality is the source's business. Two keys that are `=` are one
      subscription.
   6. Notifying more often than necessary is allowed. It costs a render and no
-     frame, since unchanged values are compared away before anything is sent.")
+     frame, since unchanged values are compared away before anything is sent.
+  7. Callbacks can run concurrently and finish in any order. The handle has to
+     end holding the latest value, so storing the snapshot a callback was
+     handed is not enough. Read the current value under a per handle lock, or
+     carry a revision and refuse an older write.")
 
 (defprotocol Source
   (-subscribe [source k notify]
