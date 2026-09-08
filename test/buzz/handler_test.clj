@@ -840,9 +840,11 @@
       (swap! shared inc)
       (is (until 2000 #(str/includes? (str (last @frames)) "\"patch\""))))
 
+    ;; The lane clears the registry as it exits, so this is asked for rather
+    ;; than assumed: a render still in flight finishes before the teardown.
     (testing "the close callback drops the connection"
       (@closed)
-      (is (empty? (registry-of ui))))))
+      (is (until 2000 #(empty? (registry-of ui)))))))
 
 ;; A second server. Capra streams through StreamableResponseBody rather than
 ;; a channel, so if a page runs on it unchanged the adapter seam holds. It
@@ -1352,3 +1354,30 @@
       (doseq [w ws] @w)
       (is (= (:x @a) @h))
       (source/-unsubscribe src [:x] h))))
+
+;; A read outside a render schedules a release for a key connections may be
+;; holding. That release must leave their subscription alone: unsubscribing an
+;; entry it did not remove leaves a handle the source no longer feeds, and the
+;; page stops updating with nothing to notice it by.
+(deftest a-release-for-a-held-key-leaves-the-subscription-alone
+  (with-grace 50
+    (reset! ledger {"alice" ["water the plants"]})
+    (with-two {:mounts [{:el "app" :ui #'observed-notes}] :render-interval-ms 0}
+      (fn [{:keys [alice]}]
+        ;; what a router or an rpc handler does: observe outside a render
+        (observe ledger-source ["alice"])
+        (Thread/sleep 200)                ; the release it scheduled has run
+        (testing "the connection's subscription survives"
+          (is (contains? (into #{} (map :k) (hub/subscriptions)) ["alice"])))
+        (testing "and the source still reaches the page"
+          (swap! ledger update "alice" conj "call the vet")
+          (is (= "patch" (first (next-event (:rdr alice))))))))))
+
+;; The browser makes its first rpc off the session frame, so the connection has
+;; to be findable by then.
+(deftest a-connection-is-registered-before-its-first-frame
+  (with-connection {:mounts [{:el "app" :ui #'desk}] :render-interval-ms 0}
+    (fn [{:keys [ui session] :as conn}]
+      (testing "the session id names a connection the rpc endpoint can find"
+        (is (contains? (registry-of ui) session))
+        (is (= [204 ""] (rpc conn "desk/0" [])))))))

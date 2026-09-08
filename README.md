@@ -2,14 +2,9 @@
 
 > ⚠️ **WARNING**: This project is highly experimental and the API will surely change. Use only for non-serious projects.
 
-Buzz is for writing the front end in Clojure without a ClojureScript build. A
-component is one function returning hiccup, browser state is an atom you
-`swap!`, and the crossings are marked: `(server ...)` is a value the server
-computes, `(client ...)` is one that crosses back, `(local-state ...)` is state
-the browser keeps to itself. Squint compiles the browser half when the macro
-expands, so there is no bundler, no Node and no npm. There is no API to write
-either: a `(server ...)` form is the call, and when what it read changes the new
-value is pushed to the connections that read it and to no others.
+Use Buzz to write web interfaces in Clojure. Define components with Hiccup,
+read server values with `server`, and keep browser state with `local-state`.
+Changes to observed server state update the connected pages that read it.
 
 [Squint](https://github.com/squint-cljs/squint) compiles the browser half and
 [Reagami](https://github.com/borkdude/reagami) renders it.

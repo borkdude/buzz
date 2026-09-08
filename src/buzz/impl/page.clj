@@ -95,7 +95,9 @@
 (defn- signal! [lane]
   (.release ^java.util.concurrent.Semaphore (:sem lane)))
 
-(defn- lane-loop [{:keys [registry] :as entry} session lane ^long interval]
+;; No primitive hint on `interval`: the JVM compiler takes those only on fns of
+;; four arguments or fewer, while SCI accepts them at any arity.
+(defn- lane-loop [{:keys [registry] :as entry} session lane interval on-done]
   (try
     (loop []
       (.acquire ^java.util.concurrent.Semaphore (:sem lane))
@@ -114,19 +116,21 @@
             (render-session! entry session conn patch!)))
         ;; after the render, failed or not, or an interval-0 writer hangs
         (run! #(deliver % :done) waits))
-      (when (and @(:open lane) (pos? interval))
-        (Thread/sleep interval))
+      (when (and @(:open lane) (pos? ^long interval))
+        (Thread/sleep ^long interval))
       (when @(:open lane) (recur)))
     (finally
+      ;; The teardown runs here rather than in `:on-close`, so it cannot land
+      ;; while this lane is mid render. A render that is still going would
+      ;; otherwise register its reads again and leave topics behind that name
+      ;; a session nobody can reach, which no release would ever free.
+      (on-done)
       (run! #(deliver % :done) @(:waits lane)))))
 
-(defn- start-lane! [entry session interval first-job]
-  (let [lane (new-lane)]
-    (Thread/startVirtualThread
-     (fn [] (binding [*in-lane* true] (lane-loop entry session lane interval))))
-    (swap! (:jobs lane) conj first-job)
-    (signal! lane)
-    lane))
+(defn- start-lane! [entry session lane interval on-done]
+  (Thread/startVirtualThread
+   (fn [] (binding [*in-lane* true] (lane-loop entry session lane interval on-done))))
+  (signal! lane))
 
 (defn- close-lane! [lane]
   (reset! (:open lane) false)
@@ -152,17 +156,26 @@
     (reset! sent vals)
     (event! ch ["mount" (:id instance) el vals])))
 
-(defn- open-stream [{:keys [registry] :as entry} session ch req mounts token interval]
-  ;; Register the session before its lane sends the ID.
+(defn- open-stream [{:keys [registry index] :as entry} session ch req mounts token interval
+                    on-close]
   (let [mounted (mapv #(build % req) mounts)
         conn    {:ch ch :mounted mounted :owner token :req req}
-        lane    (start-lane! entry session interval
-                             (fn []
-                               (event! ch ["session" session])
-                               (render-session! entry session conn mount!)))]
-    (swap! registry assoc session (assoc conn :lane lane))))
+        lane    (new-lane)]
+    ;; In the registry before the lane can send anything. The browser makes its
+    ;; first rpc off the session frame, and a mark can only find this
+    ;; connection once its lane is reachable here.
+    (swap! registry assoc session (assoc conn :lane lane))
+    (swap! (:jobs lane) conj
+           (fn []
+             (event! ch ["session" session])
+             (render-session! entry session conn mount!)))
+    (start-lane! entry session lane interval
+                 (fn []
+                   (swap! registry dissoc session)
+                   (hub/drop-session! index session)
+                   (when on-close (on-close req))))))
 
-(defn- events [{:keys [registry index] :as entry} adapter req mounts on-close interval]
+(defn- events [{:keys [registry] :as entry} adapter req mounts on-close interval]
   (let [session (str (random-uuid))
         held    (browser-token req)
         token   (or held (str (random-uuid)))
@@ -174,13 +187,15 @@
                                 "Cache-Control" "no-cache"
                                 "X-Accel-Buffering" "no"}
                          (nil? held) (merge (token-headers token)))
-              :on-open  (fn [ch] (open-stream entry session ch req mounts token interval))
+              :on-open  (fn [ch]
+                          (open-stream entry session ch req mounts token interval
+                                       on-close))
+              ;; The lane clears the registry and the index as it exits, so
+              ;; this only asks it to stop.
               :on-close (fn []
-                          (when-let [lane (:lane (get @registry session))]
-                            (close-lane! lane))
-                          (swap! registry dissoc session)
-                          (hub/drop-session! index session)
-                          (when on-close (on-close req)))})))
+                          (if-let [lane (:lane (get @registry session))]
+                            (close-lane! lane)
+                            (when on-close (on-close req))))})))
 
 (defn- json-response [status body]
   {:status status

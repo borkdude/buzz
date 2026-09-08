@@ -148,16 +148,18 @@
   (boolean (some #(seq (get (:by-topic @(:index %)) t)) @handlers)))
 
 (defn- release! [t gen]
-  (let [[old _] (swap-vals! open-subs
-                            (fn [m]
-                              (if (and (= gen (:gen (get m t)))
-                                       (not (held-anywhere? t)))
-                                (dissoc m t)
-                                m)))
-        entry (get old t)]
-    ;; only ever close the handle this release was scheduled for
-    (when (and entry (= gen (:gen entry)))
-      (-unsubscribe (:source t) (:k t) @(:sub entry)))))
+  (let [[old new] (swap-vals! open-subs
+                              (fn [m]
+                                (if (and (= gen (:gen (get m t)))
+                                         (not (held-anywhere? t)))
+                                  (dissoc m t)
+                                  m)))]
+    ;; close only what this call actually removed. A read from a router or an
+    ;; rpc schedules a release for a key connections are holding, and that
+    ;; release must leave their subscription alone: unsubscribing an entry
+    ;; still in the map leaves a handle nothing feeds.
+    (when (and (contains? old t) (not (contains? new t)))
+      (-unsubscribe (:source t) (:k t) @(:sub (get old t))))))
 
 (defn- maybe-release! [topics]
   (doseq [t topics :when (source-topic? t)]
