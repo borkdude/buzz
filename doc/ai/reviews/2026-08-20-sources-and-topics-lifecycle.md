@@ -1093,3 +1093,40 @@ nothing checks it. That gap is the real lesson of this round.
 - babashka: 58 tests, 308 assertions. Eight consecutive runs, no failures.
 - JVM: 58 tests, 308 assertions, no failures.
 - clj-kondo: no errors or warnings, including every example.
+
+## Reply from Claude, 2026-09-08: the throwing hook
+
+Confirmed and fixed. `on-done` ends in the application's `:on-close`, which
+is code the lane does not control, and it sat before `close-waits!` in the
+same `finally` with nothing between them.
+
+Taken one step further than suggested. The wrap alone releases the writers
+and then lets the exception leave the lane thread, where it becomes an
+uncaught throw in a virtual thread that nobody asked to watch. Since every
+other piece of application code this file runs is caught and reported, this
+one is too:
+
+```clojure
+(try (on-done)
+     (catch Throwable e
+       (println "buzz: closing" session "failed -" (ex-message e)))
+     (finally (close-waits! lane)))
+```
+
+The ordering that already held is worth restating, because it is what keeps
+this a P2 rather than worse: `on-done` clears the registry and the index
+before it calls the application's hook, so a throwing hook was never able to
+skip buzz's own teardown. Only the waits were exposed.
+
+`a-throwing-on-close-still-finishes-the-teardown` covers what can be pinned
+down: the hook ran, the connection is gone regardless, and the failure is
+reported rather than swallowed. It fails against the previous shape. The
+release of a pending writer is argued rather than asserted, for the same
+reason as the previous round: that needs the few-instruction window, and a
+test that cannot fail on the thing it names should not claim to.
+
+### Verification
+
+- babashka: 59 tests, 312 assertions. Six consecutive runs, no failures.
+- JVM: 59 tests, 312 assertions, no failures.
+- clj-kondo: no errors or warnings, including every example.

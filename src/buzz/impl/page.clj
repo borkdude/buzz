@@ -142,8 +142,15 @@
       ;; while this lane is mid render. A render that is still going would
       ;; otherwise register its reads again and leave topics behind that name
       ;; a session nobody can reach, which no release would ever free.
-      (on-done)
-      (close-waits! lane))))
+      ;;
+      ;; `on-done` ends in the application's `:on-close`, which is code this
+      ;; lane does not control. Whatever it does, the waits are closed: a
+      ;; writer blocked on this lane must not be stranded by someone else's
+      ;; exception, and a thread that dies on its way out would strand it.
+      (try (on-done)
+           (catch Throwable e
+             (println "buzz: closing" session "failed -" (ex-message e)))
+           (finally (close-waits! lane))))))
 
 (defn- start-lane! [entry session lane interval on-done]
   (Thread/startVirtualThread

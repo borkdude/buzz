@@ -1414,3 +1414,48 @@
             (let [done (future (swap! hangup update :x inc) :written)]
               (is (= :written (deref done 4000 :timed-out)))))))
       (finally (stop)))))
+
+(defn- captured-out
+  "Runs `f` with the root binding of `*out*` replaced, so what other threads
+  print is captured too. `with-out-str` only binds it on this one, and the
+  lane prints from its own."
+  [f]
+  (let [sw   (java.io.StringWriter.)
+        root (alter-var-root #'*out* identity)]
+    (alter-var-root #'*out* (constantly sw))
+    (try (f) (finally (alter-var-root #'*out* (constantly root))))
+    (str sw)))
+
+;; `:on-close` is application code the lane does not control. When it throws,
+;; the lane still has to finish leaving: the connection is dropped, the
+;; failure is reported, and any writer blocked on this lane is released. The
+;; release itself is argued rather than asserted here, since a pending wait
+;; needs the same few-instruction window as the test above.
+(defonce ^:private closed-count (atom 0))
+
+(defui plain-page []
+  [:p (server (observe hangup-source [:x]))])
+
+(deftest a-throwing-on-close-still-finishes-the-teardown
+  (reset! closed-count 0)
+  (let [ui   (handler/handler {:mounts [{:el "app" :ui #'plain-page}]
+                               :render-interval-ms 0
+                               :on-close (fn [_]
+                                           (swap! closed-count inc)
+                                           (throw (ex-info "on-close blew up" {})))})
+        stop (http/run-server (fn [req] (or (ui req) {:status 404 :body "no"}))
+                              {:port 0})
+        port (:local-port (meta stop))
+        out  (captured-out
+              (fn []
+                (let [conn (open-events port {"X-User" "alice"})]
+                  (next-event (:rdr conn))
+                  (.close ^java.net.Socket (:sock conn))
+                  (is (until 3000 #(empty? (registry-of ui)))))))]
+    (try
+      (testing "the hook ran and the connection is gone anyway"
+        (is (= 1 @closed-count))
+        (is (empty? (registry-of ui))))
+      (testing "and the failure is reported rather than swallowed"
+        (is (str/includes? out "on-close blew up")))
+      (finally (stop)))))
