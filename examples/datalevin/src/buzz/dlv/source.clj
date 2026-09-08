@@ -60,6 +60,10 @@
   (->DatalevinSource conn (atom {})))
 
 (defn runs
-  "Returns a map from subscribed queries to their re-run counts."
+  "Returns a map from subscribed queries to their re-run counts. Two handles
+  can hold one query while an old one is being released, so their counts are
+  added rather than one of them winning."
   [source]
-  (into {} (map (fn [[_ sub]] [(:q sub) @(:runs sub)])) @(:subs source)))
+  (reduce (fn [m [_ sub]] (update m (:q sub) (fnil + 0) @(:runs sub)))
+          {}
+          @(:subs source)))

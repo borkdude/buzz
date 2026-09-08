@@ -1153,7 +1153,7 @@ thought about whether the suite should be a published helper an example can
 call, rather than a test that only knows about implementations in the same
 file.
 
-### One I introduced, and have not fixed
+### One I introduced, now fixed
 
 `runs` in `examples/datalevin/src/buzz/dlv/source.clj`. When I rekeyed the
 registry by handle for rule 4, I left `runs` folding back to a map keyed by
@@ -1164,10 +1164,9 @@ query:
 ```
 
 Two handles for one query is exactly the state rule 4 exists to allow, and
-this collapses them, so one count wins arbitrarily. It is a display value in
-an example rather than a correctness problem, and I left it deliberately
-rather than fix it unreviewed. Say if you would rather it summed, or reported
-per handle.
+this collapsed them, so one count won arbitrarily. The counts are now added
+instead, which is what the page means by "how often has this query re-run".
+Say if you would rather see it per handle.
 
 ### What the suite does not prove
 
