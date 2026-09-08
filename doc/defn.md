@@ -90,6 +90,10 @@ it uses the `:clj` branch, with the same fallback.
 Use `host` for browser-only code in a `local-state` initial value. Initial
 values are also computed for the first paint.
 
+Inside a `fn`, `js/` interop compiles on the JVM and throws if the first paint
+calls it. An event handler needs no `host`. Outside a `fn`, `js/` is refused
+when the definition loads.
+
 Read server state with `server` and run server actions with `server!`.
 Use `host` to select code for each runtime.
 
@@ -102,17 +106,3 @@ Re-evaluate a `buzz/defn` in the REPL to hot-reload open pages.
 - A `buzz/defn` takes one arity and a fixed number of arguments.
 - A `buzz/defn` can call only functions that are already defined. Mutual
   recursion requires re-evaluating the first definition after both exist.
-- Functions passed as arguments must also compile on the JVM for server
-  rendering. Keep `js/` and `await` code in Hiccup event handlers inside
-  `buzz/defn`, or in a `host :cljs` branch:
-
-  ```clojure
-  (buzz/defn submit-button [on-submit]
-    [:button {:on-click (fn [e]
-                          (js/console.log "saving")
-                          (on-submit e))}
-     "save"])
-
-  (defui editor []
-    (submit-button (fn [_] (server! (persist!)))))
-  ```

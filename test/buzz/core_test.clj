@@ -484,3 +484,29 @@
     (testing "a data map in the body keeps its on keys"
       (is (= [:p {:on-click nil :class "p"} "true" 2]
              ((:ssr inst) (atom {:online true :on-call false})))))))
+
+(defui tagged []
+  (let [status (local-state [:status {:online true}])]
+    [:p (str @status)]))
+
+(defui extracted []
+  (let [attrs {:on-click (fn [_] (js/alert "x"))
+               :on-input (fn [e] (set! (.. e -target -value) ""))}]
+    [:button attrs "click"]))
+
+(defui parsed []
+  [:ul (mapv (fn [x] [:li (js/parseFloat x)]) ["1"])])
+
+(deftest browser-code-inside-a-fn-compiles-and-throws-when-called
+  (testing "a tagged data vector keeps its values"
+    (is (= [[:status {:online true}]] ((:init-ssr (tagged))))))
+
+  (testing "an attribute map bound by name keeps its handlers, which throw"
+    (let [[_ attrs] ((:ssr (extracted)))]
+      (is (fn? (:on-click attrs)))
+      (is (thrown-with-msg? Exception #"js/alert runs in the browser only"
+                            ((:on-click attrs) nil)))))
+
+  (testing "a rendering fn with js/ throws on the first paint"
+    (is (thrown-with-msg? Exception #"js/parseFloat runs in the browser only"
+                          ((:ssr (parsed)))))))

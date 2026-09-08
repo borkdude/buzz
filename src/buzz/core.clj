@@ -451,40 +451,67 @@
                          "Wrap browser-only code in (host :cljs ...)")
                     {:symbol s :forms (vec forms)}))))
 
-(declare ^:private ssr-form)
+(clojure.core/defn browser-only
+  "Throws. The first paint called code that only runs in the browser. Public
+  because `defui` expands into a call to it."
+  [what]
+  (throw (ex-info (str what " runs in the browser only. Wrap it in (host :cljs ...)")
+                  {:form what})))
+
+(defn- browser-only-form?
+  "`js/` symbols and `set!` on interop compile in the browser only."
+  [x]
+  (or (and (symbol? x) (= "js" (namespace x)))
+      (and (seq? x) (= 'set! (first x)) (seq? (second x)))))
+
+(defn- lambda-form? [x]
+  (and (seq? x) (contains? lambda-heads (first x))))
+
+(declare ^:private ssr-walk)
 
 (defn- ssr-attrs
   "A Hiccup attribute map without its handlers. Reagami's ssr drops every
-  `on*` attribute by name whatever the value, so blanking a handler changes no
-  output. It only removes browser code the JVM would otherwise compile."
-  [attrs]
+  `on*` attribute by name, so blanking a handler changes no output. It only
+  removes browser code the JVM would otherwise compile."
+  [attrs lambda?]
   (into {} (mapv (fn [[k v]]
                    [k (if (and (keyword? k)
-                               (str/starts-with? (name k) "on"))
+                               (str/starts-with? (name k) "on")
+                               (lambda-form? v))
                         nil
-                        (ssr-form v))])
+                        (ssr-walk v lambda?))])
                  attrs)))
 
-(defn- ssr-form
-  "The same form, but renderable here. Handlers are blanked in attribute
-  position only, so a map anywhere else keeps its `on*` keys."
-  [form]
+(defn- ssr-walk
+  "Inside a `fn`, browser-only forms become stubs that throw when called.
+  Outside one they stay, for `refuse-js` to report."
+  [form lambda?]
   (cond
+    (and lambda? (browser-only-form? form))
+    (list `browser-only (if (symbol? form) (str form) (str "(" (first form) " ...)")))
+
     (map? form)
-    (into {} (mapv (fn [[k v]] [(ssr-form k) (ssr-form v)]) form))
+    (into {} (mapv (fn [[k v]] [(ssr-walk k lambda?) (ssr-walk v lambda?)]) form))
 
     (and (vector? form) (keyword? (first form)) (map? (second form)))
-    (into [(first form) (ssr-attrs (second form))] (mapv ssr-form (nnext form)))
+    (into [(first form) (ssr-attrs (second form) lambda?)]
+          (mapv #(ssr-walk % lambda?) (nnext form)))
 
-    (vector? form) (mapv ssr-form form)
-    (set? form)    (into #{} (mapv ssr-form form))
+    (vector? form) (mapv #(ssr-walk % lambda?) form)
+    (set? form)    (into #{} (mapv #(ssr-walk % lambda?) form))
     (seq? form)    (cond
                      (= 'quote (first form)) form
-                     (host-form? form) (ssr-form (second form))
+                     (host-form? form) (ssr-walk (second form) lambda?)
                      ;; Omit handlers passed as arguments from server rendering.
                      (= 'rpc! (first form)) nil
-                     :else (apply list (mapv ssr-form form)))
+                     (lambda-form? form) (apply list (mapv #(ssr-walk % true) form))
+                     :else (apply list (mapv #(ssr-walk % lambda?) form)))
     :else form))
+
+(defn- ssr-form
+  "The same form, but renderable here."
+  [form]
+  (ssr-walk form false))
 
 (def revision
   "Revision counter incremented when a defui or defpart is evaluated."
