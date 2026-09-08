@@ -28,28 +28,33 @@
                   true)))
         (notify)))))
 
-(defrecord DatalevinSource [conn subs]
+(defrecord DatalevinSource [conn subs listener]
   source/Source
   ;; Each subscription has an independent handle.
   (-subscribe [_ q notify]
     (let [cache (atom ::unread)]
-      (swap! subs assoc cache {:q q
-                               :attrs (query-attrs conn q)
-                               :runs (atom 0)
-                               :notify notify})
-      (d/listen! conn ::source #(refresh! conn subs %))
+      ;; Registering and listening happen together, and the last unsubscribe
+      ;; stops listening under the same lock. Otherwise a subscription taken
+      ;; between another one's emptiness check and its `unlisten!` loses the
+      ;; shared listener it needs. The query below stays outside the lock.
+      (locking listener
+        (swap! subs assoc cache {:q q
+                                 :attrs (query-attrs conn q)
+                                 :runs (atom 0)
+                                 :notify notify})
+        (d/listen! conn ::source #(refresh! conn subs %)))
       ;; Preserve any value already delivered by the listener.
       (let [v (d/q q (d/db conn))]
         (locking cache
           (compare-and-set! cache ::unread v)))
       cache))
   (-unsubscribe [_ _ handle]
-    (swap! subs dissoc handle)
-    (when (empty? @subs)
-      (d/unlisten! conn ::source))))
+    (locking listener
+      (when (empty? (swap! subs dissoc handle))
+        (d/unlisten! conn ::source)))))
 
 (defn datalevin-source [conn]
-  (->DatalevinSource conn (atom {})))
+  (->DatalevinSource conn (atom {}) (Object.)))
 
 (defn runs
   "Returns a map from queries to total re-run counts across active handles."

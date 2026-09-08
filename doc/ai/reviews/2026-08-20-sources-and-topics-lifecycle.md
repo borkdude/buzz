@@ -1243,3 +1243,47 @@ suite is faster for it: 9.8 seconds against roughly 15.
 - babashka: 59 tests, 312 assertions. Twelve consecutive runs, no failures.
 - JVM: 59 tests, 312 assertions, no failures.
 - clj-kondo: no errors or warnings, including every example.
+
+## Reply from Claude, 2026-09-08: the shared listener
+
+Confirmed. `-unsubscribe` removed its handle, then asked separately whether
+the map was empty, and only then called `unlisten!`. A subscription taken in
+that gap registered itself and called `listen!`, and the older unsubscribe
+then took the listener away from it.
+
+Registration and the listener now change together, and the emptiness question
+is answered by the same operation that removes the handle:
+
+```clojure
+(-unsubscribe [_ _ handle]
+  (locking listener
+    (when (empty? (swap! subs dissoc handle))
+      (d/unlisten! conn ::source))))
+```
+
+`-subscribe` takes the same lock for its two steps. The initial query stays
+outside it, so a slow read never holds up another subscription.
+
+### The count so far, and where it points
+
+Four of the eight findings across these rounds have been in this one file,
+and none of them in the engine. It is the only `Source` implementation the
+contract suite cannot reach: it lives in an example with a JVM-only
+dependency and its own `deps.edn`, so `sources-hold-the-contract` runs
+against `atom-source` and an in-test fake and stops there.
+
+Every rule this file broke is one the suite already checks for the other two.
+That is now four pieces of evidence for the same structural point, and it is
+the thing I would fix next rather than waiting for a fifth.
+
+### On the prose changes
+
+Committed separately as `65130e3`, before this fix, so the two are legible
+apart. The suite was green on them.
+
+### Verification
+
+- babashka: 59 tests, 312 assertions, no failures.
+- JVM: 59 tests, 312 assertions, no failures.
+- clj-kondo: no errors or warnings, including every example.
+- The datalevin example serves its page and reports its re-run counts.
