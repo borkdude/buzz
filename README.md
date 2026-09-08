@@ -2,12 +2,17 @@
 
 > ⚠️ **WARNING**: This project is highly experimental and the API will surely change. Use only for non-serious projects.
 
-Buzz lets you write a web application using the JVM (or babashka) only. State
-lives on the server and can be watched and updated from client code.
+Buzz is for writing the front end in Clojure without a ClojureScript build. A
+component is one function returning hiccup, browser state is an atom you
+`swap!`, and the crossings are marked: `(server ...)` is a value the server
+computes, `(client ...)` is one that crosses back, `(local-state ...)` is state
+the browser keeps to itself. Squint compiles the browser half when the macro
+expands, so there is no bundler, no Node and no npm. There is no API to write
+either: a `(server ...)` form is the call, and when what it read changes the new
+value is pushed to the connections that read it and to no others.
 
-This project uses [Squint](https://github.com/squint-cljs/squint) to compile
-the UI to JavaScript and [Reagami](https://github.com/borkdude/reagami)
-to renders it.
+[Squint](https://github.com/squint-cljs/squint) compiles the browser half and
+[Reagami](https://github.com/borkdude/reagami) renders it.
 
 Buzz runs on Babashka and on the JVM. You do not need other tooling like ClojureScript or Node.js.
 
