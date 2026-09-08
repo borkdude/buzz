@@ -434,10 +434,13 @@
     :else form))
 
 (defn- js-symbol
-  "The first `js/` symbol in `form` outside a quote, if any."
+  "The first `js/` symbol in `form` outside a quote, if any. A `host` form
+  left for the JVM to expand counts only its `:clj` branch."
   [form]
   (cond
     (and (seq? form) (= 'quote (first form))) nil
+    (and (seq? form) (= :host (mark (first form))))
+    (js-symbol (host-branch (host-branches (rest form)) :clj))
     (coll? form) (some js-symbol form)
     (and (symbol? form) (= "js" (namespace form))) form
     :else nil))

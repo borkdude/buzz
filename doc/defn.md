@@ -91,8 +91,12 @@ Use `host` for browser-only code in a `local-state` initial value. Initial
 values are also computed for the first paint.
 
 Inside a `fn`, `js/` interop throws if called during the first paint. Event
-handlers do not run during the first paint and need no `host`. Outside a
-`fn`, wrap browser-only code in `host :cljs` to load the definition.
+handlers do not run during the first paint and need no `host` for `js/`
+interop. Outside a `fn`, wrap browser-only code in `host :cljs` to load the
+definition.
+
+Wrap calls to Squint-only functions, such as `clj->js`, in `host :cljs`,
+including inside event handlers.
 
 Read server state with `server` and run server actions with `server!`.
 Use `host` to select code for each runtime.

@@ -523,3 +523,20 @@
   (testing "a rendering fn with js/ throws on the first paint"
     (is (thrown-with-msg? Exception #"js/parseFloat runs in the browser only"
                           ((:ssr (parsed)))))))
+
+(b/defn nested-host []
+  (host :clj (host :clj 1 :cljs js/NaN)
+        :cljs 2))
+
+(deftest a-host-inside-a-clj-branch-is-expanded-by-the-jvm
+  (testing "the inner :cljs branch is never JVM code"
+    (is (= 1 (nested-host))))
+
+  (testing "the browser gets the outer :cljs branch"
+    (is (str/includes? (:buzz/js (meta nested-host)) "return 2")))
+
+  (testing "js/ in the inner :clj branch is still refused"
+    (is (re-find #"js/NaN in n2 runs on the first paint"
+                 (refusal '(buzz.core/defn n2 []
+                             (buzz.core/host :clj (buzz.core/host :clj js/NaN :cljs 1)
+                                             :cljs 2)))))))
