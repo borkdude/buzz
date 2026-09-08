@@ -1381,3 +1381,36 @@
       (testing "the session id names a connection the rpc endpoint can find"
         (is (contains? (registry-of ui) session))
         (is (= [204 ""] (rpc conn "desk/0" [])))))))
+
+;; At interval 0 a write waits for the connections it marked. A lane that exits
+;; between the check and the wait would leave that writer holding a promise
+;; nothing delivers, so `wait-on!` and `close-waits!` settle against one
+;; another through a single atom rather than a check and a later add.
+;;
+;; This exercises the path with a close and a write racing on purpose. It is a
+;; smoke test, not a reproduction: the window is a few instructions wide and
+;; the previous shape survives this test more often than not. What it does
+;; catch is a wait that is never delivered at all.
+(defonce ^:private hangup (atom {:x 0}))
+(def ^:private hangup-source (handler/atom-source hangup))
+
+(defui hangup-page []
+  [:p (server (observe hangup-source [:x]))])
+
+(deftest a-write-does-not-hang-on-a-connection-that-just-went-away
+  (reset! hangup {:x 0})
+  (let [ui   (handler/handler {:mounts [{:el "app" :ui #'hangup-page}]
+                               :render-interval-ms 0})
+        stop (http/run-server (fn [req] (or (ui req) {:status 404 :body "no"}))
+                              {:port 0})
+        port (:local-port (meta stop))]
+    (try
+      (testing "closing sockets while writing never blocks the writer"
+        (dotimes [_ 15]
+          (let [conn (open-events port {"X-User" "alice"})]
+            (next-event (:rdr conn))
+            ;; the close and the write race on purpose
+            (future (.close ^java.net.Socket (:sock conn)))
+            (let [done (future (swap! hangup update :x inc) :written)]
+              (is (= :written (deref done 4000 :timed-out)))))))
+      (finally (stop)))))

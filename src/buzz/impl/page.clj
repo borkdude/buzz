@@ -92,6 +92,24 @@
   {:sem (java.util.concurrent.Semaphore. 0)
    :jobs (atom []) :dirty (atom #{}) :waits (atom []) :open (atom true)})
 
+;; `:waits` holds the promises an interval-0 writer is blocked on, and becomes
+;; `::gone` once the lane has left its loop. Asking to wait and closing the
+;; lane therefore settle against one another: a promise either gets in before
+;; `::gone`, and the lane's exit delivers it, or it does not get in and the
+;; writer knows not to block. Checking `:open` first and adding afterwards
+;; would leave a writer holding a promise nothing will ever deliver.
+(defn- wait-on!
+  "Adds `p` to the lane's waits. False when the lane is already gone."
+  [lane p]
+  (let [[old _] (swap-vals! (:waits lane)
+                            #(if (identical? ::gone %) % (conj % p)))]
+    (not (identical? ::gone old))))
+
+(defn- close-waits! [lane]
+  (let [[old _] (reset-vals! (:waits lane) ::gone)]
+    (when-not (identical? ::gone old)
+      (run! #(deliver % :done) old))))
+
 (defn- signal! [lane]
   (.release ^java.util.concurrent.Semaphore (:sem lane)))
 
@@ -125,7 +143,7 @@
       ;; otherwise register its reads again and leave topics behind that name
       ;; a session nobody can reach, which no release would ever free.
       (on-done)
-      (run! #(deliver % :done) @(:waits lane)))))
+      (close-waits! lane))))
 
 (defn- start-lane! [entry session lane interval on-done]
   (Thread/startVirtualThread
@@ -145,11 +163,11 @@
       (swap! (:dirty lane) into topics)
       (signal! lane))
     (when (and (zero? interval) (not *in-lane*))
-      (doseq [lane lanes :when @(:open lane)]
+      (doseq [lane lanes]
         (let [p (promise)]
-          (swap! (:waits lane) conj p)
-          (signal! lane)
-          @p)))))
+          (when (wait-on! lane p)
+            (signal! lane)
+            @p))))))
 
 (defn- mount! [ch {:keys [el instance sent] :as m}]
   (let [vals (slot-vals m)]

@@ -1028,3 +1028,68 @@ is now noted at the definition.
 
 Unchanged: per-slot read sets, indexing the atom source by the first path
 segment, and handler entries that are never removed from the global set.
+
+## Reply from Claude, 2026-09-08: the last two
+
+Both confirmed and fixed.
+
+### 1. A writer could wait on a lane that had already gone
+
+Confirmed. `mark!` read `:open`, and only afterwards added its promise to
+`:waits`. A lane that left its loop in between drained an empty `:waits` and
+never saw the promise, so the writer blocked for good.
+
+Checking then adding cannot be made safe by reordering, so the two now settle
+through one atom. `:waits` holds a vector while the lane runs and becomes
+`::gone` when it leaves:
+
+```clojure
+(defn- wait-on! [lane p]
+  (let [[old _] (swap-vals! (:waits lane)
+                            #(if (identical? ::gone %) % (conj % p)))]
+    (not (identical? ::gone old))))
+```
+
+Either the promise gets in before `::gone`, and the lane's exit delivers it,
+or it does not get in and `mark!` knows not to block. There is no third
+outcome, and no check that can go stale between reading and acting.
+
+The test that came with this is honest about what it is. It races a close
+against a write fifteen times over, and it does **not** reliably fail against
+the previous shape: the window is a few instructions wide. It is labelled a
+smoke test in the source rather than presented as a reproduction. What it
+does catch is a wait that is never delivered at all. The argument above is
+what the fix rests on, and your reproduction is the evidence that the window
+is reachable.
+
+### 2. The Datalevin source stored an older first read
+
+Confirmed, and it is rule 1 of our own contract broken in the example meant
+to demonstrate the contract. `AtomSource` was fixed for exactly this in the
+first review and the Datalevin source was never given the same treatment.
+
+Same shape as the fix there: a sentinel and a compare-and-set, so the first
+value is stored only if a callback has not already stored one.
+
+```clojure
+(let [v (d/q q (d/db conn))]
+  (locking cache
+    (compare-and-set! cache ::unread v)))
+```
+
+The callback also moved under the handle's lock, which was missing too. That
+is rule 7: two transactions whose callbacks finish out of order would
+otherwise leave the older result on top. So this one finding turned out to be
+two rules unmet, and the source now holds both.
+
+Worth stating plainly: both of the last two findings, and finding 4 of the
+previous round, are the contract broken by its own example rather than by the
+engine. The suite runs the contract against `atom-source` and against a fake,
+and the Datalevin source is in an example with a JVM-only dependency, so
+nothing checks it. That gap is the real lesson of this round.
+
+### Verification
+
+- babashka: 58 tests, 308 assertions. Eight consecutive runs, no failures.
+- JVM: 58 tests, 308 assertions, no failures.
+- clj-kondo: no errors or warnings, including every example.

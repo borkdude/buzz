@@ -20,10 +20,15 @@
     (doseq [[cache {:keys [q attrs runs notify]}] @subs
             :when (seq (set/intersection wrote attrs))]
       (swap! runs inc)
-      (let [v (d/q q db)]
-        (when (not= v @cache)
-          (reset! cache v)
-          (notify))))))
+      ;; Under the handle's lock, so two transactions whose callbacks finish
+      ;; out of order cannot leave the older result on top, and so the first
+      ;; read below cannot land after a callback that already ran.
+      (when (locking cache
+              (let [v (d/q q db)]
+                (when (not= v @cache)
+                  (reset! cache v)
+                  true)))
+        (notify)))))
 
 (defrecord DatalevinSource [conn subs]
   source/Source
@@ -33,13 +38,18 @@
   ;; would have the old close take the new one with it. Rule 4 of the
   ;; contract, in `buzz.source`.
   (-subscribe [_ q notify]
-    (let [cache (atom nil)]
+    (let [cache (atom ::unread)]
       (swap! subs assoc cache {:q q
                                :attrs (query-attrs conn q)
                                :runs (atom 0)
                                :notify notify})
       (d/listen! conn ::source #(refresh! conn subs %))
-      (reset! cache (d/q q (d/db conn)))
+      ;; A transaction during this first query fires the callback with a newer
+      ;; result, so the first value is only stored if nothing has been stored
+      ;; yet. A plain `reset!` would put the older result on top of it.
+      (let [v (d/q q (d/db conn))]
+        (locking cache
+          (compare-and-set! cache ::unread v)))
       cache))
   (-unsubscribe [_ _ handle]
     (swap! subs dissoc handle)
