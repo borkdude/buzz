@@ -1,6 +1,7 @@
 (ns buzz.impl.page
   "Ring page implementation. The public API is exposed through `buzz.core`."
   (:require [babashka.fs :as fs]
+            [buzz.impl.hub :as hub]
             [buzz.impl.parts :as parts]
             [buzz.stream :as stream]
             [cheshire.core :as json]
@@ -9,7 +10,7 @@
             [reagami.ssr :as ssr]
             [squint.compiler :as squint]))
 
-(defonce ^:private registries (atom #{}))
+;; Each handler registers {:registry :index :spec :mark!} with the hub.
 
 ;; Bind RPC sessions to an HttpOnly browser cookie. SameSite=Lax permits
 ;; top-level navigation but withholds the cookie from cross-site POSTs.
@@ -44,7 +45,7 @@
   [ch msg]
   (stream/send! ch (str "data: " (json/generate-string msg) "\n\n")))
 
-;; Recompute slots after a watched change and suppress unchanged patches.
+;; Recompute slots after a change and suppress unchanged patches.
 (defn- slot-vals
   "Returns the current slot values for one mount."
   [{:keys [instance req]}]
@@ -69,17 +70,120 @@
   {:el el :spec spec :sent (atom ::none) :req req
    :instance ((::instance spec))})
 
-(defn- open-stream [registry session ch req mounts token]
-  ;; Register the session before sending its ID.
-  (let [mounted (mapv #(build % req) mounts)]
-    (swap! registry assoc session {:ch ch :mounted mounted :owner token})
-    (event! ch ["session" session])
-    (doseq [{:keys [el instance sent] :as m} mounted]
-      (let [vals (slot-vals m)]
-        (reset! sent vals)
-        (event! ch ["mount" (:id instance) el vals])))))
+;; Retain subscriptions after a failed render so later changes can retry it.
+(defn- render-session! [{:keys [index]} session {:keys [ch mounted]} render!]
+  (let [ok (volatile! true)
+        reads (atom #{})]
+    (binding [hub/*tracking* {:reads reads :index index :session session}]
+      (doseq [m mounted]
+        (try (render! ch m)
+             (catch Throwable e
+               (vreset! ok false)
+               (println "buzz: render failed for" session "-" (ex-message e))))))
+    (when @ok
+      (hub/set-topics! index session @reads))))
 
-(defn- events [registry adapter req mounts on-close]
+;; One virtual thread per connection serializes frames and combines pending renders.
+(def ^:private ^:dynamic *in-lane*
+  ;; Prevent writes during a render from waiting on another render thread.
+  false)
+
+(defn- new-lane []
+  {:sem (java.util.concurrent.Semaphore. 0)
+   :jobs (atom []) :dirty (atom #{}) :waits (atom []) :open (atom true)})
+
+;; The terminal `::gone` value prevents new waits after shutdown.
+(defn- wait-on!
+  "Registers promise `p` for completion. Returns false after the lane exits."
+  [lane p]
+  (let [[old _] (swap-vals! (:waits lane)
+                            #(if (identical? ::gone %) % (conj % p)))]
+    (not (identical? ::gone old))))
+
+(defn- close-waits! [lane]
+  (let [[old _] (reset-vals! (:waits lane) ::gone)]
+    (when-not (identical? ::gone old)
+      (run! #(deliver % :done) old))))
+
+(defn- signal! [lane]
+  (.release ^java.util.concurrent.Semaphore (:sem lane)))
+
+(defn- lane-loop [{:keys [registry] :as entry} session lane interval on-done]
+  (try
+    (loop []
+      (.acquire ^java.util.concurrent.Semaphore (:sem lane))
+      (.drainPermits ^java.util.concurrent.Semaphore (:sem lane))
+      ;; waits first: a writer adds its topics before its wait, so a wait in
+      ;; this batch has its topics in the dirty drain that follows
+      (let [[waits _]  (reset-vals! (:waits lane) [])
+            [jobs _]   (reset-vals! (:jobs lane) [])
+            [topics _] (reset-vals! (:dirty lane) #{})]
+        (doseq [job jobs]
+          (try (job)
+               (catch Throwable e
+                 (println "buzz: render failed for" session "-" (ex-message e)))))
+        (when (seq topics)
+          (when-let [conn (get @registry session)]
+            (render-session! entry session conn patch!)))
+        ;; after the render, failed or not, or an interval-0 writer hangs
+        (run! #(deliver % :done) waits))
+      (when (and @(:open lane) (pos? ^long interval))
+        (Thread/sleep ^long interval))
+      (when @(:open lane) (recur)))
+    (finally
+      ;; Release subscriptions after rendering and always complete pending waits.
+      (try (on-done)
+           (catch Throwable e
+             (println "buzz: closing" session "failed -" (ex-message e)))
+           (finally (close-waits! lane))))))
+
+(defn- start-lane! [entry session lane interval on-done]
+  (Thread/startVirtualThread
+   (fn [] (binding [*in-lane* true] (lane-loop entry session lane interval on-done))))
+  (signal! lane))
+
+(defn- close-lane! [lane]
+  (reset! (:open lane) false)
+  (signal! lane))
+
+;; Wake affected connections and wait for rendering when the interval is zero.
+(defn- mark! [{:keys [registry index]} ^long interval topics]
+  (let [conns @registry
+        lanes (into [] (keep #(:lane (get conns %)))
+                    (hub/sessions-for index topics))]
+    (doseq [lane lanes]
+      (swap! (:dirty lane) into topics)
+      (signal! lane))
+    (when (and (zero? interval) (not *in-lane*))
+      (doseq [lane lanes]
+        (let [p (promise)]
+          (when (wait-on! lane p)
+            (signal! lane)
+            @p))))))
+
+(defn- mount! [ch {:keys [el instance sent] :as m}]
+  (let [vals (slot-vals m)]
+    (reset! sent vals)
+    (event! ch ["mount" (:id instance) el vals])))
+
+(defn- open-stream [{:keys [registry index] :as entry} session ch req mounts token interval
+                    on-close]
+  (let [mounted (mapv #(build % req) mounts)
+        conn    {:ch ch :mounted mounted :owner token :req req}
+        lane    (new-lane)]
+    ;; Register before sending the session ID or rendering.
+    (swap! registry assoc session (assoc conn :lane lane))
+    (swap! (:jobs lane) conj
+           (fn []
+             (event! ch ["session" session])
+             (render-session! entry session conn mount!)))
+    (start-lane! entry session lane interval
+                 (fn []
+                   (swap! registry dissoc session)
+                   (hub/drop-session! index session)
+                   (when on-close (on-close req))))))
+
+(defn- events [{:keys [registry] :as entry} adapter req mounts on-close interval]
   (let [session (str (random-uuid))
         held    (browser-token req)
         token   (or held (str (random-uuid)))
@@ -91,10 +195,15 @@
                                 "Cache-Control" "no-cache"
                                 "X-Accel-Buffering" "no"}
                          (nil? held) (merge (token-headers token)))
-              :on-open  (fn [ch] (open-stream registry session ch req mounts token))
+              :on-open  (fn [ch]
+                          (open-stream entry session ch req mounts token interval
+                                       on-close))
+              ;; The lane clears the registry and the index as it exits, so
+              ;; this only asks it to stop.
               :on-close (fn []
-                          (swap! registry dissoc session)
-                          (when on-close (on-close req)))})))
+                          (if-let [lane (:lane (get @registry session))]
+                            (close-lane! lane)
+                            (when on-close (on-close req))))})))
 
 (defn- json-response [status body]
   {:status status
@@ -103,7 +212,7 @@
 
 ;; Require the RPC header, a known session, its browser token, and a registered
 ;; handler.
-(defn- rpc [registry req]
+(defn- rpc [{:keys [registry]} req]
   (let [[session handler-id args] (json/parse-string (slurp (:body req)))
         conn (get @registry session)]
     (if-let [h (and (get-in req [:headers "x-buzz-rpc"])
@@ -128,71 +237,22 @@
           (json-response 500 {:error "handler failed"})))
       (json-response 404 {:error "no such handler"}))))
 
-;; Patch only connections owned by this handler. A slot can be
-;; per-connection, so one connection's render may throw while the others are
-;; fine: the failure is contained to that connection's frame. Its `sent`
-;; state is untouched, so the next healthy render sends the latest state.
-(defn- broadcast-patch! [registry]
-  (fn [_ _ _ _]
-    (doseq [[session {:keys [ch mounted]}] @registry
-            m mounted]
-      (try (patch! ch m)
-           (catch Throwable e
-             (println "buzz: render failed for" session "-" (ex-message e)))))))
-
-;; One scheduler thread for all coalesced handlers. Daemon, so a process that
-;; stops its server is not kept alive by an idle scheduler.
-(defonce ^:private render-exec
-  (delay (java.util.concurrent.Executors/newSingleThreadScheduledExecutor
-          (reify java.util.concurrent.ThreadFactory
-            (newThread [_ r]
-              (doto (Thread. ^Runnable r "buzz-render")
-                (.setDaemon true)))))))
-
-;; Runs `render` at most once per `interval-ms`. The first write renders
-;; immediately, writes landing inside the window mark dirty and the follow-up
-;; renders them, so the last state always goes out and intermediate states
-;; collapse. Rendering happens on the scheduler thread, so a write returns
-;; without paying for any connection's render. Idle costs nothing: no writes,
-;; no wake-ups.
-(defn- coalesced [render ^long interval-ms]
-  (let [exec @render-exec
-        dirty (atom false)
-        active (atom false)
-        tick (fn tick []
-               (reset! dirty false)
-               (try (render nil nil nil nil)
-                    (catch Throwable e
-                      (println "buzz: render failed -" (ex-message e))))
-               (.schedule ^java.util.concurrent.ScheduledExecutorService exec
-                          ^Runnable
-                          (fn follow-up []
-                            (if @dirty
-                              (tick)
-                              (do (reset! active false)
-                                  ;; a write can land between the check and the
-                                  ;; flag flip; re-arm rather than lose it
-                                  (when (and @dirty
-                                             (compare-and-set! active false true))
-                                    (tick)))))
-                          interval-ms
-                          java.util.concurrent.TimeUnit/MILLISECONDS))]
-    (fn [_ _ _ _]
-      (reset! dirty true)
-      (when (compare-and-set! active false true)
-        (.submit ^java.util.concurrent.ExecutorService exec ^Runnable tick)))))
-
-;; Rebuild instances and reload open pages after definitions change.
+;; Send reloads through each connection's queue to preserve frame order.
 (defn- reload-all! [_ _ _ rev]
-  (doseq [registry @registries
-          [session {:keys [ch mounted]}] @registry]
-    (let [rebuilt (mapv (fn [m] (assoc m :instance ((::instance (:spec m))))) mounted)]
+  (doseq [{:keys [registry] :as entry} (hub/entries)
+          [session conn] @registry]
+    (let [rebuilt (mapv (fn [m] (assoc m :instance ((::instance (:spec m))))) (:mounted conn))]
       (swap! registry assoc-in [session :mounted] rebuilt)
-      ;; the slots may have changed shape, so this one always goes out
-      (doseq [{:keys [instance sent] :as m} rebuilt]
-        (let [vals (slot-vals m)]
-          (reset! sent vals)
-          (event! ch ["reload" rev (:id instance) vals]))))))
+      (when-let [lane (:lane conn)]
+        (swap! (:jobs lane) conj
+               (fn []
+                 ;; the slots may have changed shape, so this one always goes out
+                 (render-session! entry session (get @registry session)
+                                  (fn [ch {:keys [instance sent] :as m}]
+                                    (let [vals (slot-vals m)]
+                                      (reset! sent vals)
+                                      (event! ch ["reload" rev (:id instance) vals]))))))
+        (signal! lane)))))
 
 ;; Keep idle EventSource connections open through proxies.
 (defonce ^:private heartbeat
@@ -200,7 +260,7 @@
     (future
       (loop []
         (Thread/sleep 25000)
-        (doseq [registry @registries
+        (doseq [{:keys [registry]} (hub/entries)
                 {:keys [ch]} (vals @registry)]
           (stream/send! ch ": ping\n\n"))
         (recur)))))
@@ -300,8 +360,8 @@
 (defn handler
   "Returns a Ring handler for one page. Unknown routes return nil. `:path`
   prefixes all page routes. `:adapter` provides the event stream and defaults
-  to http-kit. Calling this function installs watches and starts the heartbeat."
-  [{:keys [watch mounts path] :as spec}]
+  to http-kit. Calling this function starts the heartbeat."
+  [{:keys [mounts path] :as spec}]
   (doseq [m mounts]
     (when (or (:state m) (:component m))
       (throw (ex-info (str ":state and :component are no longer supported. "
@@ -314,16 +374,14 @@
                      ;; Load the default adapter only when needed.
                      @(requiring-resolve 'buzz.httpkit/adapter))
         registry (atom {})
-        _      (swap! registries conj registry)
-        ;; Async by default: writes within the window collapse into one
-        ;; render for all of this handler's atoms. `:render-interval-ms 0`
-        ;; renders synchronously on the writing thread instead.
+        index    (atom {:by-topic {} :by-session {}})
+        ;; Async by default: invalidations within the window collapse into one
+        ;; render of the connections holding them. `:render-interval-ms 0`
+        ;; renders synchronously on the invalidating thread instead.
         interval (or (:render-interval-ms spec) 20)
-        _      (let [render (cond-> (broadcast-patch! registry)
-                              (pos? interval)
-                              (coalesced interval))]
-                 (doseq [a watch]
-                   (add-watch a [::render registry] render)))
+        base     {:registry registry :index index :spec spec}
+        entry    (hub/register-handler!
+                  (assoc base :mark! (fn [topics] (mark! base interval topics))))
         mounts (mapv (fn [m] (assoc m ::instance (shared-instance (:ui m)))) mounts)
         spec   (assoc spec :mounts mounts)
         path   (or path "")
@@ -342,8 +400,8 @@
           :client     (runtime-module "client.cljs" path)
           :rpc-module (runtime-module "rpc.cljs" path)
           :components (components-module mounts path)
-          :events     (events registry adapter req mounts (:on-close spec))
-          :rpc        (rpc registry req)
+          :events     (events entry adapter req mounts (:on-close spec) interval)
+          :rpc        (rpc entry req)
           nil))
       {:buzz.core/registry registry})))
 

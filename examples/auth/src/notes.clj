@@ -20,13 +20,21 @@
   (when-not (= :admin role)
     (throw (ex-info "not allowed" {:role role}))))
 
-;; State the server owns, per user.
+;; Notes keyed by user name.
 (defonce notes (atom {"alice" ["water the plants"]
                       "bob"   ["renew the domain"]}))
+
+(def ^:private by-user (buzz/atom-source notes))
+
+;; How often each user's slots have run, so the page can show it.
+(defonce ^:private renders (atom {}))
 
 ;; A session is a random token in a map, so signing out forgets it and a
 ;; restart signs everyone out.
 (defonce sessions (atom {}))
+
+;; Signing out changes this, so the pages of open sessions redraw.
+(def ^:private by-token (buzz/atom-source sessions))
 
 (defn- pbkdf2 [password salt]
   (-> (javax.crypto.SecretKeyFactory/getInstance "PBKDF2WithHmacSHA256")
@@ -61,7 +69,7 @@
            second))
 
 (defn- whoami [req]
-  (get @sessions (token req)))
+  (buzz/observe by-token [(token req)]))
 
 (defn- cookie [value]
   (str "notes-session=" value "; Path=/; HttpOnly; SameSite=Strict"))
@@ -82,12 +90,19 @@
 
 ;; Resolve identity from the stream request for slots and the RPC request for
 ;; handlers.
+(defn- mine [req]
+  (let [who (whoami req)]
+    (swap! renders update who (fnil inc 0))
+    {:who who :notes (buzz/observe by-user [who]) :runs (get @renders who 0)}))
+
 (defui board []
-  (let [draft (local-state "")]
+  (let [draft (local-state "")
+        me    (server (mine (buzz/request)))]
     [:div
-     [:h1 "notes for " (server (whoami (buzz/request)))]
+     [:h1 "notes for " (:who me)]
+     [:p (:runs me) " renders for this user"]
      [:ul
-      (for [[i note] (map-indexed vector (server (get @notes (whoami (buzz/request)))))]
+      (for [[i note] (map-indexed vector (:notes me))]
         [:li {:key i}
          note
          [:button {:on-click (fn [_] (server! (let [u (whoami (buzz/request))
@@ -117,11 +132,9 @@
                               (set! js/window.location "/signin"))}
           "sign out"]]]))
 
-;; Watching sessions redraws open pages after signout.
 (def ^:private notes-ui
   (buzz/handler
    {:title "notes"
-    :watch [notes sessions]
     :mounts [{:el "app" :ui #'board}]}))
 
 ;; Route checks protect the page, event stream, and RPC endpoint.
@@ -159,8 +172,9 @@
   [:div
    [:h1 "everyone's notes"]
    [:ul
+    ;; The empty key is the whole map, so this page sees every user's writes.
     (for [row (server (mapv (fn [[who ns]] {:who who :notes (str/join ", " ns)})
-                            (sort @notes)))]
+                            (sort (buzz/observe by-user []))))]
       [:li {:key (:who row)}
        [:strong (:who row)] " " (:notes row) " "
        [:button {:on-click (fn [_] (server! (clear! (role-of (whoami (buzz/request)))
@@ -171,7 +185,6 @@
 (def ^:private admin-ui
   (buzz/handler {:title "everyone's notes"
                  :path "/admin"
-                 :watch [notes sessions]
                  :mounts [{:el "admin" :ui #'console}]}))
 
 (defn app [req]

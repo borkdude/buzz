@@ -6,7 +6,24 @@ To run the example, use the following commands:
 
     bb dev     # http://localhost:1360
 
-Sign in as alice with the password wonderland, or as bob with builder. Open a second (or igcognito) browser, sign in as the other one, and add a note in each.
+Sign in as alice with the password wonderland, or as bob with builder. Open a second (or incognito) browser, sign in as the other one, and add a note in each.
+
+## Per user data
+
+Use the user name as the source path to update that user's open pages:
+
+```clojure
+(def by-user (buzz/atom-source notes))
+
+(buzz/observe by-user [(whoami req)])
+```
+
+Each page shows the render count for its user. Sign in as alice in one
+browser and bob in another. Adding a note as alice increases alice's count
+and leaves bob's count unchanged.
+
+The admin page observes `[]` to read the whole map and update when any user's
+notes change.
 
 ## Reading identity
 
@@ -74,8 +91,9 @@ handler:
 
 ## Signing out reaches open pages
 
-`sessions` is in `:watch`, so signing out redraws open pages. The session cookie
-no longer resolves to a user, and protected content disappears.
+`whoami` reads the session map through a source keyed by the cookie, so signing
+out redraws the pages of that browser. The cookie no longer resolves to a user,
+and protected content disappears.
 
 ## Signing in
 

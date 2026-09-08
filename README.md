@@ -2,25 +2,33 @@
 
 > ⚠️ **WARNING**: This project is highly experimental and the API will surely change. Use only for non-serious projects.
 
-Buzz lets you write a web application using the JVM (or babashka) only. State
-lives on the server and can be watched and updated from client code.
+Use Buzz to write an interactive web UI and its server code in one Clojure
+definition. Write Hiccup and event handlers as browser code, with `server`
+expressions for server values and `server!` calls for server actions. Local
+interactions run in the browser, while changes to observed server state push
+new values into the same component. The browser renders the UI from those
+values and its own local state.
 
-This project uses [Squint](https://github.com/squint-cljs/squint) to compile
-the UI to JavaScript and [Reagami](https://github.com/borkdude/reagami)
-to renders it.
+[Squint](https://github.com/squint-cljs/squint) compiles the browser half and
+[Reagami](https://github.com/borkdude/reagami) renders it.
 
-Buzz runs on Babashka and on the JVM. You do not need other tooling like ClojureScript or Node.js.
+Run Buzz with Babashka or Java 21 or later. You do not need a ClojureScript
+build or Node.js.
 
-In this project, you can run:
+Try the demo from this repository:
 
     bb serve    # a demo on http://localhost:1341
-    bb bench    # a benchmark, on http://localhost:1342
 
-Also take a look at [tube-pod](https://github.com/borkdude/tube-pod), a real application I wrote using Buzz.
+Two applications written with Buzz:
+[tube-pod](https://github.com/borkdude/tube-pod), a panel that turns videos
+into a podcast feed, and
+[multi-snake](https://github.com/borkdude/multi-snake), a multiplayer snake
+game. [Play it here](https://multi-snake.michielborkent.nl).
 
 ## Quickstart
 
-Create a project with two files. `deps.edn`:
+Create a project with two files. In `deps.edn`, replace `<latest>` with a
+Buzz commit SHA:
 
 ```clojure
 {:paths ["src"]
@@ -32,13 +40,15 @@ Create a project with two files. `deps.edn`:
 
 ```clojure
 (ns counter
-  (:require [buzz.core :as buzz :refer [client defui local-state server server!]]
+  (:require [buzz.core :as buzz :refer [client defui local-state observe server server!]]
             [org.httpkit.server :as http]))
 
 (defonce clicks (atom 0))
 
+(def counter-source (buzz/atom-source clicks))
+
 (defui counter []
-  (let [n    (server @clicks)
+  (let [n    (server (observe counter-source []))
         step (local-state 1)]
     [:div
      [:p "clicked " n " times"]
@@ -47,7 +57,6 @@ Create a project with two files. `deps.edn`:
 
 (def ui
   (buzz/handler {:title "counter"
-                 :watch [clicks]
                  :mounts [{:el "app" :ui #'counter}]}))
 
 (defn -main [& _]
@@ -61,66 +70,73 @@ Then run it:
 
     clojure -M -m counter
 
-The count is a server value, so it is the same for all browsers. The step is a browser value, so each browser has a different one.
+Open http://localhost:1350 in two tabs. Click **add** to update the count in
+both tabs. Click **step** to change how much the current tab adds.
 
-The body of a component is client side code. In the body you can use four marks to communicate with the server or to make local state.
+## Server calls and local state
 
-- `(server expr)` is a value from the server. The server runs the expression again
-after each change to an observed atom and the result is sent to the browser.
+Write the body of `defui` as browser code. Use these forms to read server
+values, call server actions, and keep local state:
 
-- `(server! expr)` is way to make the server do something. It is a side effect, not a value. The return value is a promise. Using the special `reply` form, you can send a value back to the browser. Give `reply` a second argument to add to the http response the value arrives in, which is how a handler sets a cookie.
+- `(server expr)` reads a server value. Buzz evaluates the expression again
+  when observed state changes and sends the result to the browser.
+- `(server! expr)` runs a server action, such as saving a form. Call it from
+  an event handler. It returns a JavaScript promise.
+- `(client expr)` passes a browser value to a `server!` action.
+- `(local-state init)` creates a browser-local atom. Use `deref`, `reset!`,
+  and `swap!` to read and change it. Each mount keeps its own atom across
+  renders. The initial value can use a `server` expression.
+
+Use `reply` inside `server!` to return a value to the browser. Supply a Ring
+response map as the second argument to set a cookie or other response headers:
 
 ```clojure
 (server! (reply :ok {:headers {"Set-Cookie" "session=abc; HttpOnly; Path=/"}}))
 ```
 
-- `(client expr)` is a client value that crosses into a `server!` form.
-
-- `(local-state init)` is an atom that the client can read and write. It is not sent to the server. This state survives a re-render of the app and is only created once per mount. It is not shared between browsers or tabs. The initial value can read a `server` expression, so a client atom can start from what the server sent.
-
 ## Parts
 
-You can define a part of a component with `defpart`. A part is like a component, but it does not have its own root element. You can use a `defpart` inside a `defui` to break it into smaller pieces.
+Use `defpart` to extract reusable UI functions from a component:
 
 ```clojure
 (defpart row [item]
   [:li (:title item)])
 ```
 
-Parts compile to browser functions and can call themselves. Define
-`(server ...)` and `(local-state ...)` in `defui`, then pass their results to
-the part. Parts can contain `(server! ...)`. See [doc/parts.md](doc/parts.md).
+Call `(row item)` inside `defui` or another part. Parts can call themselves
+recursively and use `server!` for actions. Define `server` and `local-state`
+in `defui`, then pass their values as arguments. See [doc/parts.md](doc/parts.md).
 
 ## Mounting
 
-The `buzz/handler` function returns a Ring handler. Its event stream requires a
-`buzz.stream` adapter. Buzz uses the bundled http-kit adapter unless the
-handler spec supplies `:adapter`.
-
-To compose the handler with other routes, you can use `or` since the handler returns `nil` for unknown routes. For example:
+Use `buzz/handler` to serve a page and its components. Add it to your Ring
+application with `or`. It returns `nil` for routes it does not handle:
 
 ```clojure
 (defn app [req]
   (or (ui req) (my-other-routes req)))
 ```
 
-Buzz watches each atom in `:watch`. When one of them changes, it re-renders the component and sends a patch to each browser. One mount can hold one component at one element. A page can have more than one mount.
-
-Rendering is asynchronous: a write returns at once, and rendering happens at
-most once per `:render-interval-ms` (default 20). The first write renders
-immediately and writes inside the window collapse into one render carrying the
-latest state, so patches are sampled state, not every state: a counter can
-step from 3 to 7. Pass `:render-interval-ms 0` to render synchronously on the
-writing thread, which makes tests deterministic.
-
-A mount names its component by var, so re-evaluating the component reaches
-the open pages:
+Add an entry to `:mounts` for each component on the page. Set `:el` to the
+HTML element ID and `:ui` to the component var. Re-evaluate the var to update
+open pages:
 
 ```clojure
 :mounts [{:el "app" :ui #'todo-app}]
 ```
 
-The page belongs to the handler, so one application can serve more than one of them. Give a handler a `:path` and it answers under that path, stream and modules included.
+Use the default http-kit adapter, or supply `:adapter` for another Ring
+server. See [buzz.stream](src/buzz/stream.clj) for the adapter contract.
+
+Set `:render-interval-ms` to control how often server values update, in
+milliseconds (default 20). Updates run asynchronously for each open page.
+The first change triggers an update immediately. Changes within the interval
+are combined into one update with the latest state, so a counter can step
+from 3 to 7. Set the interval to 0 to wait for affected pages' server values
+to be sent before a write returns.
+
+Set `:path` to serve a page at another URL. Its event stream and JavaScript
+modules use the same prefix:
 
 ```clojure
 (def admin (buzz/handler {:path "/admin" :mounts [...]}))   ; the page is /admin
@@ -129,11 +145,51 @@ The page belongs to the handler, so one application can serve more than one of t
 (defn app [req] (or (admin req) (home req) {:status 404 :body "not found"}))
 ```
 
+## Sources
+
+Use `buzz/atom-source` to create a source and `buzz/observe` inside
+`server` to read a path from it. Changes to that path update the pages
+that read it.
+
+```clojure
+(defonce todos (atom {"alice" [] "bob" []}))
+
+(def by-user (buzz/atom-source todos))
+
+(defui board []
+  [:ul (for [t (server (buzz/observe by-user [(whoami (request))]))]
+         [:li t])])
+```
+
+Adding a todo for alice updates alice's open pages. Bob's pages
+keep their current values. Each affected page runs all its server
+expressions again.
+
+Use `[]` to observe the whole atom:
+
+```clojure
+(server (buzz/observe by-user []))
+```
+
+Changes to any user's todos now update every page reading the map.
+
+Use `observe` for state changes that should trigger a render. A direct read,
+such as `@todos`, refreshes only when another change triggers a render.
+
+Implement [buzz.source/Source](src/buzz/source.clj) to observe other data
+sources. Return a dereferenceable handle from `-subscribe` and release it
+in `-unsubscribe`. See [examples/datalevin](examples/datalevin) for a
+database source.
+
+See [examples/observe](examples/observe) for two counters that update
+independently.
+
 ## Request
 
 Use `(buzz/request)` inside `(server ...)` and `(server! ...)` to read the
-current Ring request. In `(server ...)`, this is the request that opened the
-event stream. In `(server! ...)`, this is the RPC request.
+current Ring request. During the initial HTML render, this is the page
+request. Later `server` evaluations use the request that opened the event
+stream. A `server!` action uses the request that called it.
 
 Keep state in application atoms. Use `(buzz/token (buzz/request))` as a key for
 browser-scoped state and `(buzz/connection (buzz/request))` for
@@ -142,8 +198,10 @@ and authentication.
 
 ```clojure
 (defonce queries (atom {}))   ; connection id -> search text
+(def query-source (buzz/atom-source queries))
 
-(defn- my-query  [req]   (get @queries (buzz/connection req) ""))
+(defn- my-query [req]
+  (or (buzz/observe query-source [(buzz/connection req)]) ""))
 (defn- remember! [req q] (swap! queries assoc (buzz/connection req) q))
 
 (defui todo-app []
@@ -164,19 +222,20 @@ connection-scoped state. Buzz passes it the request that opened the connection:
 
 ## The page
 
-Without an `:index`, Buzz writes the page: a title from `:title`, a div per
-mount holding its first render, and the two script tags. `:head` adds anything
-else that belongs in the head, such as a stylesheet.
+Set `:title` to name the page and `:head` to add HTML such as stylesheet
+links. Buzz creates the page with an element for each mount, its initial
+content, and the scripts needed to run it.
 
-Give `:index` a file to write the page yourself:
+Set `:index` to use your own HTML file:
 
 ```clojure
-(buzz/handler {:index "public/index.html" …})
+(buzz/handler {:index "public/index.html" :mounts [{:el "app" :ui #'todo-app}]})
 ```
 
-Two things in that file are then yours to place. Buzz replaces `<!--el-->` with
-the first render of the mount at that element, and every `NONCE` with the one in
-the Content-Security-Policy header:
+Add the mount element and scripts shown below. Put `<!--app-->` inside the
+element to include its initial content in the HTML response. Use `NONCE` on
+the inline script so Buzz can authorize it under the page's content security
+policy:
 
 ```html
 <div id="app"><!--app--></div>
@@ -186,23 +245,23 @@ the Content-Security-Policy header:
 <script type="module" src="/client.mjs"></script>
 ```
 
-Leave out the comment and the page still works. It arrives empty and the browser
-fills it in.
+Omit `<!--app-->` to render that component only after the browser connects.
 
 ## Examples
 
+- [examples/observe](examples/observe) shows two pages that observe separate keys in one atom.
 - [examples/auth](examples/auth) signs two users in and gives each of them
   their own data.
-- [examples/tap-viewer](examples/tap-viewer) shows everything the process taps, with a tree
-  the browser folds by itself.
+- [examples/tap-viewer](examples/tap-viewer) displays `tap>` values in an
+  expandable tree.
 - [examples/whiteboard](examples/whiteboard) is a shared whiteboard with live
   cursors, one color per connection.
 - [examples/datalevin](examples/datalevin) is a Datalevin browser over a
-  MusicBrainz sample, with a query log shared between viewers.
+  MusicBrainz sample, with a query log shared between viewers. It uses a database source.
 
 ## Development
 
     bb dev    # the demo, plus an nrepl on 1667
 
-Evaluate a `defui` or a `defpart` again and the open page updates. Browser state
-survives the update, and also a reconnect after a restart.
+Re-evaluate a `defui` or `defpart` to update open pages. Local state survives
+updates and reconnects when the number of `local-state` forms stays the same.

@@ -11,6 +11,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # A render lane per connection is a virtual thread, so the JVM side needs
+      # 21 or later. See doc/ai/adr/0008-a-render-lane-per-connection.md.
+      # Babashka carries its own runtime and does not need this.
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
       - uses: DeLaGuardo/setup-clojure@13.6.1
         with:
           bb: latest

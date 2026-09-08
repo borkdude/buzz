@@ -1,4 +1,0 @@
-{:deps {io.github.borkdude/buzz-datalevin {:local/root "."}}
- :tasks {dev {:doc "Serve the browser on http://localhost:1395"
-              :requires ([buzz.dlv :as dlv])
-              :task (dlv/-main)}}}

@@ -1,6 +1,9 @@
 (ns buzz.handler-test
   (:require [babashka.fs :as fs]
-            [buzz.core :as handler :refer [defpart defui local-state reply request server server!]]
+            [buzz.core :as handler :refer [defpart defui local-state observe reply request
+                                           server server!]]
+            [buzz.impl.hub :as hub]
+            [buzz.source :as source]
             [buzz.stream :as stream]
             [cheshire.core :as json]
             [clojure.string :as str]
@@ -99,12 +102,13 @@
 
 ;; Two slots over a watched atom. Redefining this is the reload.
 (def ^:private panel-q (atom 0))
+(def ^:private panel-src (handler/atom-source panel-q))
 
 (defui panel []
-  [:p (server @panel-q) (server (inc @panel-q))])
+  [:p (server (observe panel-src [])) (server (inc (observe panel-src [])))])
 
-(def ^:private two-slots '(defui panel [] [:p (server @panel-q) (server (inc @panel-q))]))
-(def ^:private one-slot '(defui panel [] [:p (server @panel-q)]))
+(def ^:private two-slots '(defui panel [] [:p (server (observe panel-src [])) (server (inc (observe panel-src [])))]))
+(def ^:private one-slot '(defui panel [] [:p (server (observe panel-src []))]))
 
 (defn- redefine!
   "Re-evaluates a defui here, which is what a REPL does. The runner is in
@@ -115,7 +119,6 @@
 
 (def ^:private panel-spec
   {:title "panel"
-   :watch [panel-q]
    :mounts [{:el "app" :ui #'panel}]})
 
 ;; Re-evaluating a defui rebuilds every open connection. The instance a
@@ -149,13 +152,13 @@
 ;; The slot reads one key. The other is there to be written without the browser
 ;; hearing about it.
 (def ^:private board-st (atom {:shown 0 :hidden 0}))
+(def ^:private board-src (handler/atom-source board-st))
 
 (defui board []
-  [:p (server (:shown @board-st))])
+  [:p (server (:shown (observe board-src [])))])
 
 (def ^:private board-spec
   {:title "board"
-   :watch [board-st]
    :mounts [{:el "app" :ui #'board}]})
 
 ;; A watched atom says something was written, not that this mount has anything
@@ -310,16 +313,17 @@
 ;; own slots, so nothing one does reaches the other.
 (def ^:private left-n (atom 0))
 (def ^:private right-n (atom 100))
+(def ^:private left-src (handler/atom-source left-n))
+(def ^:private right-src (handler/atom-source right-n))
 
 (defui left-tally []
-  [:p (server @left-n) [:button {:on-click (fn [_] (server! (swap! left-n inc)))} "+"]])
+  [:p (server (observe left-src [])) [:button {:on-click (fn [_] (server! (swap! left-n inc)))} "+"]])
 
 (defui right-tally []
-  [:p (server @right-n) [:button {:on-click (fn [_] (server! (swap! right-n dec)))} "-"]])
+  [:p (server (observe right-src [])) [:button {:on-click (fn [_] (server! (swap! right-n dec)))} "-"]])
 
 (def ^:private two-mounts-spec
   {:title "two"
-   :watch [left-n right-n]
    :mounts [{:el "left" :ui #'left-tally}
             {:el "right" :ui #'right-tally}]})
 
@@ -347,15 +351,16 @@
 ;; The headline the readme makes: state the server owns is the same for every
 ;; browser, and state a browser owns is its own.
 (def ^:private shared (atom 0))
+(def ^:private shared-src (handler/atom-source shared))
 
 (def ^:private seen (atom {}))
+(def ^:private seen-src (handler/atom-source seen))
 
 (defui ticker []
-  [:p (server @shared) (server (get @seen (handler/connection (request)) 0))])
+  [:p (server (observe shared-src [])) (server (or (observe seen-src [(handler/connection (request))]) 0))])
 
 (def ^:private ticker-spec
   {:title "ticker"
-   :watch [shared seen]
    :mounts [{:el "app" :ui #'ticker}]})
 
 (deftest a-watched-atom-reaches-every-connection
@@ -427,16 +432,16 @@
   [:em n])
 
 (def ^:private card-q (atom 0))
+(def ^:private card-src (handler/atom-source card-q))
 
 (defui card []
-  [:p (badge (server @card-q))])
+  [:p (badge (server (observe card-src [])))])
 
 (def ^:private louder-badge '(defpart badge [n] [:em n "!"]))
 (def ^:private plain-badge  '(defpart badge [n] [:em n]))
 
 (def ^:private card-spec
   {:title "card"
-   :watch [card-q]
    :mounts [{:el "app" :ui #'card}]})
 
 (deftest editing-a-part-reloads-the-pages-that-show-it
@@ -461,16 +466,16 @@
         (finally (redefine! plain-badge))))))
 
 (def ^:private steps (atom 0))
+(def ^:private steps-src (handler/atom-source steps))
 
 (defpart step-button [label]
   [:button {:on-click (fn [_] (server! (swap! steps inc)))} label])
 
 (defui stepped-panel []
-  [:div (server @steps) (step-button "go")])
+  [:div (server (observe steps-src [])) (step-button "go")])
 
 (def ^:private stepped-spec
   {:title "stepped"
-   :watch [steps]
    :mounts [{:el "app" :ui #'stepped-panel}]})
 
 (deftest a-function-part-serves-and-answers-through-its-component
@@ -572,14 +577,14 @@
 ;; `.-f`, `.-init` and `.-nlocals`, so the names here are a contract between two
 ;; files that nothing else holds together.
 (def ^:private gauge-q (atom 0))
+(def ^:private gauge-src (handler/atom-source gauge-q))
 
 (defui gauge []
   (let [seen (local-state 0)]
-    [:p (server @gauge-q) @seen]))
+    [:p (server (observe gauge-src [])) @seen]))
 
 (def ^:private gauge-spec
   {:title "gauge"
-   :watch [gauge-q]
    :mounts [{:el "app" :ui #'gauge}]})
 
 (deftest the-browser-is-served-the-modules-it-imports
@@ -793,12 +798,18 @@
 ;; of what an adapter provides. A fake one drives a page with no server and no
 ;; socket, which is also what running Buzz on another server looks like.
 (defui faked []
-  [:p (server @shared)])
+  [:p (server (observe shared-src []))])
 
 (def ^:private faked-spec
   {:title "faked"
-   :watch [shared]
    :mounts [{:el "app" :ui #'faked}]})
+
+(defn- mounted?
+  "Whether a fake stream has received its mount frame. The lane writes the
+  session and mount frames after `on-open` returns, so a fake adapter awaits
+  them where a socket test blocks on the read."
+  [frames]
+  (str/includes? (str (last @frames)) "\"mount\""))
 
 (deftest the-stream-is-served-through-an-adapter
   (reset! shared 0)
@@ -821,7 +832,7 @@
     (@opened ch)
 
     (testing "the session and the mount arrive as frames"
-      (is (= 2 (count @frames)))
+      (is (until 2000 #(= 2 (count @frames))))
       (is (str/starts-with? (first @frames) "data: [\"session\""))
       (is (str/includes? (second @frames) "\"mount\"")))
 
@@ -829,9 +840,11 @@
       (swap! shared inc)
       (is (until 2000 #(str/includes? (str (last @frames)) "\"patch\""))))
 
+    ;; The lane clears the registry as it exits, so this is asked for rather
+    ;; than assumed: a render still in flight finishes before the teardown.
     (testing "the close callback drops the connection"
       (@closed)
-      (is (empty? (registry-of ui))))))
+      (is (until 2000 #(empty? (registry-of ui)))))))
 
 ;; A second server. Capra streams through StreamableResponseBody rather than
 ;; a channel, so if a page runs on it unchanged the adapter seam holds. It
@@ -841,7 +854,9 @@
   (let [run-server (requiring-resolve 'capra.server/run-server)
         adapter    @(requiring-resolve 'buzz.capra/adapter)
         port       (with-open [s (java.net.ServerSocket. 0)] (.getLocalPort s))
-        ui         (handler/handler (assoc faked-spec :adapter adapter))
+        ;; Use a short interval to fill the disconnected client's queue.
+        ui         (handler/handler (assoc faked-spec :adapter adapter
+                                           :render-interval-ms 5))
         server     (run-server (fn [req] (or (ui req) {:status 404 :body "no"}))
                                :port port)]
     (try
@@ -856,11 +871,9 @@
         (testing "the rpc endpoint is plain ring, so it just works"
           (is (= 404 (first (rpc (assoc conn :session "made-up") "nope/0" [])))))
 
-        (testing "a closed client is learned about, and no watch thread blocks"
+        (testing "a disconnected client is removed while writes continue"
           (.close sock)
-          ;; The pump blocks on its write to the dead socket, so the exit is
-          ;; capra's queue-full timeout. Coalesced renders fill the 256-slot
-          ;; queue at the render rate, which takes about six seconds.
+          ;; Allow the 256-slot queue to fill and time out after disconnect.
           (is (until 10000 #(do (swap! shared inc)
                                (empty? (registry-of ui)))))))
       (finally (.close server)))))
@@ -869,9 +882,10 @@
 ;; carry the last state. Driven through the fake adapter, so the assertions
 ;; are on the frames a browser would get.
 (defonce ^:private pulse (atom 0))
+(def ^:private pulse-src (handler/atom-source pulse))
 
 (defui coalesced-ui []
-  [:p (server @pulse)])
+  [:p (server (observe pulse-src []))])
 
 (deftest render-interval-collapses-a-burst
   (reset! pulse 0)
@@ -881,7 +895,6 @@
                  (reset! opened on-open)
                  {:status status :body :fake-stream})
         ui     (handler/handler {:title "coalesced"
-                                 :watch [pulse]
                                  :render-interval-ms 25
                                  :mounts [{:el "app" :ui #'coalesced-ui}]
                                  :adapter fake})
@@ -890,6 +903,7 @@
                  (send! [_ s] (swap! frames conj s) true)
                  (close! [_] nil))]
     (@opened ch)
+    (is (until 2000 #(mounted? frames)))
 
     (testing "a lone write patches promptly"
       (swap! pulse inc)
@@ -915,7 +929,6 @@
                  (reset! opened on-open)
                  {:status status :body :fake-stream})
         ui     (handler/handler {:title "stress"
-                                 :watch [pulse]
                                  :render-interval-ms 5
                                  :mounts [{:el "app" :ui #'coalesced-ui}]
                                  :adapter fake})
@@ -924,6 +937,7 @@
                  (send! [_ s] (swap! frames conj s) true)
                  (close! [_] nil))]
     (@opened ch)
+    (is (until 2000 #(mounted? frames)))
     (let [threads 8
           writes  500
           workers (mapv (fn [_] (future (dotimes [_ writes] (swap! pulse inc))))
@@ -938,12 +952,13 @@
 ;; A slot that throws must not kill the scheduler: the failed render is
 ;; reported and the next write renders normally.
 (defonce ^:private flaky (atom 0))
+(def ^:private flaky-src (handler/atom-source flaky))
 
 (defn- explode-on-neg [n]
   (if (neg? n) (throw (ex-info "boom" {})) n))
 
 (defui flaky-ui []
-  [:p (server (explode-on-neg @flaky))])
+  [:p (server (explode-on-neg (observe flaky-src [])))])
 
 (deftest render-interval-survives-a-throwing-slot
   (reset! flaky 0)
@@ -953,7 +968,6 @@
                  (reset! opened on-open)
                  {:status status :body :fake-stream})
         ui     (handler/handler {:title "flaky"
-                                 :watch [flaky]
                                  :render-interval-ms 10
                                  :mounts [{:el "app" :ui #'flaky-ui}]
                                  :adapter fake})
@@ -962,6 +976,7 @@
                  (send! [_ s] (swap! frames conj s) true)
                  (close! [_] nil))]
     (@opened ch)
+    (is (until 2000 #(mounted? frames)))
     (testing "a write whose render throws sends nothing"
       (let [n (count @frames)]
         (reset! flaky -1)
@@ -976,12 +991,13 @@
 ;; connection recovers on the next healthy render.
 (defonce ^:private poisoned (atom #{}))
 (defonce ^:private beat (atom 0))
+(def ^:private beat-src (handler/atom-source beat))
 
 (defn- guard [conn n]
   (if (@poisoned conn) (throw (ex-info "poisoned" {})) n))
 
 (defui isolated-ui []
-  [:p (server (guard (handler/connection (request)) @beat))])
+  [:p (server (guard (handler/connection (request)) (observe beat-src [])))])
 
 (deftest a-throwing-connection-does-not-starve-the-others
   (reset! poisoned #{})
@@ -992,7 +1008,6 @@
                  {:status status :body :fake-stream})
         ;; synchronous renders, so the assertions need no polling
         ui     (handler/handler {:title "isolated"
-                                 :watch [beat]
                                  :render-interval-ms 0
                                  :mounts [{:el "app" :ui #'isolated-ui}]
                                  :adapter fake})
@@ -1003,6 +1018,7 @@
                             (send! [_ s] (swap! frames conj s) true)
                             (close! [_] nil))]
                    ((last @opens) ch)
+                   (is (until 2000 #(mounted? frames)))
                    {:frames frames
                     :session (second (json/parse-string (subs (first @frames) 6)))}))
         one    (open!)
@@ -1025,3 +1041,401 @@
       (swap! beat inc)
       (is (str/includes? (str (last @(:frames one))) "[3]"))
       (is (str/includes? (str (last @(:frames two))) "[3]")))))
+
+;; ---------------------------------------------------------------------------
+;; Sources and topics
+;;
+(defonce ^:private ledger (atom {"alice" ["water the plants"]
+                                "bob"   ["renew the domain"]}))
+
+(def ^:private ledger-source (handler/atom-source ledger))
+
+(defonce ^:private slot-runs (atom {}))
+
+(defn- user-of [req] (get-in req [:headers "x-user"]))
+
+(defn- ran! [req] (swap! slot-runs update (user-of req) (fnil inc 0)))
+
+(defui observed-notes []
+  [:ul (for [n (server (do (ran! (request))
+                           (observe ledger-source [(user-of (request))])))]
+         [:li n])])
+
+(defui coarse-notes []
+  [:ul (for [n (server (do (ran! (request))
+                           (get (observe ledger-source []) (user-of (request)))))]
+         [:li n])])
+
+(defn- ledger-subscriptions
+  "Returns the subscribed keys of `ledger-source`."
+  []
+  (into #{} (comp (filter #(= ledger-source (:source %))) (map :k))
+        (hub/subscriptions)))
+
+(defn- with-two
+  "Serves `spec` and opens one connection as alice and one as bob, each past
+  its mount frame."
+  [spec f]
+  (let [ui    (handler/handler spec)
+        stop  (http/run-server (fn [req] (or (ui req) {:status 404 :body "no"}))
+                               {:port 0})
+        port  (:local-port (meta stop))
+        alice (open-events port {"X-User" "alice"})
+        bob   (open-events port {"X-User" "bob"})]
+    (next-event (:rdr alice))
+    (next-event (:rdr bob))
+    (reset! slot-runs {})
+    (try
+      (f {:ui ui :port port :alice alice :bob bob})
+      (finally
+        (.close ^java.net.Socket (:sock alice))
+        (.close ^java.net.Socket (:sock bob))
+        (stop)))))
+
+(deftest a-write-reaches-only-the-connections-that-observed-it
+  (with-two {:mounts [{:el "app" :ui #'observed-notes}] :render-interval-ms 0}
+    (fn [{:keys [alice bob]}]
+      (swap! ledger update "alice" conj "call the vet")
+      (testing "the connection that read the changed key is patched"
+        (is (= "patch" (first (next-event (:rdr alice))))))
+      (testing "the other connection is not written to"
+        (is (silent? (:sock bob) (:rdr bob) 300)))
+      (testing "the other connection does not render"
+        (is (= {"alice" 1} @slot-runs))))))
+
+(deftest a-coarse-key-runs-every-connection-that-reads-it
+  (with-two {:mounts [{:el "app" :ui #'coarse-notes}]
+             :render-interval-ms 0}
+    (fn [{:keys [alice bob]}]
+      (swap! ledger update "alice" conj "call the vet")
+      (is (= "patch" (first (next-event (:rdr alice)))))
+      (testing "bob's slot runs even though nothing of his changed"
+        (is (= {"alice" 1 "bob" 1} @slot-runs)))
+      (testing "unchanged values produce no patch"
+        (is (silent? (:sock bob) (:rdr bob) 300))))))
+
+(deftest invalidating-a-topic-nobody-holds-does-nothing
+  (with-two {:mounts [{:el "app" :ui #'observed-notes}] :render-interval-ms 0}
+    (fn [{:keys [alice bob]}]
+      (hub/invalidate! [:nobody-holds-this])
+      (is (silent? (:sock alice) (:rdr alice) 300))
+      (is (silent? (:sock bob) (:rdr bob) 300))
+      (is (= {} @slot-runs)))))
+
+;; One subscription per key per process, however many connections read it, and
+;; released once the last of them lets go.
+(deftest a-source-is-subscribed-once-and-released-after-the-last-connection
+  (let [grace @hub/release-grace-ms]
+    (reset! hub/release-grace-ms 0)
+    (try
+      (with-two {:mounts [{:el "app" :ui #'observed-notes}] :render-interval-ms 0}
+        (fn [_]
+          (testing "one subscription per key, not per connection"
+            (is (= #{["alice"] ["bob"]} (ledger-subscriptions))))))
+      (testing "both connections gone, both subscriptions released"
+        (is (until 3000 #(empty? (ledger-subscriptions)))))
+      (finally (reset! hub/release-grace-ms grace)))))
+
+;; Write during rendering to check that a subsequent render delivers the change.
+(defonce ^:private race-state (atom {:x 0}))
+(def ^:private race-source (handler/atom-source race-state))
+(defonce ^:private race-armed (atom true))
+
+(defui racer []
+  [:p (server (let [v (observe race-source [:x])]
+                (when (compare-and-set! race-armed true false)
+                  (swap! race-state update :x inc))
+                v))])
+
+(deftest a-change-during-the-first-render-is-not-lost
+  (reset! race-state {:x 0})
+  (reset! race-armed true)
+  (with-connection {:mounts [{:el "app" :ui #'racer}] :render-interval-ms 0}
+    (fn [{:keys [rdr]}]
+      (testing "the mount frame carries what the slot read"
+        (is (= ["mount" "racer" "app" [0]] (next-event rdr))))
+      (testing "the change that landed during that render still arrives"
+        (is (= ["patch" "racer" [1]] (next-event rdr)))))))
+
+;; ---------------------------------------------------------------------------
+;; Which reads register
+;;
+(defonce ^:private ways (atom {:direct 0 :thread 0 :future 0 :lazy 0}))
+(def ^:private ways-source (handler/atom-source ways))
+
+(defui reader-ways []
+  [:div
+   [:p (server @(future (observe ways-source [:future])))]
+   [:p (server (vec (map (fn [k] (observe ways-source [k])) [:lazy])))]
+   [:p (server (let [p (promise)]
+                 (.start (Thread. ^Runnable
+                                  (fn [] (deliver p (observe ways-source [:thread])))))
+                 @p))]
+   [:p (server (:direct @ways))]])
+
+(defn- registered-keys
+  "Returns the source keys observed by connections to `ui`."
+  [ui]
+  (let [registry (::handler/registry (meta ui))
+        index (:index (first (filter #(= registry (:registry %)) (hub/entries))))]
+    (into (sorted-set)
+          (comp (filter hub/source-topic?) (map (comp first :k)))
+          (mapcat val (:by-session @index)))))
+
+(deftest which-reads-register
+  (reset! ways {:direct 0 :thread 0 :future 0 :lazy 0})
+  (with-connection {:mounts [{:el "app" :ui #'reader-ways}] :render-interval-ms 0}
+    (fn [{:keys [rdr ui]}]
+      (is (= ["mount" "reader-ways" "app" [0 [0] 0 0]] (next-event rdr)))
+      (testing "a future conveys the binding, and a lazy seq is realised in the render"
+        (is (= #{:future :lazy} (registered-keys ui))))
+      (testing "reads on a new thread do not register subscriptions"
+        (is (not (contains? (registered-keys ui) :thread))))
+      (testing "a read that never touches a source registers nothing"
+        (is (not (contains? (registered-keys ui) :direct)))))))
+
+(deftest a-lost-read-never-reaches-the-browser
+  (reset! ways {:direct 0 :thread 0 :future 0 :lazy 0})
+  (with-connection {:mounts [{:el "app" :ui #'reader-ways}] :render-interval-ms 0}
+    (fn [{:keys [sock rdr]}]
+      (next-event rdr)
+
+      (testing "changes to observed keys trigger a render"
+        (swap! ways update :future inc)
+        (is (= ["patch" "reader-ways" [1 [0] 0 0]] (next-event rdr)))
+        (swap! ways update :lazy inc)
+        (is (= ["patch" "reader-ways" [1 [1] 0 0]] (next-event rdr))))
+
+      (testing "changes to untracked keys do not trigger a render"
+        (swap! ways update :thread inc)
+        (is (silent? sock rdr 300))
+        (swap! ways update :direct inc)
+        (is (silent? sock rdr 300)))
+
+      (testing "a later render includes values read without tracking"
+        (swap! ways update :future inc)
+        (is (= ["patch" "reader-ways" [2 [1] 1 1]] (next-event rdr)))))))
+
+;; ---------------------------------------------------------------------------
+;; The Source contract
+;;
+(defn- check-source
+  "Runs the contract against `source`. `write!` puts a value at `k`."
+  [label source k write!]
+  (testing label
+    (write! 1)
+    (let [handle (atom nil)
+          seen   (atom [])
+          h      (source/-subscribe source k (fn [] (swap! seen conj @@handle)))]
+      (reset! handle h)
+      (testing "the handle holds the current value once subscribed"
+        (is (= 1 @h)))
+
+      (testing "the handle holds the new value before notify is called"
+        (write! 2)
+        (is (= [2] @seen))
+        (is (= 2 @h)))
+
+      (testing "a change after unsubscribe does not notify"
+        (source/-unsubscribe source k h)
+        (write! 3)
+        (is (= [2] @seen))))
+
+    (testing "closing one handle leaves another for the same key alone"
+      (let [first-h (source/-subscribe source k (fn []))
+            seen    (atom 0)
+            second-h (source/-subscribe source k (fn [] (swap! seen inc)))]
+        (source/-unsubscribe source k first-h)
+        (write! 5)
+        (is (= 1 @seen))
+        (is (= 5 @second-h))
+        (source/-unsubscribe source k second-h)))))
+
+(defonce ^:private pushed (atom {}))
+(defonce ^:private pushes (atom {}))
+
+(defrecord PushSource []
+  source/Source
+  (-subscribe [_ k notify]
+    (let [cache (atom ::none)]
+      (swap! pushes assoc cache {:k k :notify notify})
+      (compare-and-set! cache ::none (get @pushed k))
+      cache))
+  (-unsubscribe [_ _ handle]
+    (swap! pushes dissoc handle)))
+
+(defn- push! [k v]
+  (swap! pushed assoc k v)
+  (doseq [[cache sub] @pushes :when (= k (:k sub))]
+    (reset! cache v)
+    ((:notify sub))))
+
+(deftest sources-hold-the-contract
+  (let [a (atom {})]
+    (check-source "atom-source" (handler/atom-source a) [:k]
+                  #(swap! a assoc :k %)))
+  (reset! pushed {})
+  (reset! pushes {})
+  (check-source "a source with no store" (->PushSource) :k #(push! :k %)))
+
+;; ---------------------------------------------------------------------------
+;; Subscription lifecycle
+
+(defonce ^:private lease (atom {:x 0}))
+(def ^:private lease-source (handler/atom-source lease))
+
+(defn- lease-subs []
+  (into #{} (comp (filter #(= lease-source (:source %))) (map :k))
+        (hub/subscriptions)))
+
+(defmacro ^:private with-grace [ms & body]
+  `(let [was# @hub/release-grace-ms]
+     (reset! hub/release-grace-ms ~ms)
+     (try ~@body (finally (reset! hub/release-grace-ms was#)))))
+
+(deftest a-read-outside-a-render-does-not-leak-a-subscription
+  (with-grace 500
+    (testing "reads outside a render release their subscriptions"
+      (dotimes [i 20] (observe lease-source [(str "tok-" i)]))
+      (is (= 20 (count (lease-subs))))
+      (is (until 3000 #(empty? (lease-subs)))))))
+
+(defui lease-page []
+  [:p (server (observe lease-source [:x]))])
+
+(deftest a-page-request-without-a-stream-does-not-leak-a-subscription
+  (with-grace 200
+    (let [ui (handler/handler {:title "lease" :mounts [{:el "app" :ui #'lease-page}]})]
+      (ui {:uri "/" :headers {}})
+      (is (until 3000 #(empty? (lease-subs)))))))
+
+(deftest a-delayed-release-does-not-close-a-subscription-taken-since
+  (with-grace 50
+    (let [t (hub/->SourceTopic lease-source [:x])]
+      (observe lease-source [:x])       ; takes it and schedules a release
+      (Thread/sleep 10)
+      (hub/sub-for t)                   ; takes it again, before that release runs
+      (Thread/sleep 200)                ; the first release has now had its turn
+      (testing "the release was scheduled for a generation that is no longer current"
+        (is (contains? (hub/subscriptions) t)))
+      (testing "the current handle receives updates"
+        (let [handle (hub/sub-for t)]
+          (swap! lease update :x inc)
+          (is (= (:x @lease) @handle))))
+      (observe lease-source [:x])       ; schedules one for the current generation
+      (is (until 3000 #(empty? (lease-subs)))))))
+
+(deftest keys-of-different-shapes-do-not-fight-over-one-watch
+  (with-grace 500
+    (let [scalar (hub/->SourceTopic lease-source :x)
+          vector (hub/->SourceTopic lease-source [:x])]
+      (observe lease-source :x)
+      (observe lease-source [:x])
+      ;; hold the handles, so the assertions do not take the subscriptions
+      ;; again and keep them alive past their release
+      (let [h1 (hub/sub-for scalar)
+            h2 (hub/sub-for vector)]
+        (swap! lease update :x inc)
+        (testing "both topics saw the write"
+          (is (= (:x @lease) @h1))
+          (is (= (:x @lease) @h2))))
+      (observe lease-source :x)
+      (observe lease-source [:x])
+      (is (until 3000 #(empty? (lease-subs)))))))
+
+;; Check that concurrent writes leave the handle with the latest value.
+(deftest a-handle-settles-on-the-latest-value-under-concurrent-writers
+  (dotimes [_ 20]
+    (let [a   (atom {:x 0})
+          src (handler/atom-source a)
+          h   (source/-subscribe src [:x] (fn []))
+          ws  (doall (for [_ (range 4)]
+                       (future (dotimes [_ 200] (swap! a update :x inc)))))]
+      (doseq [w ws] @w)
+      (is (= (:x @a) @h))
+      (source/-unsubscribe src [:x] h))))
+
+(deftest a-release-for-a-held-key-leaves-the-subscription-alone
+  (with-grace 50
+    (reset! ledger {"alice" ["water the plants"]})
+    (with-two {:mounts [{:el "app" :ui #'observed-notes}] :render-interval-ms 0}
+      (fn [{:keys [alice]}]
+        ;; what a router or an rpc handler does: observe outside a render
+        (observe ledger-source ["alice"])
+        (Thread/sleep 200)                ; the release it scheduled has run
+        (testing "the connection's subscription survives"
+          (is (contains? (into #{} (map :k) (hub/subscriptions)) ["alice"])))
+        (testing "later changes update the page"
+          (swap! ledger update "alice" conj "call the vet")
+          (is (= "patch" (first (next-event (:rdr alice))))))))))
+
+(deftest a-connection-is-registered-before-its-first-frame
+  (with-connection {:mounts [{:el "app" :ui #'desk}] :render-interval-ms 0}
+    (fn [{:keys [ui session] :as conn}]
+      (testing "the registered session accepts RPC calls"
+        (is (contains? (registry-of ui) session))
+        (is (= [204 ""] (rpc conn "desk/0" [])))))))
+
+(defonce ^:private hangup (atom {:x 0}))
+(def ^:private hangup-source (handler/atom-source hangup))
+
+(defui hangup-page []
+  [:p (server (observe hangup-source [:x]))])
+
+(deftest a-write-does-not-hang-on-a-connection-that-just-went-away
+  (reset! hangup {:x 0})
+  (let [ui   (handler/handler {:mounts [{:el "app" :ui #'hangup-page}]
+                               :render-interval-ms 0})
+        stop (http/run-server (fn [req] (or (ui req) {:status 404 :body "no"}))
+                              {:port 0})
+        port (:local-port (meta stop))]
+    (try
+      (testing "closing sockets while writing never blocks the writer"
+        (dotimes [_ 15]
+          (let [conn (open-events port {"X-User" "alice"})]
+            (next-event (:rdr conn))
+            ;; the close and the write race on purpose
+            (future (.close ^java.net.Socket (:sock conn)))
+            (let [done (future (swap! hangup update :x inc) :written)]
+              (is (= :written (deref done 4000 :timed-out)))))))
+      (finally (stop)))))
+
+(defn- captured-out
+  "Calls `f` with a writer and captures output through the root binding of
+  `*out*`. Returns the captured string and restores the original binding."
+  [f]
+  (let [sw   (java.io.StringWriter.)
+        root (alter-var-root #'*out* identity)]
+    (alter-var-root #'*out* (constantly sw))
+    (try (f sw) (finally (alter-var-root #'*out* (constantly root))))
+    (str sw)))
+
+(defonce ^:private closed-count (atom 0))
+
+(defui plain-page []
+  [:p (server (observe hangup-source [:x]))])
+
+(deftest a-throwing-on-close-still-finishes-the-teardown
+  (reset! closed-count 0)
+  (let [ui   (handler/handler {:mounts [{:el "app" :ui #'plain-page}]
+                               :render-interval-ms 0
+                               :on-close (fn [_]
+                                           (swap! closed-count inc)
+                                           (throw (ex-info "on-close blew up" {})))})
+        stop (http/run-server (fn [req] (or (ui req) {:status 404 :body "no"}))
+                              {:port 0})
+        port (:local-port (meta stop))
+        ;; Keep capturing until the close failure has been logged.
+        out  (captured-out
+              (fn [sw]
+                (let [conn (open-events port {"X-User" "alice"})]
+                  (next-event (:rdr conn))
+                  (.close ^java.net.Socket (:sock conn))
+                  (is (until 3000 #(str/includes? (str sw) "on-close blew up"))))))]
+    (try
+      (testing "the hook ran and the connection is gone anyway"
+        (is (= 1 @closed-count))
+        (is (empty? (registry-of ui))))
+      (testing "the close failure is logged"
+        (is (str/includes? out "on-close blew up")))
+      (finally (stop)))))

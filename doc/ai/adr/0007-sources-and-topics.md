@@ -6,9 +6,23 @@ Status: Layers 0, 1 and 2 are implemented on the `sources-and-topics` branch,
 with two sources: `atom-source` in core and a Datalevin source keyed by a
 datalog query in `examples/datalevin`, which derives its notifications from
 the transaction report. Layer 0 is internal, so the public API is `observe`,
-`atom-source` and the `Source` protocol. The per topic counters are still open,
-as is the development mode that catches a slot whose value changed while its
-source stayed quiet.
+`atom-source` and the `Source` protocol. `:watch` is gone, so a slot reads
+server state through a source or not at all. The subscription lifecycle was
+reviewed three times and six leaks and races were fixed: an untracked read left a
+subscription nothing would release, keys of different shapes fought over one
+atom watch, `atom-source` read before it subscribed and could then store the
+older value over a newer one, a delayed release could close a subscription
+taken since, closing a handle could close a newer one for the same key, and
+concurrent atom callbacks could finish out of order and leave the older value
+on top. The seven contract rules are on `buzz.source/Source` and tested against
+two implementations.
+[0008](0008-a-render-lane-per-connection.md) later replaced the shared render
+scheduler with a lane per connection and deleted the version machinery: the
+hazards section below explains the window the versions guarded, which a lane
+closes by construction. Still
+open: the per topic
+counters, indexing `atom-source` by the first key of a path, and per slot
+skipping, which is [0002](0002-work-after-the-scheduler.md) section 1.
 
 ## Context
 
@@ -52,32 +66,38 @@ can all be.
 
 `bb bench-topics`, babashka, `:render-interval-ms 0` so the write pays for the
 render the way 0001 measured it. N connections, one per user, and the timed
-operation is one write to user-0's data. Median of 201 samples.
+operation is one write to user-0's data. Median of 201 samples. The wide key is
+`[]`, the whole map, which is what `:watch` used to do. The narrow key is one
+user.
 
 Slot is a map lookup:
 
-| connections | :watch us/write | topics us/write | :watch slot runs | topics slot runs |
+| connections | wide us/write | narrow us/write | wide slot runs | narrow slot runs |
 |---|---|---|---|---|
-| 1   |  15.0 | 42.6 |   1 | 1 |
-| 10  |  60.0 | 21.9 |  10 | 1 |
-| 25  |  96.7 | 28.0 |  25 | 1 |
-| 50  | 175.2 | 29.6 |  50 | 1 |
-| 100 | 337.6 | 33.1 | 100 | 1 |
+| 1   |  18.0 | 47.0 |   1 | 1 |
+| 10  |  71.5 | 51.0 |  10 | 1 |
+| 25  | 140.0 | 54.8 |  25 | 1 |
+| 50  | 257.1 | 27.2 |  50 | 1 |
+| 100 | 503.8 | 38.4 | 100 | 1 |
 
-Slot does about 60 us of work, standing in for a query:
+Slot does about 67 us of work, standing in for a query:
 
-| connections | :watch us/write | topics us/write | :watch slot runs | topics slot runs |
+| connections | wide us/write | narrow us/write | wide slot runs | narrow slot runs |
 |---|---|---|---|---|
-| 1   |   91.4 |  95.2 |   1 | 1 |
-| 10  |  678.2 |  94.8 |  10 | 1 |
-| 25  | 1646.3 |  98.1 |  25 | 1 |
-| 50  | 3247.1 | 101.1 |  50 | 1 |
-| 100 | 6449.9 | 113.0 | 100 | 1 |
+| 1   |   77.3 | 77.8 |   1 | 1 |
+| 10  |  446.6 | 78.1 |  10 | 1 |
+| 25  | 1074.7 | 85.8 |  25 | 1 |
+| 50  | 2200.4 | 80.5 |  50 | 1 |
+| 100 | 4299.4 | 82.3 | 100 | 1 |
 
 The slot runs columns are the mechanism: N against 1, whatever the slot costs.
 The clock only makes it visible once a slot costs something, which is why the
-first table barely moves and the second is 57 times apart at 100 connections.
+first table barely moves and the second is 52 times apart at 100 connections.
 An application whose slots query a database is the second table.
+
+Both columns use the same mechanism and differ only in the width of the key.
+That is the point: the fan out is a property of what a slot reads, not of a
+setting on the handler.
 
 ## Decision
 
@@ -95,7 +115,11 @@ integration seam, and the whole public API together with layer 2.
 **Layer 2, `observe`.** A slot's reads through a source become its topics, so
 subscriptions are derived rather than declared.
 
-`:watch` stays, as one small built in source.
+`:watch` is removed. It was a declared dependency at handler granularity, and
+so carried the drift it looked like it was protecting against: leave an atom
+out of the vector and the page goes quietly stale. Reading the whole atom
+through a source says the same thing, per connection rather than per handler,
+and says it where the value is read.
 
 ## Layer 0: topics
 
@@ -114,7 +138,7 @@ expression.
 Keeping both would put two mechanisms in the public API, one safe and one not,
 and the unsafe one only covered cases a small source covers better. So the
 public API is `observe`, `atom-source` and the `Source` protocol, and nothing
-else. `:watch` marks one internal topic that every connection holds.
+else.
 
 What this gives up is an escape hatch for a change that arrives through no
 source at all, a webhook being the example. The answer is to write the source:
@@ -153,13 +177,24 @@ its last closes it after a grace period.
 | Redis | channel name | cached result, notified from pub sub |
 | HTTP API | endpoint | cached result, notified from a poller or a webhook |
 
+A callback already running when `-unsubscribe` returns may still call `notify`,
+and closing that window would mean waiting for callbacks that can themselves
+render, from the thread that schedules releases. Nothing it does is wrong. The
+version it raises belongs to a released subscription, and `stale?` treats a
+missing entry as stale rather than reading it. The mark that follows is
+dropped when nothing holds the topic, since `holds-any?` is false. The cost is
+therefore an invalidation rather than a render: if a replacement subscription
+has been taken and several connections hold that topic, across any handler,
+they all render, and all of them read the current handle. Redundant, bounded,
+and never a wrong value.
+
 One handle per `[source k]` per process, shared by every connection holding that
 topic. Alice with three tabs has one subscription and one materialised value.
 That is a piece of [0002](0002-work-after-the-scheduler.md) section 2 falling
 out rather than being built.
 
-After this layer, buzz core knows nothing about atoms. `:watch` is a source
-whose key space has one member.
+After this layer, buzz core knows nothing about atoms. An atom is a source
+like any other, and the whole of it is the key `[]`.
 
 ## Layer 2: observe
 
@@ -210,7 +245,7 @@ The handler writes the atom and says nothing else. The source notices the write,
 marks the key, and every tab and device of that user refreshes. Nobody else's
 slots run.
 
-## The three hazards
+## The hazards
 
 **Subscribe before reading.** Read first and subscribe second and a change
 landing in between is lost, leaving that connection on a stale value with
@@ -250,8 +285,31 @@ condition opens and closes the same Rama proxy on every click.
 establishes the set, so a slot that reads conditionally is only fully subscribed
 after the second render. Normal for reactive systems, worth stating.
 
-None of the three is a reason not to build this. All three are a reason to build
-layers 1 and 2 separately, with their own tests.
+**A read that leaves the render thread is not recorded.** `observe` writes into
+a dynamic binding, so whether a read counts depends on where it runs. Measured,
+not guessed:
+
+| how the slot reads the key | recorded | why |
+|---|---|---|
+| `(observe src k)` | yes | |
+| inside a `future`, awaited | yes | Clojure conveys bindings into `future` |
+| inside a lazy sequence | yes | the render realises it, when comparing and encoding |
+| on a `Thread` or executor of our own | **no** | it starts from the root bindings |
+| `@some-atom`, no source at all | **no** | nothing to record |
+
+The lazy case holds by where the work sits rather than by design. Move the
+encoding to another thread and it stops being true, which is what
+`a-lost-read-never-reaches-the-browser` in `test/buzz/handler_test.clj` is
+there to catch.
+
+The two that are not recorded fail the same way: the value is right at mount
+and never changes again. And a page hides it, because a slot that is not
+subscribed still runs whenever some other slot wakes the connection, so a
+broken value catches up at a rate that depends on what else is happening. The
+test asserts that too, since it is the reason this survives in production.
+
+None of the four is a reason not to build this. All of them are a reason to
+build layers 1 and 2 separately, with their own tests.
 
 ## Implementation sketch
 
@@ -318,7 +376,9 @@ the failure when it is ignored is the same.
 
 **A. Leave `:watch` as the only mechanism.** Correct for a handful of
 connections. The cost is invisible until an application has both real slots and
-real connection counts, which is when it is hardest to change.
+real connection counts, which is when it is hardest to change. It also declares
+dependencies, at the coarsest granularity there is, so it never had the safety
+its blunt behaviour suggested.
 
 **B. Topics without sources.** The previous draft of this ADR. Works, and
 integrating anything means writing the same subscribe, cache and refcount code
@@ -355,16 +415,15 @@ manual PubSub topics, which is layer 0 on the other axis. Worth its own ADR.
 
 `server`, `server!`, `client`, `local-state` and `defui` mean what they meant.
 The wire protocol is untouched, and so is the shape of `["patch" id vals]`.
-Applications using `:watch` and nothing else behave exactly as they do today.
+`:watch` is the one thing that goes. Every use of it becomes a source read of
+the whole atom, which is one line and a narrower fan out.
 
 ## Build order
 
-1. Layer 0. Index, marking, topic set in `coalesced`, `:watch` marking the
-   broadcast topic. In process, no protocol. This is the whole win for a single
-   node.
+1. Layer 0. Index, marking, topic set in `coalesced`. In process, no protocol.
+   This is the whole win for a single node.
 2. Layer 1. The `Source` protocol, the refcounted handle registry, and
-   `atom-source` as the first implementation, which reduces `:watch` to a
-   special case of it.
+   `atom-source` as the first implementation.
 3. A Rama-backed example. It is the second implementation and the one that
    proves the protocol is not shaped around atoms.
 4. Layer 2. `observe` and read set tracking, with the subscribe-before-read

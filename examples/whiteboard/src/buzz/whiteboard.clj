@@ -19,10 +19,10 @@
 ;; Per connection: assigned color, cursor position, stroke in progress.
 (defonce live (atom {}))
 
-;; One count per `server!` call, so the page shows what a drawing session
-;; costs in messages. Deliberately not in the handler's `:watch`: watched,
-;; it would broadcast a patch to every connection on every message. The
-;; count rides along whenever another change renders.
+(def ^:private ink (buzz/atom-source strokes))
+(def ^:private presence (buzz/atom-source live))
+
+;; The message count updates when another state change triggers a render.
 (defonce msgs (atom 0))
 
 (defn- color-of [conn]
@@ -94,10 +94,13 @@
 ;;;; UI
 
 (defui board []
-  (let [done     (server (into [:g] @strokes))
-        wip      (server (wip-lines @live))
-        others   (server (other-cursors @live (buzz/connection (request))))
-        stats    (server {:here (count @live) :strokes (count @strokes) :msgs @msgs})
+  (let [done     (server (into [:g] (buzz/observe ink [])))
+        wip      (server (wip-lines (buzz/observe presence [])))
+        others   (server (other-cursors (buzz/observe presence [])
+                                        (buzz/connection (request))))
+        stats    (server {:here (count (buzz/observe presence []))
+                          :strokes (count (buzz/observe ink []))
+                          :msgs @msgs})
         my-color (server (color-of (buzz/connection (request))))
         drawing  (local-state false)
         ;; pointer moves buffer here and flush once per animation frame:
@@ -159,7 +162,6 @@
 
 (def ui
   (buzz/handler {:index (io/file (.toURI (io/resource "whiteboard.html")))
-                 :watch [strokes live]
                  :mounts [{:el "app" :ui #'board}]
                  :on-close (fn [req] (leave! req))}))
 
