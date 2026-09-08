@@ -55,7 +55,7 @@
 (defonce expanded (atom {}))
 
 (def ^:private taps (buzz/atom-source log))
-;; Keyed by connection, so folding a node wakes the one browser that folded it.
+;; Each connection observes its own expansion state.
 (def ^:private folds (buzz/atom-source expanded))
 
 (defn show-more! [req path]

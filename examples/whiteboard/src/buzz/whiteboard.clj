@@ -22,10 +22,7 @@
 (def ^:private ink (buzz/atom-source strokes))
 (def ^:private presence (buzz/atom-source live))
 
-;; One count per `server!` call, so the page shows what a drawing session
-;; costs in messages. Deliberately not in the handler's `:watch`: watched,
-;; it would broadcast a patch to every connection on every message. The
-;; count rides along whenever another change renders.
+;; The message count updates when another state change triggers a render.
 (defonce msgs (atom 0))
 
 (defn- color-of [conn]

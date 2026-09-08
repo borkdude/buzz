@@ -1,7 +1,7 @@
 # observe
 
-Two pages over one atom. Each page reads one key of it, so a write to the other
-key renders nothing.
+Two counter pages observe separate keys in one atom. Changing a counter
+updates only the page that observes it.
 
 Run it:
 
@@ -11,7 +11,7 @@ Open both pages, then click the buttons and watch the terminal.
 
 ## What it shows
 
-The whole example is one atom and one source:
+Create a source for the shared atom:
 
 ```clojure
 (defonce state (atom {:a 0 :b 0}))
@@ -19,7 +19,7 @@ The whole example is one atom and one source:
 (def counts (buzz/atom-source state))
 ```
 
-A page reads one key through the source, and prints when its slot runs:
+Read the page's key with `observe` and print each render:
 
 ```clojure
 (let [v (buzz/observe counts [k])]
@@ -27,26 +27,20 @@ A page reads one key through the source, and prints when its slot runs:
   v)
 ```
 
-Reading a key subscribes the connection to it. Nothing else is declared and
-nothing is registered by hand.
+Click `b + 1` on page a three times. Page b updates and the terminal prints:
 
-Three clicks on `b + 1`, made from page a:
-
-```
+```clojure
 :slot-ran :b :value 1
 :slot-ran :b :value 2
 :slot-ran :b :value 3
 ```
 
-The atom changed three times and page a never ran. Its key did not change, so
-its connection was never woken. Page b went to 3 and page a stayed where it
-was.
+Page a keeps its current value because `:a` did not change.
 
-Widen the key to `[]`, which is the whole atom, and every line above appears
-twice. Both pages read the whole map, so both hold the key that changed.
+Use `[]` as the observed path to read the whole atom. Changes to either
+counter then re-render both pages.
 
-## The grain
+## Rendering
 
-A topic decides which connection renders, not which slot. A connection with two
-slots runs both of them whenever any key it reads changes. The saving is
-between connections, which is why this example uses two pages.
+Each affected connection runs all its server expressions again, including
+expressions that read unchanged values.

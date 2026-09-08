@@ -1043,10 +1043,6 @@
 ;; ---------------------------------------------------------------------------
 ;; Sources and topics
 ;;
-;; A write reaches the connections that read it and no others. The counter is
-;; what makes "no others" observable: a slot that never runs cannot appear in
-;; it, so this asserts the absence of work rather than the absence of a frame.
-
 (defonce ^:private ledger (atom {"alice" ["water the plants"]
                                 "bob"   ["renew the domain"]}))
 
@@ -1069,7 +1065,7 @@
          [:li n])])
 
 (defn- ledger-subscriptions
-  "The keys of `ledger-source` that are subscribed right now."
+  "Returns the subscribed keys of `ledger-source`."
   []
   (into #{} (comp (filter #(= ledger-source (:source %))) (map :k))
         (hub/subscriptions)))
@@ -1102,12 +1098,9 @@
         (is (= "patch" (first (next-event (:rdr alice))))))
       (testing "the other connection is not written to"
         (is (silent? (:sock bob) (:rdr bob) 300)))
-      (testing "and its slots never ran"
+      (testing "the other connection does not render"
         (is (= {"alice" 1} @slot-runs))))))
 
-;; The same data read through the widest key. Every connection reads the whole
-;; map, so every connection holds the one key that changes and every one of
-;; them runs. This is what `observe` costs when the key is not narrowed.
 (deftest a-coarse-key-runs-every-connection-that-reads-it
   (with-two {:mounts [{:el "app" :ui #'coarse-notes}]
              :render-interval-ms 0}
@@ -1116,7 +1109,7 @@
       (is (= "patch" (first (next-event (:rdr alice)))))
       (testing "bob's slot runs even though nothing of his changed"
         (is (= {"alice" 1 "bob" 1} @slot-runs)))
-      (testing "and sends nothing, because the value is the same as last time"
+      (testing "unchanged values produce no patch"
         (is (silent? (:sock bob) (:rdr bob) 300))))))
 
 (deftest invalidating-a-topic-nobody-holds-does-nothing
@@ -1141,10 +1134,7 @@
         (is (until 3000 #(empty? (ledger-subscriptions)))))
       (finally (reset! hub/release-grace-ms grace)))))
 
-;; A source can change between the moment a slot reads it and the moment the
-;; connection is written into the topic index. Nothing holds the topic yet, so
-;; the mark is dropped where it is made. The slot writes the atom it just read
-;; to put the change inside exactly that window.
+;; Write during rendering to check that a subsequent render delivers the change.
 (defonce ^:private race-state (atom {:x 0}))
 (def ^:private race-source (handler/atom-source race-state))
 (defonce ^:private race-armed (atom true))
@@ -1168,11 +1158,6 @@
 ;; ---------------------------------------------------------------------------
 ;; Which reads register
 ;;
-;; `observe` records what it read in a dynamic binding, so a read that leaves
-;; the thread the render is on leaves the record behind. These four say which
-;; ways of reading are tracked today and which are not. The two that are not
-;; are silent: the value is right at mount and never changes again.
-
 (defonce ^:private ways (atom {:direct 0 :thread 0 :future 0 :lazy 0}))
 (def ^:private ways-source (handler/atom-source ways))
 
@@ -1187,7 +1172,7 @@
    [:p (server (:direct @ways))]])
 
 (defn- registered-keys
-  "The source keys the connections of `ui` hold."
+  "Returns the source keys observed by connections to `ui`."
   [ui]
   (let [registry (::handler/registry (meta ui))
         index (:index (first (filter #(= registry (:registry %)) (hub/entries))))]
@@ -1202,7 +1187,7 @@
       (is (= ["mount" "reader-ways" "app" [0 [0] 0 0]] (next-event rdr)))
       (testing "a future conveys the binding, and a lazy seq is realised in the render"
         (is (= #{:future :lazy} (registered-keys ui))))
-      (testing "a thread of our own starts from the root bindings, so its read is lost"
+      (testing "reads on a new thread do not register subscriptions"
         (is (not (contains? (registered-keys ui) :thread))))
       (testing "a read that never touches a source registers nothing"
         (is (not (contains? (registered-keys ui) :direct)))))))
@@ -1213,31 +1198,25 @@
     (fn [{:keys [sock rdr]}]
       (next-event rdr)
 
-      (testing "the tracked reads wake the connection"
+      (testing "changes to observed keys trigger a render"
         (swap! ways update :future inc)
         (is (= ["patch" "reader-ways" [1 [0] 0 0]] (next-event rdr)))
         (swap! ways update :lazy inc)
         (is (= ["patch" "reader-ways" [1 [1] 0 0]] (next-event rdr))))
 
-      (testing "the lost reads do not"
+      (testing "changes to untracked keys do not trigger a render"
         (swap! ways update :thread inc)
         (is (silent? sock rdr 300))
         (swap! ways update :direct inc)
         (is (silent? sock rdr 300)))
 
-      (testing "and then a tracked write carries them along, which is what hides the bug"
+      (testing "a later render includes values read without tracking"
         (swap! ways update :future inc)
         (is (= ["patch" "reader-ways" [2 [1] 1 1]] (next-event rdr)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; The Source contract
 ;;
-;; Every source has to hold these, or the machinery above cannot rely on it.
-;; Rule one, that the subscription is in place before the first value is read,
-;; is a matter of construction: there is no way to force a write into the gap
-;; from outside, so it is enforced by reading the implementation. The rest are
-;; here.
-
 (defn- check-source
   "Runs the contract against `source`. `write!` puts a value at `k`."
   [label source k write!]
@@ -1270,13 +1249,9 @@
         (is (= 5 @second-h))
         (source/-unsubscribe source k second-h)))))
 
-;; A source with no store behind it, so the contract is run against something
-;; that is not an atom.
 (defonce ^:private pushed (atom {}))
 (defonce ^:private pushes (atom {}))
 
-;; Keyed by handle rather than by k, and registered before the first read, so
-;; it holds the same rules the contract asks of any other source.
 (defrecord PushSource []
   source/Source
   (-subscribe [_ k notify]
@@ -1311,9 +1286,6 @@
   (into #{} (comp (filter #(= lease-source (:source %))) (map :k))
         (hub/subscriptions)))
 
-;; The grace period has to be long enough that a loaded machine cannot release
-;; a subscription before the assertion that counts it, and short enough that
-;; the polls afterwards do not drag.
 (defmacro ^:private with-grace [ms & body]
   `(let [was# @hub/release-grace-ms]
      (reset! hub/release-grace-ms ~ms)
@@ -1321,7 +1293,7 @@
 
 (deftest a-read-outside-a-render-does-not-leak-a-subscription
   (with-grace 500
-    (testing "a router or an rpc handler reads a key nothing will ever hold"
+    (testing "reads outside a render release their subscriptions"
       (dotimes [i 20] (observe lease-source [(str "tok-" i)]))
       (is (= 20 (count (lease-subs))))
       (is (until 3000 #(empty? (lease-subs)))))))
@@ -1344,7 +1316,7 @@
       (Thread/sleep 200)                ; the first release has now had its turn
       (testing "the release was scheduled for a generation that is no longer current"
         (is (contains? (hub/subscriptions) t)))
-      (testing "so the source still feeds the reader that took it since"
+      (testing "the current handle receives updates"
         (let [handle (hub/sub-for t)]
           (swap! lease update :x inc)
           (is (= (:x @lease) @handle))))
@@ -1369,13 +1341,7 @@
       (observe lease-source [:x])
       (is (until 3000 #(empty? (lease-subs)))))))
 
-;; Rule seven. Atom watches run on the writing threads, so two writes that land
-;; in order can have their callbacks finish in the opposite order, and a
-;; callback that stored the value it was handed would leave the older one on
-;; top. This exercises the path rather than forcing the interleaving, which
-;; cannot be done from outside the implementation: the window is a few
-;; instructions wide and four hundred attempts never hit it. What it does catch
-;; is a handle that fails to settle at all.
+;; Check that concurrent writes leave the handle with the latest value.
 (deftest a-handle-settles-on-the-latest-value-under-concurrent-writers
   (dotimes [_ 20]
     (let [a   (atom {:x 0})

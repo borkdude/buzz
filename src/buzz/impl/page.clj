@@ -70,13 +70,7 @@
   {:el el :spec spec :sent (atom ::none) :req req
    :instance ((::instance spec))})
 
-;; Run one connection's mounts with tracking on. `observe` registers a topic
-;; in the index as it is read, so nothing can change between a read and its
-;; registration, and the reconciliation afterwards drops the topics no slot
-;; reads any more. A mount that throws is contained to its own frame, and a
-;; session that saw a failure skips the reconciliation: the topics registered
-;; during the failed pass stand, which errs toward an extra render rather
-;; than a missed one.
+;; Retain subscriptions after a failed render so later changes can retry it.
 (defn- render-session! [{:keys [index]} session {:keys [ch mounted]} render!]
   (let [ok (volatile! true)
         reads (atom #{})]
@@ -89,15 +83,9 @@
     (when @ok
       (hub/set-topics! index session @reads))))
 
-;; Every frame of a connection is written by its lane: a virtual thread that
-;; parks on a semaphore, drains its job queue and dirty set, renders, sleeps
-;; the coalescing interval, and parks again. One writer per stream, so mounts,
-;; patches and reloads cannot interleave. Renders for different connections
-;; run in parallel. Idle costs nothing: no marks, no wake-ups.
-
+;; One virtual thread per connection serializes frames and combines pending renders.
 (def ^:private ^:dynamic *in-lane*
-  ;; Bound on lane threads. A mark made from a lane never blocks on another
-  ;; lane, which is what keeps a slot that writes state free of deadlock.
+  ;; Prevent writes during a render from waiting on another render thread.
   false)
 
 (defn- new-lane []
@@ -144,11 +132,7 @@
   (reset! (:open lane) false)
   (signal! lane))
 
-;; Resolves topics to the connections holding them and wakes each one's lane.
-;; The write pays for an index lookup and a semaphore release per affected
-;; connection, never for a render. At interval 0 a writer that is not a lane
-;; blocks until every lane it marked has rendered, so a returning `swap!`
-;; means the patches are written, which is what synchronous mode promises.
+;; Wake affected connections and wait for rendering when the interval is zero.
 (defn- mark! [{:keys [registry index]} ^long interval topics]
   (let [conns @registry
         lanes (into [] (keep #(:lane (get conns %)))
@@ -230,9 +214,7 @@
           (json-response 500 {:error "handler failed"})))
       (json-response 404 {:error "no such handler"}))))
 
-;; Rebuild instances and reload open pages after definitions change. The
-;; frames go out through each connection's lane, so a reload cannot interleave
-;; with a patch.
+;; Send reloads through each connection's queue to preserve frame order.
 (defn- reload-all! [_ _ _ rev]
   (doseq [{:keys [registry] :as entry} (hub/entries)
           [session conn] @registry]

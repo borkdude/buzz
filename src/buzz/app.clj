@@ -12,8 +12,6 @@
 (defonce next-id (atom 0))
 (defonce clicks (atom 0))
 
-;; Slots read through these, so a write reaches the connections that read the
-;; key it changed.
 (def ^:private todos-source (buzz/atom-source db))
 (def ^:private clicks-source (buzz/atom-source clicks))
 #_(swap! clicks inc)
@@ -27,7 +25,7 @@
 (defn delete! [id] (swap! db dissoc id))
 
 (defn matching
-  "The todos a query selects. Runs here, because the data is here."
+  "Returns todos whose titles contain `q`, ignoring case."
   [todos q]
   (let [q (str/lower-case (str/trim (or q "")))]
     (cond->> (vals todos)
@@ -62,7 +60,7 @@
 
 (defonce queries (atom {}))
 
-;; Keyed by connection ID, so a keystroke wakes the connection that typed it.
+;; Each connection observes its own search query.
 (def ^:private query-source (buzz/atom-source queries))
 
 (defn- my-query [req] (or (observe query-source [(buzz/connection req)]) ""))
@@ -117,10 +115,6 @@
   (let [total (server (count (observe todos-source [])))
         done  (server (count (filter :done (vals (observe todos-source [])))))]
     [:p.stats total " total, " done " done"]))
-
-;; Every connection reads the whole of `db` and `clicks`, so a change there
-;; reaches all of them. Each connection reads its own key of `queries`, so a
-;; keystroke wakes one connection and no other one runs a slot.
 
 (def ui
   (buzz/handler {:index "public/index.html"

@@ -1,48 +1,27 @@
 (ns buzz.source
-  "Contract for a source of change. A source is a keyed thing that can be
-  subscribed to and read, which is what an atom, a Rama PState, a Datalevin
-  database and a Postgres channel all are once the reading and the signalling
-  are separated.
+  "Implement `Source` to use external state in `buzz.core/observe`.
 
-  Buzz keeps one subscription per key per process, shared by every connection
-  that reads it, and closes it after the last connection lets go. Implement
-  this to make an external system drive rendering:
+  Buzz shares one subscription per source and key across connections and
+  releases it after the last connection stops observing that key.
 
-    (defrecord PStateSource [pstate]
-      buzz.source/Source
-      (-subscribe [_ path notify] (foreign-proxy pstate path {:callback notify}))
-      (-unsubscribe [_ _ proxy] (close! proxy)))
+  Implementations must satisfy these requirements:
 
-  Seven rules. `sources-hold-the-contract` in `test/buzz/handler_test.clj` runs
-  five of them against `atom-source` and against a source with no store behind
-  it. Rules one and seven are matters of construction: their interleavings
-  cannot be forced from outside an implementation, so they are enforced by
-  reading it.
-
-  1. The subscription is in place before the first value is read, and the first
-     value is stored so that it cannot land on top of a newer one the
-     subscription has already delivered. Reading and storing are two steps.
-  2. The handle holds the new value before `notify` is called. Buzz raises a
-     version and marks a topic inside `notify`, and the render that follows
-     reads the handle.
-  3. After `-unsubscribe` returns, a later change does not start a new call to
-     `notify`. A callback already in flight may finish.
-  4. `-unsubscribe` closes only the handle it is given. Two subscriptions to
-     one key overlap while an old one is being released, so a source that keys
-     its own bookkeeping by `k` has one of them close the other. Key it by the
-     handle.
-  5. Key equality is the source's business. Two keys that are `=` are one
-     subscription.
-  6. Notifying more often than necessary is allowed. It costs a render and no
-     frame, since unchanged values are compared away before anything is sent.
-  7. Callbacks can run concurrently and finish in any order. The handle has to
-     end holding the latest value, so storing the snapshot a callback was
-     handed is not enough. Read the current value under a per handle lock, or
-     carry a revision and refuse an older write.")
+  1. Subscribe before reading the initial value. An initial read must not
+     overwrite a newer value delivered by a concurrent change.
+  2. Update the handle's value before calling `notify`.
+  3. After `-unsubscribe` returns, later changes must not start new calls to
+     `notify`. A callback already running may finish.
+  4. Release only the supplied handle. Subscriptions for the same key can
+     overlap, and each must remain usable until it is released.
+  5. Treat keys that are `=` as the same key.
+  6. Extra notifications are allowed. Buzz suppresses unchanged patches.
+  7. Keep the latest value in the handle when callbacks run concurrently
+     or finish out of order.")
 
 (defprotocol Source
   (-subscribe [source k notify]
-    "Calls `notify`, a function of no arguments, whenever `k` changes. Returns
-     a handle that `deref` gives the current value of.")
+    "Subscribes to changes at `k` in `source`. Returns a dereferenceable handle
+     containing the current value. Calls `notify` with no arguments after
+     updating the handle.")
   (-unsubscribe [source k handle]
-    "Releases what `-subscribe` set up for `k`."))
+    "Releases `handle`, returned by `-subscribe` for `source` and `k`."))

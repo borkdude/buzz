@@ -11,6 +11,9 @@ to renders it.
 
 Buzz runs on Babashka and on the JVM. You do not need other tooling like ClojureScript or Node.js.
 
+Each connection renders on its own virtual thread, so the JVM needs 21 or
+later. Babashka carries its own runtime and needs nothing.
+
 In this project, you can run:
 
     bb serve    # a demo on http://localhost:1341
@@ -67,8 +70,8 @@ The count is a server value, so it is the same for all browsers. The step is a b
 The body of a component is client side code. In the body you can use four marks to communicate with the server or to make local state.
 
 - `(server expr)` is a value from the server. The server runs the expression again
-after each change to something the expression read through `observe`, and the
-result is sent to the browser. See [Sources](#sources).
+when observed state changes and sends the result to the browser. See
+[Sources](#sources).
 
 - `(server! expr)` is way to make the server do something. It is a side effect, not a value. The return value is a promise. Using the special `reply` form, you can send a value back to the browser. Give `reply` a second argument to add to the http response the value arrives in, which is how a handler sets a cookie.
 
@@ -108,12 +111,12 @@ To compose the handler with other routes, you can use `or` since the handler ret
 
 One mount can hold one component at one element. A page can have more than one mount.
 
-Rendering is asynchronous: a write returns at once, and rendering happens at
-most once per `:render-interval-ms` (default 20). The first write renders
-immediately and writes inside the window collapse into one render carrying the
-latest state, so patches are sampled state, not every state: a counter can
-step from 3 to 7. Pass `:render-interval-ms 0` to render synchronously on the
-writing thread, which makes tests deterministic.
+Rendering is asynchronous. Each connection renders independently, at most
+once per `:render-interval-ms` (default 20). The first change triggers a
+render immediately. Changes within the interval are combined into one render
+with the latest state, so a counter can step from 3 to 7. Set
+`:render-interval-ms` to 0 to wait for affected connections to render before
+a write returns.
 
 A mount names its component by var, so re-evaluating the component reaches
 the open pages:
@@ -133,9 +136,9 @@ The page belongs to the handler, so one application can serve more than one of t
 
 ## Sources
 
-A slot reads server state through a source, and reading a key subscribes the
-connection to it. A write then reaches the connections that read the key it
-changed, and no others.
+Use `buzz/atom-source` to create a source and `buzz/observe` inside
+`server` to read a path from it. Changes to that path re-render the
+connections that read it.
 
 ```clojure
 (defonce todos (atom {"alice" [] "bob" []}))
@@ -147,32 +150,28 @@ changed, and no others.
          [:li t])])
 ```
 
-`buzz/observe` reads a key and subscribes the connection to it. What a
-connection holds is whatever its slots read, so there is nothing to declare and
-nothing to keep in step. Adding a note for alice runs alice's slots. Bob's do
-not run.
+Adding a todo for alice re-renders alice's connections. Bob's connections
+keep their current values. Each affected connection runs all its server
+expressions again.
 
-Buzz keeps one subscription per key per process, shared by every connection
-reading it, and releases it once the last connection lets go.
+Use `[]` to observe the whole atom:
 
-A key decides which connections render, not which slots. A connection runs all
-of its slots whenever any key it reads changes.
+```clojure
+(server (buzz/observe by-user []))
+```
 
-Read a wide key and you get a wide fan out. `(observe by-user [])` is the whole
-map, so every connection reading it renders on every write. Narrow the key and
-the fan out narrows with it.
+Changes to any user's todos now re-render every connection reading the map.
 
-State a slot reads any other way has nothing watching it, so nothing will ever
-update that connection. Read it through a source, or accept that it is fixed
-for the life of the page.
+Use `observe` for state changes that should trigger a render. A direct read,
+such as `@todos`, refreshes only when another change triggers a render.
 
-Implement `buzz.source/Source` to render from something other than an atom. It
-takes a subscribe and an unsubscribe, and the handle it returns is what
-`observe` derefs. `examples/datalevin` has one over a database, driven by the
-transaction report.
+Implement [buzz.source/Source](src/buzz/source.clj) to observe other data
+sources. Return a dereferenceable handle from `-subscribe` and release it
+in `-unsubscribe`. See [examples/datalevin](examples/datalevin) for a
+database source.
 
-See [examples/observe](examples/observe) for the smallest version of all of
-this.
+See [examples/observe](examples/observe) for two counters that update
+independently.
 
 ## Request
 
@@ -236,8 +235,7 @@ fills it in.
 
 ## Examples
 
-- [examples/observe](examples/observe) is two pages over one atom, each
-  reading one key of it.
+- [examples/observe](examples/observe) shows two pages that observe separate keys in one atom.
 - [examples/auth](examples/auth) signs two users in and gives each of them
   their own data.
 - [examples/tap-viewer](examples/tap-viewer) shows everything the process taps, with a tree
@@ -245,8 +243,7 @@ fills it in.
 - [examples/whiteboard](examples/whiteboard) is a shared whiteboard with live
   cursors, one color per connection.
 - [examples/datalevin](examples/datalevin) is a Datalevin browser over a
-  MusicBrainz sample, with a query log shared between viewers. It has a source
-  over the database.
+  MusicBrainz sample, with a query log shared between viewers. It uses a database source.
 
 ## Development
 

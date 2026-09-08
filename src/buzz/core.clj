@@ -519,12 +519,11 @@
 (def handler
   "Returns a Ring handler for `spec`. See `buzz.stream` for `:adapter`.
 
-  Rendering is asynchronous: a write returns at once and each connection
-  renders on its own lane, at most once per `:render-interval-ms` (default 20).
-  The first write renders immediately, writes inside the window collapse into
-  one render that carries the latest state, so patches are sampled state, not
-  every state. `:render-interval-ms 0` renders synchronously on the writing
-  thread, which some tests want."
+  Rendering is asynchronous. Each connection renders independently, at most
+  once per `:render-interval-ms` (default 20). The first change triggers a
+  render immediately. Changes within the interval are combined into one
+  render with the latest state. Set `:render-interval-ms` to 0 to wait for
+  affected connections to render before a write returns."
   page/handler)
 
 (def connection
@@ -538,15 +537,14 @@
   page/token)
 
 (def observe
-  "Reads `k` from a source and subscribes the current connection to it. Use it
-  inside `(server ...)`, where the topics a connection holds are whatever its
-  slots read.
+  "Returns the value at `k` in `source`. Inside `server`, subscribes the
+  connection to changes at that key. Outside a render, reads the value
+  without subscribing a connection.
 
     (server (observe todos [:todos (whoami (request))]))"
   hub/observe)
 
 (def atom-source
-  "A source over an atom, keyed by a path into it."
+  "Returns a source for an atom. Observe a path with `(observe source path)`.
+  Use `[]` for the whole atom or a scalar key for a top-level value."
   hub/atom-source)
-
-;; `buzz.source/Source` is the protocol an integration implements.

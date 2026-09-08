@@ -12,8 +12,6 @@
 ;; albums, and the tracks of each artist's first album.
 (def ^:private seed (edn/read-string (slurp (io/resource "seed.edn"))))
 
-;; What everyone ran lives in the database too, so the page reads it with a
-;; query like any other and the source notices the write.
 (def ^:private log-schema
   {:query/text {:db/valueType :db.type/string}
    :query/rows {:db/valueType :db.type/long}
@@ -47,8 +45,7 @@
 (defn- columns [form]
   (->> (rest form) (take-while #(not (keyword? %))) (mapv pr-str)))
 
-;; The log entry and the retractions that keep the log short go in one
-;; transaction, so a run notifies the log query once.
+;; Add the entry and prune old entries in one transaction.
 (defn- log! [qstr rows ms]
   (let [olds (->> (d/q '[:find ?e ?at :where [?e :query/at ?at]] (d/db conn))
                   (sort-by second >)
@@ -76,8 +73,7 @@
     (catch Throwable e
       {:error (ex-message e)})))
 
-;; Four subscribed queries. A run writes `:query/*` attributes, which only the
-;; log query reads, so the three count queries never run again.
+;; Query log writes leave the count query results unchanged.
 (def ^:private artists-q '[:find (count ?e) :where [?e :artist/name]])
 (def ^:private albums-q  '[:find (count ?e) :where [?e :release/title]])
 (def ^:private tracks-q  '[:find (count ?e) :where [?e :track/title]])

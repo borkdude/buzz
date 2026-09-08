@@ -1,19 +1,7 @@
 (ns buzz.topics-bench
-  "Reproduces the connections vs us/rpc table in
-  doc/ai/adr/0001-render-scheduling.md and puts the topic mechanism beside it.
-  Reading the whole atom reruns every connection's slots on a write. Reading
-  one user's key reruns only that user's connection.
-
-  Two tables, same scenarios and connection counts, different slot cost. The
-  first slot is a map lookup, cheap enough that fan out barely shows on the
-  clock. The second does real work standing in for a database query, which is
-  where 0001's point shows up: the wide key grows with the connection count
-  and the narrow one stays flat. Slot runs, not the clock, are what proves the
-  fan out either way.
-
-  Every scenario runs with :render-interval-ms 0, which makes a write render
-  synchronously on the writing thread. That is what makes the write itself
-  timeable, and it is how 0001 measured."
+  "Compare write latency and render counts for whole-atom and per-user
+  observations, using map lookups and simulated query work.
+  Runs with `:render-interval-ms 0` so writes wait for rendering."
   (:require [buzz.core :as buzz :refer [defui request server]]
             [cheshire.core :as json]
             [clojure.string :as str]
@@ -89,8 +77,8 @@
         (recur)))))
 
 (defn- open-events
-  "One SSE connection as `user`. Reads past the headers to the blank line,
-  then the first data: frame is the session id."
+  "Opens an SSE connection as `user`. Returns its socket and reader after
+  reading the session ID."
   [port user]
   (let [sock (java.net.Socket. "127.0.0.1" (int port))]
     (.setSoTimeout sock 5000)
@@ -107,8 +95,7 @@
       {:sock sock :rdr rdr})))
 
 (defn- drain!
-  "Reads and discards from `rdr` on its own thread, so a full socket buffer
-  never distorts the timing of a write."
+  "Reads and discards lines from `rdr` in a future."
   [rdr]
   (future
     (try
@@ -168,7 +155,6 @@
 
 (defn- calibrate-work!
   "Sets work-n so one churn call costs about target-us on this machine.
-  Doubles n until it reaches the target, then scales once to refine it.
   Returns the measured cost of the tuned call, in us."
   [target-us]
   (loop [n 64]
@@ -205,7 +191,7 @@
   (println "runtime:" (if-let [v (System/getProperty "babashka.version")]
                         (str "babashka " v)
                         "jvm"))
-  (println "render-interval-ms 0: a write renders synchronously on the writing thread")
+  (println "render-interval-ms 0: writes wait for rendering")
   (println)
   (print-table "slot: a map lookup" wide-lookup-spec narrow-lookup-spec)
   (let [query-us (calibrate-work! 60)]

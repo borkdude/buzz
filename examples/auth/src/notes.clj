@@ -20,9 +20,7 @@
   (when-not (= :admin role)
     (throw (ex-info "not allowed" {:role role}))))
 
-;; State the server owns, per user, read through a source keyed by user name.
-;; Reading a key subscribes the connection to it, so a write reaches the
-;; connections of that user and nobody else.
+;; Notes keyed by user name.
 (defonce notes (atom {"alice" ["water the plants"]
                       "bob"   ["renew the domain"]}))
 
@@ -102,7 +100,7 @@
         me    (server (mine (buzz/request)))]
     [:div
      [:h1 "notes for " (:who me)]
-     [:p (:runs me) " renders on this page"]
+     [:p (:runs me) " renders for this user"]
      [:ul
       (for [[i note] (map-indexed vector (:notes me))]
         [:li {:key i}
@@ -134,8 +132,6 @@
                               (set! js/window.location "/signin"))}
           "sign out"]]]))
 
-;; The notes each page shows come from the source, so this page needs no watch
-;; on `notes`. Watching sessions redraws open pages after signout.
 (def ^:private notes-ui
   (buzz/handler
    {:title "notes"

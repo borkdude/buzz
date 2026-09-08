@@ -1,7 +1,6 @@
 (ns counters
-  "Two pages over one atom. Each page reads one key, so a write to the other
-  key renders nothing. The slot prints when it runs, so the terminal shows
-  which pages a write reached."
+  "Two counter pages that observe separate keys in one atom.
+  Prints the observed key and value on each render."
   (:require [buzz.core :as buzz :refer [defui request server server!]]
             [clojure.string :as str]
             [org.httpkit.server :as http]))
