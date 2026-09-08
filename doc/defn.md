@@ -90,9 +90,9 @@ it uses the `:clj` branch, with the same fallback.
 Use `host` for browser-only code in a `local-state` initial value. Initial
 values are also computed for the first paint.
 
-Inside a `fn`, `js/` interop compiles on the JVM and throws if the first paint
-calls it. An event handler needs no `host`. Outside a `fn`, `js/` is refused
-when the definition loads.
+Inside a `fn`, `js/` interop throws if called during the first paint. Event
+handlers do not run during the first paint and need no `host`. Outside a
+`fn`, wrap browser-only code in `host :cljs` to load the definition.
 
 Read server state with `server` and run server actions with `server!`.
 Use `host` to select code for each runtime.

@@ -476,23 +476,32 @@
     [:p {:on-click (fn [_] (js/alert "x")) :class "p"}
      (str (:online @flags)) (:on-top style)]))
 
-(deftest handlers-are-blanked-in-attribute-position-only
+(deftest maps-keep-their-on-keys-on-the-first-paint
   (let [inst (presence)]
-    (testing "a local-state map keeps every key on the first paint"
+    (testing "a local-state map keeps every key"
       (is (= [{:online true :on-call false}] ((:init-ssr inst)))))
 
     (testing "a data map in the body keeps its on keys"
-      (is (= [:p {:on-click nil :class "p"} "true" 2]
-             ((:ssr inst) (atom {:online true :on-call false})))))))
+      (let [[tag attrs & body] ((:ssr inst) (atom {:online true :on-call false}))]
+        (is (= :p tag))
+        (is (fn? (:on-click attrs)))
+        (is (= "p" (:class attrs)))
+        (is (= ["true" 2] body))))))
 
 (defui tagged []
   (let [status (local-state [:status {:online true}])]
     [:p (str @status)]))
 
 (defui extracted []
-  (let [attrs {:on-click (fn [_] (js/alert "x"))
-               :on-input (fn [e] (set! (.. e -target -value) ""))}]
+  (let [attrs {:on-click (fn [_] (js/alert "x") (new js/Date))
+               :on-input (fn [e]
+                           (set! (.. e -target -value) "")
+                           (set! js/window.location "/"))}]
     [:button attrs "click"]))
+
+(defui ready []
+  (let [hooks (local-state [:status {:on-ready (fn [] true)}])]
+    [:p (str @hooks)]))
 
 (defui parsed []
   [:ul (mapv (fn [x] [:li (js/parseFloat x)]) ["1"])])
@@ -500,6 +509,10 @@
 (deftest browser-code-inside-a-fn-compiles-and-throws-when-called
   (testing "a tagged data vector keeps its values"
     (is (= [[:status {:online true}]] ((:init-ssr (tagged))))))
+
+  (testing "a fn under an on key in data survives and runs"
+    (let [[[_ m]] ((:init-ssr (ready)))]
+      (is (true? ((:on-ready m))))))
 
   (testing "an attribute map bound by name keeps its handlers, which throw"
     (let [[_ attrs] ((:ssr (extracted)))]

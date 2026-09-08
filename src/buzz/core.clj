@@ -17,7 +17,6 @@
   (:require [buzz.impl.hub :as hub]
             [buzz.impl.page :as page]
             [buzz.impl.parts :as parts]
-            [clojure.string :as str]
             [clojure.walk :as walk]
             [squint.compiler :as squint]))
 
@@ -458,33 +457,25 @@
   (throw (ex-info (str what " runs in the browser only. Wrap it in (host :cljs ...)")
                   {:form what})))
 
+(defn- js-sym? [x]
+  (and (symbol? x) (= "js" (namespace x))))
+
 (defn- browser-only-form?
-  "`js/` symbols and `set!` on interop compile in the browser only."
+  "`js/` symbols, `set!` on a `js/` symbol or an interop target, and `new` of a
+  `js/` class. None of these compile on the JVM."
   [x]
-  (or (and (symbol? x) (= "js" (namespace x)))
-      (and (seq? x) (= 'set! (first x)) (seq? (second x)))))
+  (or (js-sym? x)
+      (and (seq? x) (= 'set! (first x))
+           (or (seq? (second x)) (js-sym? (second x))))
+      (and (seq? x) (= 'new (first x)) (js-sym? (second x)))))
 
 (defn- lambda-form? [x]
   (and (seq? x) (contains? lambda-heads (first x))))
 
-(declare ^:private ssr-walk)
-
-(defn- ssr-attrs
-  "A Hiccup attribute map without its handlers. Reagami's ssr drops every
-  `on*` attribute by name, so blanking a handler changes no output. It only
-  removes browser code the JVM would otherwise compile."
-  [attrs lambda?]
-  (into {} (mapv (fn [[k v]]
-                   [k (if (and (keyword? k)
-                               (str/starts-with? (name k) "on")
-                               (lambda-form? v))
-                        nil
-                        (ssr-walk v lambda?))])
-                 attrs)))
-
 (defn- ssr-walk
   "Inside a `fn`, browser-only forms become stubs that throw when called.
-  Outside one they stay, for `refuse-js` to report."
+  Outside one they stay, for `refuse-js` to report. A `host` form leaves its
+  `:clj` branch as written."
   [form lambda?]
   (cond
     (and lambda? (browser-only-form? form))
@@ -493,15 +484,11 @@
     (map? form)
     (into {} (mapv (fn [[k v]] [(ssr-walk k lambda?) (ssr-walk v lambda?)]) form))
 
-    (and (vector? form) (keyword? (first form)) (map? (second form)))
-    (into [(first form) (ssr-attrs (second form) lambda?)]
-          (mapv #(ssr-walk % lambda?) (nnext form)))
-
     (vector? form) (mapv #(ssr-walk % lambda?) form)
     (set? form)    (into #{} (mapv #(ssr-walk % lambda?) form))
     (seq? form)    (cond
                      (= 'quote (first form)) form
-                     (host-form? form) (ssr-walk (second form) lambda?)
+                     (host-form? form) (second form)
                      ;; Omit handlers passed as arguments from server rendering.
                      (= 'rpc! (first form)) nil
                      (lambda-form? form) (apply list (mapv #(ssr-walk % true) form))
