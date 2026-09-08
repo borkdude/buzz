@@ -451,20 +451,30 @@
                          "Wrap browser-only code in (host :cljs ...)")
                     {:symbol s :forms (vec forms)}))))
 
+(declare ^:private ssr-form)
+
+(defn- ssr-attrs
+  "A Hiccup attribute map without its handlers. Reagami's ssr drops every
+  `on*` attribute by name whatever the value, so blanking a handler changes no
+  output. It only removes browser code the JVM would otherwise compile."
+  [attrs]
+  (into {} (mapv (fn [[k v]]
+                   [k (if (and (keyword? k)
+                               (str/starts-with? (name k) "on"))
+                        nil
+                        (ssr-form v))])
+                 attrs)))
+
 (defn- ssr-form
-  "The same form, but renderable here. Reagami's ssr drops `:key`, `:on-render`
-  and every `on*` attribute by name whatever the value, so blanking a handler
-  changes no output — it only removes browser code that would otherwise have to
-  analyse on the JVM, which `(set! (.. e -target -value) \"\")` does not."
+  "The same form, but renderable here. Handlers are blanked in attribute
+  position only, so a map anywhere else keeps its `on*` keys."
   [form]
   (cond
     (map? form)
-    (into {} (mapv (fn [[k v]]
-                     [k (if (and (keyword? k)
-                                 (str/starts-with? (name k) "on"))
-                          nil
-                          (ssr-form v))])
-                   form))
+    (into {} (mapv (fn [[k v]] [(ssr-form k) (ssr-form v)]) form))
+
+    (and (vector? form) (keyword? (first form)) (map? (second form)))
+    (into [(first form) (ssr-attrs (second form))] (mapv ssr-form (nnext form)))
 
     (vector? form) (mapv ssr-form form)
     (set? form)    (into #{} (mapv ssr-form form))

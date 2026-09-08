@@ -469,3 +469,18 @@
     (let [inst (clock)]
       (is (= [nil] ((:init-ssr inst))))
       (is (str/includes? (:init inst) "new Date()")))))
+
+(defui presence []
+  (let [flags (local-state {:online true :on-call false})
+        style {:one 1 :on-top 2}]
+    [:p {:on-click (fn [_] (js/alert "x")) :class "p"}
+     (str (:online @flags)) (:on-top style)]))
+
+(deftest handlers-are-blanked-in-attribute-position-only
+  (let [inst (presence)]
+    (testing "a local-state map keeps every key on the first paint"
+      (is (= [{:online true :on-call false}] ((:init-ssr inst)))))
+
+    (testing "a data map in the body keeps its on keys"
+      (is (= [:p {:on-click nil :class "p"} "true" 2]
+             ((:ssr inst) (atom {:online true :on-call false})))))))

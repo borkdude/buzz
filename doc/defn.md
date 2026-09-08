@@ -87,8 +87,8 @@ A `:cljs` branch on its own makes a browser-only function:
 It is refused inside `server` and `server!`. Outside `defui` and `buzz/defn`,
 it uses the `:clj` branch, with the same fallback.
 
-A `local-state` initial value in `defui` is computed for the first paint as
-well, so the same rule holds there.
+Use `host` for browser-only code in a `local-state` initial value. Initial
+values are also computed for the first paint.
 
 Read server state with `server` and run server actions with `server!`.
 Use `host` to select code for each runtime.
@@ -103,8 +103,8 @@ Re-evaluate a `buzz/defn` in the REPL to hot-reload open pages.
 - A `buzz/defn` can call only functions that are already defined. Mutual
   recursion requires re-evaluating the first definition after both exist.
 - Functions passed as arguments must also compile on the JVM for server
-  rendering. Keep `js/` and `await` code in the `buzz/defn` itself, or in a
-  `host` form:
+  rendering. Keep `js/` and `await` code in Hiccup event handlers inside
+  `buzz/defn`, or in a `host :cljs` branch:
 
   ```clojure
   (buzz/defn submit-button [on-submit]
