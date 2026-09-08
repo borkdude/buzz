@@ -1439,3 +1439,12 @@
       (testing "the close failure is logged"
         (is (str/includes? out "on-close blew up")))
       (finally (stop)))))
+
+(defui notepad []
+  (let [text (local-state "first words")]
+    [:p @text]))
+
+(deftest the-first-paint-shows-a-locals-initial-value
+  (let [ui (handler/handler {:title "notepad" :mounts [{:el "app" :ui #'notepad}]})
+        body (:body (ui {:uri "/"}))]
+    (is (str/includes? body "<p>first words</p>"))))

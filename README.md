@@ -96,16 +96,17 @@ response map as the second argument to set a cookie or other response headers:
 
 ## Parts
 
-Use `defpart` to extract reusable UI functions from a component:
+Use `buzz/defn` to define a function for the browser and the server:
 
 ```clojure
-(defpart row [item]
+(buzz/defn row [item]
   [:li (:title item)])
 ```
 
 Call `(row item)` inside `defui` or another part. Parts can call themselves
 recursively and use `server!` for actions. Define `server` and `local-state`
-in `defui`, then pass their values as arguments. See [doc/parts.md](doc/parts.md).
+in `defui`, then pass their values as arguments. Use `host` where the browser
+and the server need different code. See [doc/parts.md](doc/parts.md).
 
 ## Mounting
 
@@ -263,5 +264,5 @@ Omit `<!--app-->` to render that component only after the browser connects.
 
     bb dev    # the demo, plus an nrepl on 1667
 
-Re-evaluate a `defui` or `defpart` to update open pages. Local state survives
+Re-evaluate a `defui` or `buzz/defn` to update open pages. Local state survives
 updates and reconnects when the number of `local-state` forms stays the same.

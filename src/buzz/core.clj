@@ -13,6 +13,7 @@
 
   What remains is compiled to JavaScript by Squint. Later renders send only
   server values."
+  (:refer-clojure :exclude [defn])
   (:require [buzz.impl.hub :as hub]
             [buzz.impl.page :as page]
             [buzz.impl.parts :as parts]
@@ -75,9 +76,38 @@
   [& _]
   (throw (ex-info "(request) used outside (server ...) or (server! ...)" {})))
 
+(def ^:private host-keys #{:clj :cljs :default})
+
+(defn- host-branches
+  [args]
+  (when (odd? (count args))
+    (throw (ex-info "(host ...) takes :clj, :cljs and :default branches in pairs"
+                    {:args (vec args)})))
+  (let [m (apply hash-map args)]
+    (when-let [k (some #(when-not (host-keys %) %) (keys m))]
+      (throw (ex-info (str "(host ...) takes :clj, :cljs and :default, not " (pr-str k))
+                      {:args (vec args)})))
+    m))
+
+(defn- host-branch
+  [m k]
+  (get m k (get m :default)))
+
+(defmacro host
+  "Picks the branch for the side the code runs on, like `#?` does for the
+  reader. In `defui` and `buzz/defn` the browser runs `:cljs` and the first
+  paint runs `:clj`. A missing branch is `:default`, or nil. Outside those
+  forms the code is JVM code and `:clj` is the result.
+
+    (buzz/defn parse [s]
+      (host :clj (Double/parseDouble s) :cljs (js/parseFloat s)))"
+  [& args]
+  (host-branch (host-branches args) :clj))
+
 (def ^:private marks
   {#'server :server, #'server! :server!, #'reply :reply,
-   #'client :client, #'local-state :local-state, #'request :request})
+   #'client :client, #'local-state :local-state, #'request :request,
+   #'host :host})
 
 (defn- mark
   [head]
@@ -90,32 +120,54 @@
 (declare ^:private split-part-body)
 (declare ^:private handlers-form)
 
+(defmacro defn
+  "Defines a function for the browser and the server. Squint compiles it for
+  the browser. The first paint and server code call the function compiled
+  here. Takes one arity, a fixed number of arguments and an optional
+  docstring. The function can recurse. Define server values and local state
+  in `defui` and pass them as arguments.
+
+    (buzz/defn row [item]
+      [:li (:title item)])"
+  [nm & more]
+  (let [[doc more] (if (string? (first more))
+                     [(first more) (rest more)]
+                     [nil more])
+        [argv & body] more]
+    (when-not (vector? argv)
+      (throw (ex-info (str "buzz/defn " nm " takes one arity: (buzz/defn name [args] body)")
+                      {:part nm :form &form})))
+    (when (some #{'&} argv)
+      (throw (ex-info (str "buzz/defn " nm " takes a fixed number of arguments, so no &")
+                      {:part nm :params argv})))
+    (when-let [p (some #(when (:server (meta %)) %) argv)]
+      (throw (ex-info (str "^:server parameters are not supported in " nm ": " p
+                           ". Pass the value or handler from defui.")
+                      {:part nm :param p})))
+    (let [qualified (symbol (str *ns*) (str nm))
+          nm        (cond-> nm doc (vary-meta assoc :doc doc))
+          {:keys [js ssr-forms handlers parts req-sym]}
+          (binding [*self* {:name nm :qualified qualified :arity (count argv)}]
+            (split-part-body qualified argv body))]
+      `(do (let [was# (when-let [v# (resolve '~nm)] (when (bound? v#) @v#))]
+             (def ~nm (with-meta (fn ~argv ~@ssr-forms)
+                        (parts/fn-part-meta
+                         {:buzz/name '~qualified
+                          :buzz/arity ~(count argv)
+                          :buzz/js ~js
+                          :buzz/parts '~(vec parts)
+                          :buzz/handlers ~(handlers-form handlers req-sym)})))
+             ;; Recompile callers only when the argument count changes.
+             (if (and (parts/fn-part? was#)
+                      (not= ~(count argv) (:buzz/arity (meta was#))))
+               (recompile!)
+               (touch!)))
+           (var ~nm)))))
+
 (defmacro defpart
-  "Defines a Hiccup function that runs in the browser. Parts can recurse.
-  Define server values and local state in `defui` and pass them as arguments."
-  [nm argv & body]
-  (when-let [p (some #(when (:server (meta %)) %) argv)]
-    (throw (ex-info (str "^:server parameters are not supported in " nm ": " p
-                         ". Pass the value or handler from defui.")
-                    {:part nm :param p})))
-  (let [qualified (symbol (str *ns*) (str nm))
-        {:keys [js ssr-forms handlers parts req-sym]}
-        (binding [*self* {:name nm :qualified qualified :arity (count argv)}]
-          (split-part-body qualified argv body))]
-    `(do (let [was# (when-let [v# (resolve '~nm)] (when (bound? v#) @v#))]
-           (def ~nm (with-meta (fn ~argv ~@ssr-forms)
-                      (parts/fn-part-meta
-                       {:buzz/name '~qualified
-                       :buzz/arity ~(count argv)
-                       :buzz/js ~js
-                       :buzz/parts '~(vec parts)
-                       :buzz/handlers ~(handlers-form handlers req-sym)})))
-           ;; Recompile callers only when the argument count changes.
-           (if (and (parts/fn-part? was#)
-                    (not= ~(count argv) (:buzz/arity (meta was#))))
-             (recompile!)
-             (touch!)))
-         (var ~nm))))
+  "The former name of `buzz/defn`."
+  [& form]
+  `(defn ~@form))
 
 (defn- part-var
   "The var a head symbol names, if it names one and is not shadowed."
@@ -123,6 +175,16 @@
   (when (and (symbol? head) (not (scope head)))
     (when-let [v (try (resolve head) (catch Exception _ nil))]
       (when (and (var? v) (bound? v)) v))))
+
+(def ^:private host-sym 'buzz.core/host*)
+
+(defn- host-form? [x]
+  (and (seq? x) (= host-sym (first x))))
+
+(defn- browser-forms
+  "Keeps the `:cljs` side of every host form."
+  [form]
+  (walk/postwalk (fn [x] (if (host-form? x) (nth x 2) x)) form))
 
 (def ^:private lambda-heads '#{fn fn*})
 (def ^:private let-heads '#{let let* loop loop* when-let if-let when-some if-some})
@@ -156,6 +218,13 @@
               expr)]
     [out @used]))
 
+(defn- refuse-host
+  "Throws when server code contains a `(host ...)` form."
+  [expr where]
+  (when (some #(and (seq? %) (= :host (mark (first %)))) (tree-seq coll? seq expr))
+    (throw (ex-info (str "(host ...) picks a browser side, so it has no place in " where)
+                    {:expr expr}))))
+
 (defn- slot!
   "`(server ...)` in value position. Hoists the expression to a parameter of the
   client function. Nothing crosses from the browser here: a slot is evaluated
@@ -164,6 +233,7 @@
   (when (some #(and (seq? %) (= :client (mark (first %)))) (tree-seq coll? seq expr))
     (throw (ex-info "(client ...) only works inside a handler, not in value position"
                     {:expr expr})))
+  (refuse-host expr "(server ...)")
   (let [sym (gensym "slot__")
         [expr req?] (lift-request expr (:req-sym @acc))]
     (when req? (swap! acc assoc :slot-request? true))
@@ -213,6 +283,7 @@
       (throw (ex-info "(reply ...) must be the last form of a (server! ...)"
                       {:forms (vec forms)})))
     (let [[server-expr pairs] (lift-client expr)
+          _ (refuse-host server-expr "(server! ...)")
           [server-expr req?]  (lift-request server-expr (:req-sym @acc))
           id (str comp-id "/" (count (:handlers @acc)))]
       (swap! acc update :handlers conj
@@ -325,6 +396,14 @@
         (= :request mk)
         (throw (ex-info "(request) is only valid inside (server ...) or (server! ...)"
                         {:form form}))
+
+        ;; Both sides stay in the form until the split: `browser-forms` keeps
+        ;; the `:cljs` branch for Squint and `ssr-form` keeps `:clj`.
+        (= :host mk)
+        (let [m (host-branches args)]
+          (list host-sym
+                (host-branch m :clj)
+                (conv (host-branch m :cljs) scope lambda? comp-id acc)))
         (= 'quote head)  form
         (lambda-heads head) (conv-fn form scope comp-id acc)
         (let-heads head)    (conv-let form scope lambda? comp-id acc)
@@ -374,6 +453,7 @@
     (set? form)    (into #{} (mapv ssr-form form))
     (seq? form)    (cond
                      (= 'quote (first form)) form
+                     (host-form? form) (ssr-form (second form))
                      ;; Omit handlers passed as arguments from server rendering.
                      (= 'rpc! (first form)) nil
                      :else (apply list (mapv ssr-form form)))
@@ -388,7 +468,7 @@
 
 (def ^:dynamic ^:private *recompiling* false)
 
-(defn register!
+(clojure.core/defn register!
   "Records a component so that a part change can expand it again. Public because
   `defui` expands into a call to it, and a macro cannot reach a private var from
   the namespace it expands in."
@@ -396,7 +476,7 @@
   (swap! components assoc nm spec)
   (when-not *recompiling* (swap! revision inc)))
 
-(defn recompile!
+(clojure.core/defn recompile!
   "Expands every defui again. Called when a part's arity changes."
   []
   (binding [*recompiling* true]
@@ -443,14 +523,14 @@
       (throw (ex-info (str "(local-state ...) in " nm
                            " must be created in defui and passed as an argument")
                       {:part qualified})))
-    {:js        (to-js (apply list 'fn argv forms))
+    {:js        (to-js (browser-forms (apply list 'fn argv forms)))
      ;; Restore part vars for server rendering.
      :ssr-forms (mapv ssr-form (walk/postwalk-replace part-syms forms))
      :handlers  handlers
      :req-sym   (:req-sym @acc)
      :parts     parts}))
 
-(defn touch!
+(clojure.core/defn touch!
   "Increments the revision without recompiling components."
   []
   (swap! revision inc))
@@ -459,12 +539,12 @@
   "Returns metadata for every part reachable from `syms`."
   parts/parts-closure)
 
-(defn part-handlers
+(clojure.core/defn part-handlers
   "Returns the merged handlers for every part reachable from `syms`."
   [syms]
   (into {} (mapcat (comp :buzz/handlers val)) (parts-closure syms)))
 
-(defn split-body
+(clojure.core/defn split-body
   "Returns the pieces a component is made of. Server slots come first in the
   browser function's parameters, then the browser's own."
   [body comp-id]
@@ -472,11 +552,14 @@
                      :req-sym (gensym "req__") :slot-request? false})
         forms (mapv #(conv % #{} false comp-id acc) body)
         {:keys [slots handlers locals parts part-syms req-sym slot-request?]} @acc
-        params (into (mapv :sym slots) (mapv :sym locals))]
-    {:js         (to-js (apply list 'fn params forms))
+        params (into (mapv :sym slots) (mapv :sym locals))
+        inits  (mapv :init locals)]
+    {:js         (to-js (browser-forms (apply list 'fn params forms)))
      ;; the initial values take the slots, so a local can start from what the
      ;; server sent rather than only from a literal
-     :init-js    (to-js (list 'fn (mapv :sym slots) (mapv :init locals)))
+     :init-js    (to-js (browser-forms (list 'fn (mapv :sym slots) inits)))
+     :init-syms  (mapv :sym slots)
+     :init-ssr   (mapv ssr-form (walk/postwalk-replace part-syms inits))
      :locals     (count locals)
      :ssr-forms  (mapv ssr-form (walk/postwalk-replace part-syms forms))
      :slot-exprs (mapv :expr slots)
@@ -492,17 +575,20 @@
     {:id       stable name, used as the key on the wire
      :js       the browser function as JavaScript, compiled once
      :ssr      the same function, compiled here, for the first paint
+     :init     the initial local values as JavaScript, a function of the slots
+     :init-ssr the same function, compiled here, for the first paint
      :slots    thunk returning the current values for that function
      :handlers id -> fn, called when the browser sends an :rpc}"
   [nm argv & body]
   (let [comp-id (str nm)
-        {:keys [js init-js locals ssr-forms slot-exprs slot-syms handlers parts
-                req-sym request?]} (split-body body comp-id)]
+        {:keys [js init-js init-syms init-ssr locals ssr-forms slot-exprs slot-syms
+                handlers parts req-sym request?]} (split-body body comp-id)]
     `(do
-       (defn ~nm ~argv
+       (clojure.core/defn ~nm ~argv
          {:id       ~comp-id
           :js       ~js
           :init     ~init-js
+          :init-ssr (fn ~init-syms ~init-ssr)
           :locals   ~locals
           :parts    '~(vec parts)
           ;; :slots takes a request only when needed.

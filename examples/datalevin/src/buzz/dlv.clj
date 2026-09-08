@@ -1,7 +1,7 @@
 (ns buzz.dlv
   "A Datalevin browser over a MusicBrainz sample: a query editor with canned
   queries, results as a table, and a query log shared by every viewer."
-  (:require [buzz.core :as buzz :refer [client defpart defui local-state observe reply server server!]]
+  (:require [buzz.core :as buzz :refer [client defui local-state observe reply server server!]]
             [buzz.dlv.source :as dlv]
             [clojure.edn :as edn]
             [clojure.java.io :as io]
@@ -105,7 +105,7 @@
               (sort-by :label)
               vec)})
 
-(defpart result-view [r]
+(buzz/defn result-view [r]
   (cond
     (nil? r) [:p.hint "Run a query, or click one on the left."]
     (:error r) [:div.error (:error r)]

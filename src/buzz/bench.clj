@@ -3,7 +3,7 @@
   over HTTP so the browser knows when it asked, and can time the whole loop:
   server work, wire, and render."
   (:require [babashka.nrepl.server :as nrepl]
-            [buzz.core :as buzz :refer [client defpart defui observe server server!]]
+            [buzz.core :as buzz :refer [client defui observe server server!]]
             [clojure.string :as str]
             [org.httpkit.server :as http]))
 
@@ -37,7 +37,7 @@
 
 (defn clear! [] (reset! rows []))
 
-(defpart row [{:keys [id label]}]
+(buzz/defn row [{:keys [id label]}]
   [:tr {:key id}
    [:td.id id]
    [:td.label label]

@@ -1,5 +1,5 @@
 (ns buzz.core-test
-  (:require [buzz.core :as b :refer [client defpart defui local-state reply request server server!]]
+  (:require [buzz.core :as b :refer [client defpart defui host local-state reply request server server!]]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]))
 
@@ -364,3 +364,81 @@
     (is (= [] ((:slots inst))))
     (is (empty? (:handlers inst)))
     (is (str/includes? (:js inst) "(1)"))))
+
+;; One body, two compilers. A host form gives each side its own branch.
+(b/defn parse-number [s]
+  (host :clj (Double/parseDouble s) :cljs (js/parseFloat s)))
+
+(b/defn beep [s]
+  (host :cljs (js/alert s)))
+
+(defui measure []
+  (let [n (local-state "1.5")]
+    [:p (parse-number @n)
+     [:button {:on-click (fn [_] (beep (host :cljs (js/String @n))))} "beep"]]))
+
+(deftest a-host-form-picks-a-side
+  (testing "the browser runs the :cljs branch"
+    (is (str/includes? (:buzz/js (meta parse-number)) "parseFloat(s)"))
+    (is (not (str/includes? (:buzz/js (meta parse-number)) "parseDouble"))))
+
+  (testing "the server runs the :clj branch"
+    (is (= 1.5 (parse-number "1.5"))))
+
+  (testing "a missing branch is nil"
+    (is (nil? (beep "x")))
+    (is (str/includes? (:buzz/js (meta beep)) "alert(s)")))
+
+  (testing ":default stands in for a missing side"
+    (is (= 3 (host :cljs 2 :default 3))))
+
+  (testing "outside a component the :clj branch is the value"
+    (is (= 1 (host :clj 1 :cljs 2))))
+
+  (testing "a handler carries js/ interop through a host form"
+    (let [inst (measure)]
+      (is (str/includes? (:js inst) "String("))
+      (is (str/includes? (pr-str ((:ssr inst) (atom "2"))) "2.0"))))
+
+  (testing "server code refuses it"
+    (is (re-find #"no place in \(server \.\.\.\)"
+                 (refusal '(buzz.core/defui h1 []
+                             [:p (buzz.core/server (buzz.core/host :clj 1))]))))
+    (is (re-find #"no place in \(server! \.\.\.\)"
+                 (refusal '(buzz.core/defui h2 []
+                             [:button {:on-click (fn [_] (buzz.core/server! (buzz.core/host :clj 1)))}])))))
+
+  (testing "an unknown key is refused"
+    (is (re-find #"not :node"
+                 (refusal '(buzz.core/defn h3 [] (buzz.core/host :node 1)))))))
+
+(b/defn described "A row." [item] [:li item])
+
+(deftest buzz-defn-defines-a-function-for-both-sides
+  (testing "the docstring lands on the var"
+    (is (= "A row." (:doc (meta #'described)))))
+
+  (testing "defpart defines the same thing"
+    (is (= (keys (meta fruit-row)) (keys (meta described)))))
+
+  (testing "one arity only"
+    (is (re-find #"takes one arity"
+                 (refusal '(buzz.core/defn two ([] 1) ([x] x))))))
+
+  (testing "a fixed number of arguments"
+    (is (re-find #"so no &"
+                 (refusal '(buzz.core/defn many [& xs] xs))))))
+
+(defui draft []
+  (let [text (local-state "start")]
+    [:p @text]))
+
+(deftest a-local-starts-from-its-init-on-the-first-paint
+  (testing "a literal init"
+    (let [inst (draft)]
+      (is (= ["start"] ((:init-ssr inst))))
+      (is (= [:p "start"] (apply (:ssr inst) (map atom ((:init-ssr inst))))))))
+
+  (testing "an init read from a server value"
+    (let [inst (seeded)]
+      (is (= [5] (apply (:init-ssr inst) ((:slots inst))))))))
