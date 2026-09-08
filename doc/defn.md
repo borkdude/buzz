@@ -1,9 +1,9 @@
-# Parts
+# Functions
 
 Use `buzz/defn` to define a function for the browser and the server. Squint
 compiles it for the browser. The first paint and server code call the function
-compiled on the JVM. A part can return Hiccup or any other value, and can call
-itself:
+compiled on the JVM. The function can return Hiccup or any other value, and
+can call itself:
 
 ```clojure
 (buzz/defn node [r]
@@ -23,8 +23,8 @@ in the browser with a ReferenceError.
 
 ## Arguments
 
-A part cannot contain `(server ...)` or `(local-state ...)`. Use these forms
-in `defui` and pass their results to the part:
+A `buzz/defn` cannot contain `(server ...)` or `(local-state ...)`. Use these
+forms in `defui` and pass their results as arguments:
 
 ```clojure
 (buzz/defn row [item selected]
@@ -39,15 +39,15 @@ in `defui` and pass their results to the part:
            (row item selected))]))
 ```
 
-`selected` is browser state. The part receives the atom as an argument and can
-read or update it.
+`selected` is browser state. The function receives the atom as an argument and
+can read or update it.
 
 ## Handlers
 
-A part can contain `(server! ...)`. Wrap browser values in `(client ...)` when
-sending them to the server.
+A `buzz/defn` can contain `(server! ...)`. Wrap browser values in
+`(client ...)` when sending them to the server.
 
-Use `(buzz/request)` in a part handler to access connection-scoped state:
+Use `(buzz/request)` in a handler to access connection-scoped state:
 
 ```clojure
 (defonce carts (atom {}))
@@ -63,10 +63,10 @@ Use `(buzz/request)` in a part handler to access connection-scoped state:
 
 ## Browser and server branches
 
-A part body runs on both sides, so it must compile on the JVM and as Squint.
-Use `host` where the two sides need different code. The browser runs the
-`:cljs` branch and the first paint runs the `:clj` branch. A missing branch is
-`:default`, or nil:
+A `buzz/defn` body runs on both sides, so it must compile on the JVM and as
+Squint. Use `host` where the two sides need different code. The browser runs
+the `:cljs` branch and the first paint runs the `:clj` branch. A missing branch
+is `:default`, or nil:
 
 ```clojure
 (buzz/defn parse-number [s]
@@ -88,17 +88,22 @@ A `:cljs` branch on its own makes a browser-only function:
 It is refused inside `server` and `server!`. Outside those forms it returns
 the `:clj` branch.
 
-## Editing a part in the REPL
+`host` does not move work to the server. Both branches compute the same value
+for the same render. Read server state with `server` and run server actions
+with `server!`.
+
+## Editing in the REPL
 
 Re-evaluate a `buzz/defn` in the REPL to hot-reload open pages.
 
 ## Limitations
 
 - A `buzz/defn` takes one arity and a fixed number of arguments.
-- A `buzz/defn` can call only parts that are already defined. Mutual recursion
-  requires re-evaluating the first definition after both parts exist.
-- Functions passed to parts must also compile on the JVM for server rendering.
-  Keep `js/` and `await` code in the part itself, or in a `host` form:
+- A `buzz/defn` can call only functions that are already defined. Mutual
+  recursion requires re-evaluating the first definition after both exist.
+- Functions passed as arguments must also compile on the JVM for server
+  rendering. Keep `js/` and `await` code in the `buzz/defn` itself, or in a
+  `host` form:
 
   ```clojure
   (buzz/defn submit-button [on-submit]

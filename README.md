@@ -94,7 +94,7 @@ response map as the second argument to set a cookie or other response headers:
 (server! (reply :ok {:headers {"Set-Cookie" "session=abc; HttpOnly; Path=/"}}))
 ```
 
-## Parts
+## Functions
 
 Use `buzz/defn` to define a function for the browser and the server:
 
@@ -103,10 +103,11 @@ Use `buzz/defn` to define a function for the browser and the server:
   [:li (:title item)])
 ```
 
-Call `(row item)` inside `defui` or another part. Parts can call themselves
-recursively and use `server!` for actions. Define `server` and `local-state`
-in `defui`, then pass their values as arguments. Use `host` where the browser
-and the server need different code. See [doc/parts.md](doc/parts.md).
+Call `(row item)` inside `defui` or another `buzz/defn`. These functions can
+call themselves recursively and use `server!` for actions. Define `server` and
+`local-state` in `defui`, then pass their values as arguments. Use `host`
+where the browser and the server need different code. See
+[doc/defn.md](doc/defn.md).
 
 ## Mounting
 
