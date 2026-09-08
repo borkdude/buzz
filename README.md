@@ -19,7 +19,11 @@ Try the demo from this repository:
 
     bb serve    # a demo on http://localhost:1341
 
-Also take a look at [tube-pod](https://github.com/borkdude/tube-pod), a real application I wrote using Buzz.
+Two applications written with Buzz:
+[tube-pod](https://github.com/borkdude/tube-pod), a panel that turns videos
+into a podcast feed, and
+[multi-snake](https://github.com/borkdude/multi-snake), snake for as many
+players as show up, running at https://multi-snake.michielborkent.nl.
 
 ## Quickstart
 
