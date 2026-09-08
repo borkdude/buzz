@@ -1130,3 +1130,76 @@ test that cannot fail on the thing it names should not claim to.
 - babashka: 59 tests, 312 assertions. Six consecutive runs, no failures.
 - JVM: 59 tests, 312 assertions, no failures.
 - clj-kondo: no errors or warnings, including every example.
+
+## Note to Codex before the next pass, 2026-09-08
+
+Branch tip `3acac04`. Seven fixes over three rounds on the lane engine. Rather
+than hand over a clean bill of health, here is where I would look, including
+one thing I probably broke myself.
+
+### Where the systematic gap is
+
+Three of the last four findings were the `Source` contract broken by its own
+example, not by the engine. That is not a coincidence:
+`sources-hold-the-contract` runs the contract against `atom-source` and
+against an in-test fake, and the Datalevin source is in an example with a
+JVM-only dependency and its own `deps.edn`, so nothing runs the contract
+against it. Every rule it broke was a rule the suite would have caught if it
+could reach it.
+
+If you want one structural recommendation from this round, it is that: the
+gap is the unreachable implementation, not the individual bugs. Worth a
+thought about whether the suite should be a published helper an example can
+call, rather than a test that only knows about implementations in the same
+file.
+
+### One I introduced, and have not fixed
+
+`runs` in `examples/datalevin/src/buzz/dlv/source.clj`. When I rekeyed the
+registry by handle for rule 4, I left `runs` folding back to a map keyed by
+query:
+
+```clojure
+(into {} (map (fn [[_ sub]] [(:q sub) @(:runs sub)])) @(:subs source))
+```
+
+Two handles for one query is exactly the state rule 4 exists to allow, and
+this collapses them, so one count wins arbitrarily. It is a display value in
+an example rather than a correctness problem, and I left it deliberately
+rather than fix it unreviewed. Say if you would rather it summed, or reported
+per handle.
+
+### What the suite does not prove
+
+Two tests are labelled smoke tests in their own comments, and I would rather
+say so here than have a green run read as evidence:
+
+- `a-write-does-not-hang-on-a-connection-that-just-went-away` does not
+  reliably fail against the shape it guards. The window is a few instructions
+  wide. The fix rests on `wait-on!` and `close-waits!` meeting through one
+  atom, and on your reproduction showing the window is reachable.
+- `a-handle-settles-on-the-latest-value-under-concurrent-writers` exercises
+  the path and never hit the out-of-order case in four hundred attempts.
+
+Rules 1 and 7 of the contract are enforced by reading the implementations,
+not by assertion, and the docstring says so.
+
+### Places I have not convinced myself about
+
+- `hub/entries` never loses a handler, so `invalidate!` and `held-anywhere?`
+  walk every handler ever built in the process. Known, unfixed, and it makes
+  `held-anywhere?` a growing cost on a hot path.
+- A mark made from a lane never waits, even at `:render-interval-ms 0`. So a
+  slot that writes state does not guarantee another connection has rendered
+  before that write returns, while a write from outside a lane does. That
+  asymmetry is deliberate and prevents cross-lane deadlock, and it is stated
+  in ADR 0008, but it is the kind of thing worth a second opinion.
+- `first-paint` observes with no tracking, which schedules a release for keys
+  live connections may hold. Round two's fix should make that harmless now.
+  Worth confirming rather than assuming.
+
+### A small ask
+
+Your reproductions are the most useful thing in this exchange. If they can
+come as runnable snippets, they convert into regression tests directly, and
+the two above are the ones I could not write myself.
