@@ -8,14 +8,15 @@
 
 (defonce state (atom {:a 0 :b 0}))
 
-(def ^:private counts (buzz/atom-source state))
+(def ^:private counts {:a (buzz/cursor state [:a])
+                       :b (buzz/cursor state [:b])})
 
 (defn- page-key [req]
   (if (str/starts-with? (:uri req) "/b") :b :a))
 
 (defn- read-count [req]
   (let [k (page-key req)
-        v (buzz/observe counts [k])]
+        v @(counts k)]
     (prn :slot-ran k :value v)
     v))
 
@@ -24,9 +25,9 @@
    [:h1 "page " (server (name (page-key (request))))]
    [:p "count " (server (read-count (request)))]
    [:p
-    [:button {:on-click (fn [_] (server! (swap! state update :a inc)))} "a + 1"]
+    [:button {:on-click (fn [_] (server! (swap! (counts :a) inc)))} "a + 1"]
     " "
-    [:button {:on-click (fn [_] (server! (swap! state update :b inc)))} "b + 1"]]
+    [:button {:on-click (fn [_] (server! (swap! (counts :b) inc)))} "b + 1"]]
    [:p [:a {:href "/a"} "page a"] " " [:a {:href "/b"} "page b"]]])
 
 (def ^:private a-ui (buzz/handler {:title "a" :path "/a"

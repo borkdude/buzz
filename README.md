@@ -32,19 +32,19 @@ Create a project with two files. `deps.edn`:
 
 ```clojure
 (ns counter
-  (:require [buzz.core :as buzz :refer [client defui local-state observe server server!]]
+  (:require [buzz.core :as buzz :refer [client defui local-state server server!]]
             [org.httpkit.server :as http]))
 
 (defonce clicks (atom 0))
 
-(def counter-source (buzz/atom-source clicks))
+(def counts (buzz/cursor clicks))
 
 (defui counter []
-  (let [n    (server (observe counter-source []))
+  (let [n    (server @counts)
         step (local-state 1)]
     [:div
      [:p "clicked " n " times"]
-     [:button {:on-click (fn [_] (server! (swap! clicks + (client @step))))} "add"]
+     [:button {:on-click (fn [_] (server! (swap! counts + (client @step))))} "add"]
      [:button {:on-click (fn [_] (swap! step inc))} (str "step " @step)]]))
 
 (def ui
@@ -67,8 +67,8 @@ The count is a server value, so it is the same for all browsers. The step is a b
 The body of a component is client side code. In the body you can use four marks to communicate with the server or to make local state.
 
 - `(server expr)` is a value from the server. The server runs the expression again
-after each change to something the expression read through `observe`, and the
-result is sent to the browser. See [Sources](#sources).
+after each change to a cursor the expression read, and the result is sent to
+the browser. See [Sources](#sources).
 
 - `(server! expr)` is way to make the server do something. It is a side effect, not a value. The return value is a promise. Using the special `reply` form, you can send a value back to the browser. Give `reply` a second argument to add to the http response the value arrives in, which is how a handler sets a cookie.
 
@@ -133,24 +133,23 @@ The page belongs to the handler, so one application can serve more than one of t
 
 ## Sources
 
-A slot reads server state through a source, and reading a key subscribes the
-connection to it. A write then reaches the connections that read the key it
-changed, and no others.
+A slot reads server state through a cursor, and dereferencing one inside a
+slot subscribes the connection to that key. A write then reaches the
+connections that read the key it changed, and no others.
 
 ```clojure
 (defonce todos (atom {"alice" [] "bob" []}))
 
-(def by-user (buzz/atom-source todos))
-
 (defui board []
-  [:ul (for [t (server (buzz/observe by-user [(whoami (request))]))]
+  [:ul (for [t (server @(buzz/cursor todos [(whoami (request))]))]
          [:li t])])
 ```
 
-`buzz/observe` reads a key and subscribes the connection to it. What a
-connection holds is whatever its slots read, so there is nothing to declare and
-nothing to keep in step. Adding a note for alice runs alice's slots. Bob's do
-not run.
+`buzz/cursor` takes a source and a key. Over an atom the key is a path into
+it, `swap!` and `reset!` write through, and a cursor with no key is the whole
+atom. What a connection holds is whatever its slots read, so there is nothing
+to declare and nothing to keep in step. Adding a note for alice runs alice's
+slots. Bob's do not run.
 
 Buzz keeps one subscription per key per process, shared by every connection
 reading it, and releases it once the last connection lets go.
@@ -158,7 +157,7 @@ reading it, and releases it once the last connection lets go.
 A key decides which connections render, not which slots. A connection runs all
 of its slots whenever any key it reads changes.
 
-Read a wide key and you get a wide fan out. `(observe by-user [])` is the whole
+Read a wide key and you get a wide fan out. `(buzz/cursor todos)` is the whole
 map, so every connection reading it renders on every write. Narrow the key and
 the fan out narrows with it.
 
@@ -167,9 +166,9 @@ update that connection. Read it through a source, or accept that it is fixed
 for the life of the page.
 
 Implement `buzz.source/Source` to render from something other than an atom. It
-takes a subscribe and an unsubscribe, and the handle it returns is what
-`observe` derefs. `examples/datalevin` has one over a database, driven by the
-transaction report.
+takes a subscribe and an unsubscribe, and the handle it returns is what a
+cursor over that source derefs. Such a cursor is read only. `examples/datalevin`
+has one over a database, driven by the transaction report.
 
 See [examples/observe](examples/observe) for the smallest version of all of
 this.

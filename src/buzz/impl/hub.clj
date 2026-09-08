@@ -38,8 +38,8 @@
 ;; value. A write that lands on an equal but fresh value notifies once too
 ;; often, which costs a render and no frame, since the values compare equal
 ;; where they are sent.
-(defrecord AtomSource [a]
-  Source
+(extend-protocol Source
+  clojure.lang.Atom
   ;; The watch goes on before the first value is read, and the first value is
   ;; stored with a compare-and-set. Reading and storing are two steps, so a
   ;; write between them fires the watch with the newer value and a plain
@@ -55,7 +55,7 @@
   ;; newer one. Each callback takes the handle and reads the atom itself, so
   ;; whichever finishes last stores what is current. `notify` is called outside
   ;; the lock, since it renders and must not hold a writing thread's lock.
-  (-subscribe [_ k notify]
+  (-subscribe [a k notify]
     (let [path  (path-of k)
           cache (atom ::unread)]
       (add-watch a cache
@@ -69,15 +69,36 @@
       (locking cache
         (compare-and-set! cache ::unread (get-in @a path)))
       cache))
-  (-unsubscribe [_ _ handle]
+  (-unsubscribe [a _ handle]
     (remove-watch a handle)))
 
 (defn atom-source
-  "A source over `a`, keyed by a path into it. `(observe src [:todos \"alice\"])`
-  reads `(get-in @a [:todos \"alice\"])` and only notifies when that path
-  changes."
+  "An atom is a source as it is, keyed by a path into it. This returns `a`
+  unchanged and stays for callers written before that was so."
   [a]
-  (->AtomSource a))
+  a)
+
+(defn write-at!
+  "Applies `f` to the value at `k` in atom `a` and returns the new value there.
+  The whole atom when `k` is `[]`, since `update-in` with an empty path does
+  not mean that."
+  [a k f]
+  (let [path (path-of k)]
+    (if (empty? path)
+      (swap! a f)
+      (get-in (swap! a update-in path f) path))))
+
+(defn cas-at!
+  "Sets `k` in atom `a` to `n` if it holds `o`. True when it did."
+  [a k o n]
+  (let [path (path-of k)]
+    (if (empty? path)
+      (compare-and-set! a o n)
+      (let [[old _] (swap-vals! a (fn [m]
+                                    (if (= o (get-in m path))
+                                      (assoc-in m path n)
+                                      m)))]
+        (= o (get-in old path))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Handlers and the topic index

@@ -546,7 +546,46 @@
   hub/observe)
 
 (def atom-source
-  "A source over an atom, keyed by a path into it."
+  "An atom is a source as it is. Returns `a` unchanged; kept for callers
+  written before that was so."
   hub/atom-source)
+
+(defn- write-through [source k f]
+  (if (instance? clojure.lang.Atom source)
+    (hub/write-at! source k f)
+    (throw (ex-info "this cursor is read only: its source is not an atom"
+                    {:source source :k k}))))
+
+(defn cursor
+  "A handle on `k` in `source`. Read it with `deref`. Inside `(server ...)`
+  the deref subscribes the connection to that key, so a write to it reaches
+  the connections that read it and no others. Anywhere else it is a plain
+  read.
+
+  When the source is an atom, `swap!`, `reset!` and `compare-and-set!` write
+  through to it. A cursor over any other source is read only.
+
+  `k` is a path into an atom. Without it the cursor is the whole atom.
+
+    (def clicks (atom 0))
+    (def counts (buzz/cursor clicks))
+
+    (defui counter []
+      [:p (server @counts) [:button {:on-click (fn [_] (server! (swap! counts inc)))} \"+\"]])"
+  ([source] (cursor source []))
+  ([source k]
+   (reify
+     clojure.lang.IDeref
+     (deref [_] (hub/observe source k))
+     clojure.lang.IAtom
+     (swap [_ f] (write-through source k f))
+     (swap [_ f x] (write-through source k #(f % x)))
+     (swap [_ f x y] (write-through source k #(f % x y)))
+     (swap [_ f x y more] (write-through source k #(apply f % x y more)))
+     (reset [_ v] (write-through source k (constantly v)))
+     (compareAndSet [_ o n]
+       (if (instance? clojure.lang.Atom source)
+         (hub/cas-at! source k o n)
+         (write-through source k identity))))))
 
 ;; `buzz.source/Source` is the protocol an integration implements.

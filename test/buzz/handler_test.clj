@@ -1386,3 +1386,62 @@
       (doseq [w ws] @w)
       (is (= (:x @a) @h))
       (source/-unsubscribe src [:x] h))))
+
+;; ---------------------------------------------------------------------------
+;; Cursors
+;;
+;; A cursor is the atom-shaped face of a source key. Deref inside a slot is
+;; what subscribes, and over an atom the writes go through, so the same
+;; handle serves the slot and the handler.
+
+(defonce ^:private ledger2 (atom {"alice" ["water the plants"]
+                                  "bob"   ["renew the domain"]}))
+
+(defn- notes-of [req] (handler/cursor ledger2 [(user-of req)]))
+
+(defui cursor-notes []
+  [:ul (for [n (server (do (ran! (request)) @(notes-of (request))))]
+         [:li n])])
+
+(deftest a-cursor-deref-in-a-slot-subscribes-that-connection
+  (with-two {:mounts [{:el "app" :ui #'cursor-notes}] :render-interval-ms 0}
+    (fn [{:keys [alice bob]}]
+      (swap! (handler/cursor ledger2 ["alice"]) conj "call the vet")
+      (testing "the write went through the cursor into the atom"
+        (is (= ["water the plants" "call the vet"] (get @ledger2 "alice"))))
+      (testing "and reached the connection that read that key"
+        (is (= "patch" (first (next-event (:rdr alice))))))
+      (testing "and no other"
+        (is (silent? (:sock bob) (:rdr bob) 300))
+        (is (= {"alice" 1} @slot-runs))))))
+
+(deftest a-cursor-writes-through-like-an-atom
+  (let [a (atom {:x 1 :y {:z 2}})
+        x (handler/cursor a [:x])
+        z (handler/cursor a [:y :z])
+        whole (handler/cursor a)]
+    (is (= 1 @x))
+    (is (= 2 (swap! x inc)))
+    (is (= 10 (reset! z 10)))
+    (is (= {:x 2 :y {:z 10}} @whole))
+    (testing "compare-and-set! is atomic on the path"
+      (is (true? (compare-and-set! x 2 3)))
+      (is (false? (compare-and-set! x 2 4)))
+      (is (= 3 (:x @a))))
+    (testing "the whole-atom cursor writes the atom itself"
+      (reset! whole {:x 0})
+      (is (= {:x 0} @a)))))
+
+(deftest a-cursor-over-a-source-that-is-not-an-atom-is-read-only
+  (reset! pushed {:k 7})
+  (reset! pushes {})
+  (let [c (handler/cursor (->PushSource) :k)]
+    (is (= 7 @c))
+    (is (thrown? clojure.lang.ExceptionInfo (swap! c inc)))
+    (is (thrown? clojure.lang.ExceptionInfo (reset! c 1)))))
+
+(deftest a-cursor-outside-a-render-is-a-plain-read
+  (with-grace 200
+    (let [c (handler/cursor lease [:x])]
+      (is (= (:x @lease) @c))
+      (is (until 3000 #(empty? (lease-subs)))))))
