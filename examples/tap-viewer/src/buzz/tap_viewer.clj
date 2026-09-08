@@ -1,6 +1,6 @@
 (ns buzz.tap-viewer
   "View `tap>` values in a browser."
-  (:require [buzz.core :as buzz :refer [client defpart defui local-state reply request server server!]]
+  (:require [buzz.core :as buzz :refer [client defui local-state reply request server server!]]
             [clojure.java.io :as io]
             [clojure.string :as str]
             [org.httpkit.server :as http]))
@@ -186,7 +186,7 @@
 
 ;; A node renders its children by calling itself, so folding a branch drops the
 ;; whole subtree.
-(defpart tree-node [n folded said]
+(buzz/defn tree-node [n folded said]
   [:div {:key (:path n)}
    [:div.row
     (if (:branch n)
@@ -210,7 +210,7 @@
    (when (and (:branch n) (not (get @folded (:path n))))
      [:div.kids (for [c (:children n)] (tree-node c folded said))])])
 
-(defpart entry-item [e open folded said]
+(buzz/defn entry-item [e open folded said]
   [:li {:key (:id e)}
    [:div.head
     [:button.toggle {:on-click (fn [_] (swap! open (fn [m] (assoc m (:id e)

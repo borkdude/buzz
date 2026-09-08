@@ -1,4 +1,5 @@
 ;; Shipped with the library, so a project using it does not have to know that
-;; defui and defpart bind their arguments.
+;; defui, defn and defpart bind their arguments.
 {:lint-as {buzz.core/defui clojure.core/defn
+           buzz.core/defn clojure.core/defn
            buzz.core/defpart clojure.core/defn}}

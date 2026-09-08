@@ -85,7 +85,9 @@ values, call server actions, and keep local state:
 - `(client expr)` passes a browser value to a `server!` action.
 - `(local-state init)` creates a browser-local atom. Use `deref`, `reset!`,
   and `swap!` to read and change it. Each mount keeps its own atom across
-  renders. The initial value can use a `server` expression.
+  renders. The initial value can use a `server` expression. It is also
+  computed for the first paint, so browser-only code in it needs `host`:
+  `(local-state (host :cljs (js/Date.)))` starts as nil on the first paint.
 
 Use `reply` inside `server!` to return a value to the browser. Supply a Ring
 response map as the second argument to set a cookie or other response headers:
@@ -94,18 +96,20 @@ response map as the second argument to set a cookie or other response headers:
 (server! (reply :ok {:headers {"Set-Cookie" "session=abc; HttpOnly; Path=/"}}))
 ```
 
-## Parts
+## Functions
 
-Use `defpart` to extract reusable UI functions from a component:
+Use `buzz/defn` to define a function for the browser and the server:
 
 ```clojure
-(defpart row [item]
+(buzz/defn row [item]
   [:li (:title item)])
 ```
 
-Call `(row item)` inside `defui` or another part. Parts can call themselves
-recursively and use `server!` for actions. Define `server` and `local-state`
-in `defui`, then pass their values as arguments. See [doc/parts.md](doc/parts.md).
+Call `(row item)` inside `defui` or another `buzz/defn`. These functions can
+call themselves recursively and use `server!` for actions. Define `server` and
+`local-state` in `defui`, then pass their values as arguments. Use `host`
+where the browser and the server need different code. See
+[doc/defn.md](doc/defn.md).
 
 ## Mounting
 
@@ -263,5 +267,5 @@ Omit `<!--app-->` to render that component only after the browser connects.
 
     bb dev    # the demo, plus an nrepl on 1667
 
-Re-evaluate a `defui` or `defpart` to update open pages. Local state survives
+Re-evaluate a `defui` or `buzz/defn` to update open pages. Local state survives
 updates and reconnects when the number of `local-state` forms stays the same.

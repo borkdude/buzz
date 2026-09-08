@@ -315,9 +315,9 @@
 (defn- first-paint [spec req]
   (let [mount (build spec req)
         inst  (:instance mount)
-        ;; Initialize browser-local atoms with nil during server rendering.
-        locals (repeatedly (:locals inst 0) #(atom nil))]
-    (ssr/render (into [(:ssr inst)] (concat (slot-vals mount) locals)))))
+        vals  (slot-vals mount)
+        locals (mapv atom (apply (:init-ssr inst) vals))]
+    (ssr/render (into [(:ssr inst)] (concat vals locals)))))
 
 (def ^:private squint-core "https://esm.sh/squint-cljs@0.14.208/core.js")
 

@@ -1,6 +1,6 @@
 (ns buzz.app
   (:require [babashka.nrepl.server :as nrepl]
-            [buzz.core :as buzz :refer [client defpart defui local-state observe reply
+            [buzz.core :as buzz :refer [client defui local-state observe reply
                                         server server!]]
             [clojure.string :as str]
             [org.httpkit.server :as http]))
@@ -44,7 +44,7 @@
 ;; browser gets an `rpc!` call carrying `id` — which is a binding the browser
 ;; itself introduced, in the `for`.
 
-(defpart todo-row [{:keys [id title done]}]
+(buzz/defn todo-row [{:keys [id title done]}]
   [:li {:key id}
    [:input {:type "checkbox"
             :checked done

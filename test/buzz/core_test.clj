@@ -1,5 +1,5 @@
 (ns buzz.core-test
-  (:require [buzz.core :as b :refer [client defpart defui local-state reply request server server!]]
+  (:require [buzz.core :as b :refer [client defpart defui host local-state reply request server server!]]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]))
 
@@ -364,3 +364,179 @@
     (is (= [] ((:slots inst))))
     (is (empty? (:handlers inst)))
     (is (str/includes? (:js inst) "(1)"))))
+
+;; One body, two compilers. A host form gives each side its own branch.
+(b/defn parse-number [s]
+  (host :clj (Double/parseDouble s) :cljs (js/parseFloat s)))
+
+(b/defn beep [s]
+  (host :cljs (js/alert s)))
+
+(defui measure []
+  (let [n (local-state "1.5")]
+    [:p (parse-number @n)
+     [:button {:on-click (fn [_] (beep (host :cljs (js/String @n))))} "beep"]]))
+
+(deftest a-host-form-picks-a-side
+  (testing "the browser runs the :cljs branch"
+    (is (str/includes? (:buzz/js (meta parse-number)) "parseFloat(s)"))
+    (is (not (str/includes? (:buzz/js (meta parse-number)) "parseDouble"))))
+
+  (testing "the server runs the :clj branch"
+    (is (= 1.5 (parse-number "1.5"))))
+
+  (testing "a missing branch is nil"
+    (is (nil? (beep "x")))
+    (is (str/includes? (:buzz/js (meta beep)) "alert(s)")))
+
+  (testing ":default stands in for a missing side"
+    (is (= 3 (host :cljs 2 :default 3))))
+
+  (testing "outside a component the :clj branch is the value"
+    (is (= 1 (host :clj 1 :cljs 2))))
+
+  (testing "a handler carries js/ interop through a host form"
+    (let [inst (measure)]
+      (is (str/includes? (:js inst) "String("))
+      (is (str/includes? (pr-str ((:ssr inst) (atom "2"))) "2.0"))))
+
+  (testing "server code refuses it"
+    (is (re-find #"no place in \(server \.\.\.\)"
+                 (refusal '(buzz.core/defui h1 []
+                             [:p (buzz.core/server (buzz.core/host :clj 1))]))))
+    (is (re-find #"no place in \(server! \.\.\.\)"
+                 (refusal '(buzz.core/defui h2 []
+                             [:button {:on-click (fn [_] (buzz.core/server! (buzz.core/host :clj 1)))}])))))
+
+  (testing "an unknown key is refused"
+    (is (re-find #"not :node"
+                 (refusal '(buzz.core/defn h3 [] (buzz.core/host :node 1)))))))
+
+(b/defn described "A row." [item] [:li item])
+
+(deftest buzz-defn-defines-a-function-for-both-sides
+  (testing "the docstring lands on the var"
+    (is (= "A row." (:doc (meta #'described)))))
+
+  (testing "defpart defines the same thing"
+    (is (= (keys (meta fruit-row)) (keys (meta described)))))
+
+  (testing "one arity only"
+    (is (re-find #"takes one arity"
+                 (refusal '(buzz.core/defn two ([] 1) ([x] x))))))
+
+  (testing "a fixed number of arguments"
+    (is (re-find #"so no &"
+                 (refusal '(buzz.core/defn many [& xs] xs))))))
+
+(defui draft []
+  (let [text (local-state "start")]
+    [:p @text]))
+
+(deftest a-local-starts-from-its-init-on-the-first-paint
+  (testing "a literal init"
+    (let [inst (draft)]
+      (is (= ["start"] ((:init-ssr inst))))
+      (is (= [:p "start"] (apply (:ssr inst) (map atom ((:init-ssr inst))))))))
+
+  (testing "an init read from a server value"
+    (let [inst (seeded)]
+      (is (= [5] (apply (:init-ssr inst) ((:slots inst))))))))
+
+(defui clock []
+  (let [now (local-state (host :cljs (js/Date.)))]
+    [:p (str @now)]))
+
+(deftest browser-only-code-outside-a-handler-is-refused-by-name
+  (testing "a local-state initial value"
+    (is (re-find #"js/Date\. in \(local-state \.\.\.\) runs on the first paint too"
+                 (refusal '(buzz.core/defui c1 []
+                             (let [t (buzz.core/local-state (js/Date.))] [:p @t]))))))
+
+  (testing "a component body"
+    (is (re-find #"js/alert in c2 runs on the first paint"
+                 (refusal '(buzz.core/defui c2 [] [:p (js/alert "x")])))))
+
+  (testing "a function body"
+    (is (re-find #"js/alert in c3 runs on the first paint"
+                 (refusal '(buzz.core/defn c3 [] (js/alert "x"))))))
+
+  (testing "a handler is not first-paint code"
+    (is (var? (eval '(buzz.core/defui c4 []
+                       [:button {:on-click (fn [_] (js/alert "x"))}])))))
+
+  (testing "a host form makes the initial value nil on the first paint"
+    (let [inst (clock)]
+      (is (= [nil] ((:init-ssr inst))))
+      (is (str/includes? (:init inst) "new Date()")))))
+
+(defui presence []
+  (let [flags (local-state {:online true :on-call false})
+        style {:one 1 :on-top 2}]
+    [:p {:on-click (fn [_] (js/alert "x")) :class "p"}
+     (str (:online @flags)) (:on-top style)]))
+
+(deftest maps-keep-their-on-keys-on-the-first-paint
+  (let [inst (presence)]
+    (testing "a local-state map keeps every key"
+      (is (= [{:online true :on-call false}] ((:init-ssr inst)))))
+
+    (testing "a data map in the body keeps its on keys"
+      (let [[tag attrs & body] ((:ssr inst) (atom {:online true :on-call false}))]
+        (is (= :p tag))
+        (is (fn? (:on-click attrs)))
+        (is (= "p" (:class attrs)))
+        (is (= ["true" 2] body))))))
+
+(defui tagged []
+  (let [status (local-state [:status {:online true}])]
+    [:p (str @status)]))
+
+(defui extracted []
+  (let [attrs {:on-click (fn [_] (js/alert "x") (new js/Date))
+               :on-input (fn [e]
+                           (set! (.. e -target -value) "")
+                           (set! js/window.location "/"))}]
+    [:button attrs "click"]))
+
+(defui ready []
+  (let [hooks (local-state [:status {:on-ready (fn [] true)}])]
+    [:p (str @hooks)]))
+
+(defui parsed []
+  [:ul (mapv (fn [x] [:li (js/parseFloat x)]) ["1"])])
+
+(deftest browser-code-inside-a-fn-compiles-and-throws-when-called
+  (testing "a tagged data vector keeps its values"
+    (is (= [[:status {:online true}]] ((:init-ssr (tagged))))))
+
+  (testing "a fn under an on key in data survives and runs"
+    (let [[[_ m]] ((:init-ssr (ready)))]
+      (is (true? ((:on-ready m))))))
+
+  (testing "an attribute map bound by name keeps its handlers, which throw"
+    (let [[_ attrs] ((:ssr (extracted)))]
+      (is (fn? (:on-click attrs)))
+      (is (thrown-with-msg? Exception #"js/alert runs in the browser only"
+                            ((:on-click attrs) nil)))))
+
+  (testing "a rendering fn with js/ throws on the first paint"
+    (is (thrown-with-msg? Exception #"js/parseFloat runs in the browser only"
+                          ((:ssr (parsed)))))))
+
+(b/defn nested-host []
+  (host :clj (host :clj 1 :cljs js/NaN)
+        :cljs 2))
+
+(deftest a-host-inside-a-clj-branch-is-expanded-by-the-jvm
+  (testing "the inner :cljs branch is never JVM code"
+    (is (= 1 (nested-host))))
+
+  (testing "the browser gets the outer :cljs branch"
+    (is (str/includes? (:buzz/js (meta nested-host)) "return 2")))
+
+  (testing "js/ in the inner :clj branch is still refused"
+    (is (re-find #"js/NaN in n2 runs on the first paint"
+                 (refusal '(buzz.core/defn n2 []
+                             (buzz.core/host :clj (buzz.core/host :clj js/NaN :cljs 1)
+                                             :cljs 2)))))))
