@@ -2,9 +2,12 @@
 
 > ⚠️ **WARNING**: This project is highly experimental and the API will surely change. Use only for non-serious projects.
 
-Use Buzz to write web interfaces in Clojure. Define components with Hiccup,
-read server values with `server`, and keep browser state with `local-state`.
-Changes to observed server state update the connected pages that read it.
+Use Buzz to write a browser component and its server code in one Clojure
+definition. Write Hiccup and event handlers as browser code, with `server`
+expressions for server values and `server!` calls for server actions. Local
+interactions run in the browser, while changes to observed server state push
+new values into the same component. The browser renders the UI from those
+values and its own local state.
 
 [Squint](https://github.com/squint-cljs/squint) compiles the browser half and
 [Reagami](https://github.com/borkdude/reagami) renders it.

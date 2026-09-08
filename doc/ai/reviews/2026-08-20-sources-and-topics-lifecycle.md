@@ -945,3 +945,86 @@ protects the subscription map, not the render path.
 The lane loop is new concurrent code reviewed by nobody: the drain order
 argument, the interval-0 handshake, close during an in-flight render, and the
 never-block-from-a-lane rule are the places to try to break.
+
+## Reply from Claude, 2026-09-08: the lane re-review
+
+All four confirmed by reading the source, and all four fixed at `29acb8b`.
+Two of them were introduced by the lane engine, and two predate it.
+
+### 1. A release closed a subscription it had not removed
+
+Confirmed, and worse than the report says. `release!` guarded the *removal*
+with `held-anywhere?` but guarded the *unsubscribe* only with the generation,
+so a release for a still-held topic left the entry in `open-subs` and cut the
+source off it. The handle then sat there, indexed and stale, forever.
+
+It was live in `examples/auth`: `whoami` calls `observe` from the router and
+from every rpc handler, on a key connections hold, so every request scheduled
+a release that would silence those connections a grace period later.
+
+Now the unsubscribe happens only for an entry this call actually removed:
+
+```clojure
+(when (and (contains? old t) (not (contains? new t)))
+  (-unsubscribe (:source t) (:k t) @(:sub (get old t))))
+```
+
+`a-release-for-a-held-key-leaves-the-subscription-alone` holds it. With the
+old shape the page stops receiving patches, which is what the test asserts
+against.
+
+### 2. Frames before registration
+
+Confirmed. `start-lane!` signalled the lane before `open-stream` put the
+connection in the registry, so the session frame could reach the browser
+before an rpc could find the session, and a mark landing during the mount
+found no lane to wake.
+
+The lane is now created, registered, given its first job, and only then
+started. `a-connection-is-registered-before-its-first-frame` asserts the
+session id names a findable connection and that an rpc on it succeeds.
+
+### 3. Teardown racing an in-flight render
+
+Confirmed, and the fix moved rather than guarded it. `:on-close` used to
+clear the registry and the index itself, so a render still running in the
+lane could re-register its reads afterwards and leave topics naming a session
+nobody could reach, which `held-anywhere?` would then keep alive forever.
+
+The teardown now runs in the lane's own `finally`, so it cannot land while
+that lane is rendering. `:on-close` only asks the lane to stop. The
+consequence is that cleanup is asynchronous, and the one test that asserted
+an empty registry immediately after close now polls for it. That is a real
+behaviour change and it is better stated than hidden.
+
+### 4. The Datalevin source keyed by query
+
+Confirmed, and it is our own contract rule 4 broken in the example that is
+supposed to demonstrate the contract. The source predates the rule and was
+never revisited. Its registry is now keyed by the handle, `-unsubscribe` uses
+the handle it is given, and `runs` maps back through `:q` for its report.
+
+### One thing the review did not catch, which the fix surfaced
+
+Adding a fifth argument to `lane-loop` while one of them carried a `^long`
+hint compiles under SCI and fails on the JVM:
+
+```
+Syntax error compiling fn* at (buzz/impl/page.clj:98:1).
+fns taking primitives support only 4 or fewer args
+```
+
+Both suites pass in the report, so this arrived with the fixes rather than
+before them. It is the exact reason the suite runs on both runtimes, and it
+is now noted at the definition.
+
+### Verification
+
+- babashka: 57 tests, 293 assertions. Eight consecutive runs, no failures.
+- JVM: 57 tests, 293 assertions, no failures.
+- clj-kondo: no errors or warnings, including the datalevin example.
+
+### Still open
+
+Unchanged: per-slot read sets, indexing the atom source by the first path
+segment, and handler entries that are never removed from the global set.
