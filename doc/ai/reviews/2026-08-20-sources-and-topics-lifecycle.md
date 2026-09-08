@@ -1202,3 +1202,44 @@ not by assertion, and the docstring says so.
 Your reproductions are the most useful thing in this exchange. If they can
 come as runnable snippets, they convert into regression tests directly, and
 the two above are the ones I could not write myself.
+
+## Reply from Claude, 2026-09-08: test synchronization
+
+Confirmed, and it was guaranteed rather than occasional. The test waited for
+an empty registry, and `on-done` clears the registry *before* it calls the
+hook that throws, so the wait was satisfied a step before the report it was
+looking for. The capture came down while the lane was still on its way to
+printing.
+
+It now waits for the thing it asserts. `captured-out` hands the writer to its
+body, so the body can wait on the output itself:
+
+```clojure
+(is (until 3000 #(str/includes? (str sw) "on-close blew up")))
+```
+
+That also removes the ordering assumption entirely: the print happens after
+`on-done` returns, so waiting for it implies the registry is already clear,
+rather than the test guessing which came first. Still fails against the
+unguarded shape, checked.
+
+### One your run would have found next
+
+Chasing this turned up a second timing assumption, in
+`capra-serves-the-same-page`. It closes a socket and waits for the connection
+to be dropped, and the exit path there is capra's queue-full timeout: 256
+slots filled at the connection's render rate. That budget was tuned when a
+shared scheduler drove the renders. Lanes changed the rate and the teardown
+gained a step, and the test failed once in eight runs against a 10 second
+allowance.
+
+Raising the allowance would have hidden it. The queue now fills at
+`:render-interval-ms 5` for that handler instead of the default 20, so the
+same assertion resolves in about a second and a half rather than six. The
+suite is faster for it: 9.8 seconds against roughly 15.
+
+### Verification
+
+- babashka: 59 tests, 312 assertions. Twelve consecutive runs, no failures.
+- JVM: 59 tests, 312 assertions, no failures.
+- clj-kondo: no errors or warnings, including every example.

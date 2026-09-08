@@ -854,7 +854,11 @@
   (let [run-server (requiring-resolve 'capra.server/run-server)
         adapter    @(requiring-resolve 'buzz.capra/adapter)
         port       (with-open [s (java.net.ServerSocket. 0)] (.getLocalPort s))
-        ui         (handler/handler (assoc faked-spec :adapter adapter))
+        ;; A short interval so the queue below fills quickly. The exit from a
+        ;; dead socket is capra's queue-full timeout, and the queue fills at
+        ;; this connection's render rate.
+        ui         (handler/handler (assoc faked-spec :adapter adapter
+                                           :render-interval-ms 5))
         server     (run-server (fn [req] (or (ui req) {:status 404 :body "no"}))
                                :port port)]
     (try
@@ -872,8 +876,9 @@
         (testing "a closed client is learned about, and no watch thread blocks"
           (.close sock)
           ;; The pump blocks on its write to the dead socket, so the exit is
-          ;; capra's queue-full timeout. Coalesced renders fill the 256-slot
-          ;; queue at the render rate, which takes about six seconds.
+          ;; capra's queue-full timeout. Renders fill the 256-slot queue at
+          ;; the interval above, and the lane clears the registry as it
+          ;; leaves, which is a step later than the close callback.
           (is (until 10000 #(do (swap! shared inc)
                                (empty? (registry-of ui)))))))
       (finally (.close server)))))
@@ -1418,12 +1423,14 @@
 (defn- captured-out
   "Runs `f` with the root binding of `*out*` replaced, so what other threads
   print is captured too. `with-out-str` only binds it on this one, and the
-  lane prints from its own."
+  lane prints from its own. `f` is handed the writer, so it can wait for what
+  it expects before the capture is taken down: anything printed afterwards
+  goes to the real stdout and is lost to the test."
   [f]
   (let [sw   (java.io.StringWriter.)
         root (alter-var-root #'*out* identity)]
     (alter-var-root #'*out* (constantly sw))
-    (try (f) (finally (alter-var-root #'*out* (constantly root))))
+    (try (f sw) (finally (alter-var-root #'*out* (constantly root))))
     (str sw)))
 
 ;; `:on-close` is application code the lane does not control. When it throws,
@@ -1446,12 +1453,15 @@
         stop (http/run-server (fn [req] (or (ui req) {:status 404 :body "no"}))
                               {:port 0})
         port (:local-port (meta stop))
+        ;; Wait for the report, not for the registry. The lane clears the
+        ;; registry before it calls the hook, so an empty registry says
+        ;; nothing about whether the print has happened yet.
         out  (captured-out
-              (fn []
+              (fn [sw]
                 (let [conn (open-events port {"X-User" "alice"})]
                   (next-event (:rdr conn))
                   (.close ^java.net.Socket (:sock conn))
-                  (is (until 3000 #(empty? (registry-of ui)))))))]
+                  (is (until 3000 #(str/includes? (str sw) "on-close blew up"))))))]
     (try
       (testing "the hook ran and the connection is gone anyway"
         (is (= 1 @closed-count))
