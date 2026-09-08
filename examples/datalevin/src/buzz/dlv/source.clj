@@ -33,10 +33,7 @@
   ;; Each subscription has an independent handle.
   (-subscribe [_ q notify]
     (let [cache (atom ::unread)]
-      ;; Registering and listening happen together, and the last unsubscribe
-      ;; stops listening under the same lock. Otherwise a subscription taken
-      ;; between another one's emptiness check and its `unlisten!` loses the
-      ;; shared listener it needs. The query below stays outside the lock.
+      ;; Coordinate listener registration and removal with subscription changes.
       (locking listener
         (swap! subs assoc cache {:q q
                                  :attrs (query-attrs conn q)
