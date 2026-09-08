@@ -92,14 +92,9 @@
   {:sem (java.util.concurrent.Semaphore. 0)
    :jobs (atom []) :dirty (atom #{}) :waits (atom []) :open (atom true)})
 
-;; `:waits` holds the promises an interval-0 writer is blocked on, and becomes
-;; `::gone` once the lane has left its loop. Asking to wait and closing the
-;; lane therefore settle against one another: a promise either gets in before
-;; `::gone`, and the lane's exit delivers it, or it does not get in and the
-;; writer knows not to block. Checking `:open` first and adding afterwards
-;; would leave a writer holding a promise nothing will ever deliver.
+;; The terminal `::gone` value prevents new waits after shutdown.
 (defn- wait-on!
-  "Adds `p` to the lane's waits. False when the lane is already gone."
+  "Registers promise `p` for completion. Returns false after the lane exits."
   [lane p]
   (let [[old _] (swap-vals! (:waits lane)
                             #(if (identical? ::gone %) % (conj % p)))]
@@ -113,8 +108,6 @@
 (defn- signal! [lane]
   (.release ^java.util.concurrent.Semaphore (:sem lane)))
 
-;; No primitive hint on `interval`: the JVM compiler takes those only on fns of
-;; four arguments or fewer, while SCI accepts them at any arity.
 (defn- lane-loop [{:keys [registry] :as entry} session lane interval on-done]
   (try
     (loop []
@@ -138,15 +131,7 @@
         (Thread/sleep ^long interval))
       (when @(:open lane) (recur)))
     (finally
-      ;; The teardown runs here rather than in `:on-close`, so it cannot land
-      ;; while this lane is mid render. A render that is still going would
-      ;; otherwise register its reads again and leave topics behind that name
-      ;; a session nobody can reach, which no release would ever free.
-      ;;
-      ;; `on-done` ends in the application's `:on-close`, which is code this
-      ;; lane does not control. Whatever it does, the waits are closed: a
-      ;; writer blocked on this lane must not be stranded by someone else's
-      ;; exception, and a thread that dies on its way out would strand it.
+      ;; Release subscriptions after rendering and always complete pending waits.
       (try (on-done)
            (catch Throwable e
              (println "buzz: closing" session "failed -" (ex-message e)))
@@ -186,9 +171,7 @@
   (let [mounted (mapv #(build % req) mounts)
         conn    {:ch ch :mounted mounted :owner token :req req}
         lane    (new-lane)]
-    ;; In the registry before the lane can send anything. The browser makes its
-    ;; first rpc off the session frame, and a mark can only find this
-    ;; connection once its lane is reachable here.
+    ;; Register before sending the session ID or rendering.
     (swap! registry assoc session (assoc conn :lane lane))
     (swap! (:jobs lane) conj
            (fn []

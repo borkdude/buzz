@@ -854,9 +854,7 @@
   (let [run-server (requiring-resolve 'capra.server/run-server)
         adapter    @(requiring-resolve 'buzz.capra/adapter)
         port       (with-open [s (java.net.ServerSocket. 0)] (.getLocalPort s))
-        ;; A short interval so the queue below fills quickly. The exit from a
-        ;; dead socket is capra's queue-full timeout, and the queue fills at
-        ;; this connection's render rate.
+        ;; Use a short interval to fill the disconnected client's queue.
         ui         (handler/handler (assoc faked-spec :adapter adapter
                                            :render-interval-ms 5))
         server     (run-server (fn [req] (or (ui req) {:status 404 :body "no"}))
@@ -873,12 +871,9 @@
         (testing "the rpc endpoint is plain ring, so it just works"
           (is (= 404 (first (rpc (assoc conn :session "made-up") "nope/0" [])))))
 
-        (testing "a closed client is learned about, and no watch thread blocks"
+        (testing "a disconnected client is removed while writes continue"
           (.close sock)
-          ;; The pump blocks on its write to the dead socket, so the exit is
-          ;; capra's queue-full timeout. Renders fill the 256-slot queue at
-          ;; the interval above, and the lane clears the registry as it
-          ;; leaves, which is a step later than the close callback.
+          ;; Allow the 256-slot queue to fill and time out after disconnect.
           (is (until 10000 #(do (swap! shared inc)
                                (empty? (registry-of ui)))))))
       (finally (.close server)))))
@@ -1360,10 +1355,6 @@
       (is (= (:x @a) @h))
       (source/-unsubscribe src [:x] h))))
 
-;; A read outside a render schedules a release for a key connections may be
-;; holding. That release must leave their subscription alone: unsubscribing an
-;; entry it did not remove leaves a handle the source no longer feeds, and the
-;; page stops updating with nothing to notice it by.
 (deftest a-release-for-a-held-key-leaves-the-subscription-alone
   (with-grace 50
     (reset! ledger {"alice" ["water the plants"]})
@@ -1374,28 +1365,17 @@
         (Thread/sleep 200)                ; the release it scheduled has run
         (testing "the connection's subscription survives"
           (is (contains? (into #{} (map :k) (hub/subscriptions)) ["alice"])))
-        (testing "and the source still reaches the page"
+        (testing "later changes update the page"
           (swap! ledger update "alice" conj "call the vet")
           (is (= "patch" (first (next-event (:rdr alice))))))))))
 
-;; The browser makes its first rpc off the session frame, so the connection has
-;; to be findable by then.
 (deftest a-connection-is-registered-before-its-first-frame
   (with-connection {:mounts [{:el "app" :ui #'desk}] :render-interval-ms 0}
     (fn [{:keys [ui session] :as conn}]
-      (testing "the session id names a connection the rpc endpoint can find"
+      (testing "the registered session accepts RPC calls"
         (is (contains? (registry-of ui) session))
         (is (= [204 ""] (rpc conn "desk/0" [])))))))
 
-;; At interval 0 a write waits for the connections it marked. A lane that exits
-;; between the check and the wait would leave that writer holding a promise
-;; nothing delivers, so `wait-on!` and `close-waits!` settle against one
-;; another through a single atom rather than a check and a later add.
-;;
-;; This exercises the path with a close and a write racing on purpose. It is a
-;; smoke test, not a reproduction: the window is a few instructions wide and
-;; the previous shape survives this test more often than not. What it does
-;; catch is a wait that is never delivered at all.
 (defonce ^:private hangup (atom {:x 0}))
 (def ^:private hangup-source (handler/atom-source hangup))
 
@@ -1421,11 +1401,8 @@
       (finally (stop)))))
 
 (defn- captured-out
-  "Runs `f` with the root binding of `*out*` replaced, so what other threads
-  print is captured too. `with-out-str` only binds it on this one, and the
-  lane prints from its own. `f` is handed the writer, so it can wait for what
-  it expects before the capture is taken down: anything printed afterwards
-  goes to the real stdout and is lost to the test."
+  "Calls `f` with a writer and captures output through the root binding of
+  `*out*`. Returns the captured string and restores the original binding."
   [f]
   (let [sw   (java.io.StringWriter.)
         root (alter-var-root #'*out* identity)]
@@ -1433,11 +1410,6 @@
     (try (f sw) (finally (alter-var-root #'*out* (constantly root))))
     (str sw)))
 
-;; `:on-close` is application code the lane does not control. When it throws,
-;; the lane still has to finish leaving: the connection is dropped, the
-;; failure is reported, and any writer blocked on this lane is released. The
-;; release itself is argued rather than asserted here, since a pending wait
-;; needs the same few-instruction window as the test above.
 (defonce ^:private closed-count (atom 0))
 
 (defui plain-page []
@@ -1453,9 +1425,7 @@
         stop (http/run-server (fn [req] (or (ui req) {:status 404 :body "no"}))
                               {:port 0})
         port (:local-port (meta stop))
-        ;; Wait for the report, not for the registry. The lane clears the
-        ;; registry before it calls the hook, so an empty registry says
-        ;; nothing about whether the print has happened yet.
+        ;; Keep capturing until the close failure has been logged.
         out  (captured-out
               (fn [sw]
                 (let [conn (open-events port {"X-User" "alice"})]
@@ -1466,6 +1436,6 @@
       (testing "the hook ran and the connection is gone anyway"
         (is (= 1 @closed-count))
         (is (empty? (registry-of ui))))
-      (testing "and the failure is reported rather than swallowed"
+      (testing "the close failure is logged"
         (is (str/includes? out "on-close blew up")))
       (finally (stop)))))

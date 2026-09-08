@@ -154,10 +154,7 @@
                                          (not (held-anywhere? t)))
                                   (dissoc m t)
                                   m)))]
-    ;; close only what this call actually removed. A read from a router or an
-    ;; rpc schedules a release for a key connections are holding, and that
-    ;; release must leave their subscription alone: unsubscribing an entry
-    ;; still in the map leaves a handle nothing feeds.
+    ;; Unsubscribe only entries removed by this call.
     (when (and (contains? old t) (not (contains? new t)))
       (-unsubscribe (:source t) (:k t) @(:sub (get old t))))))
 
