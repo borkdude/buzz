@@ -85,7 +85,9 @@ values, call server actions, and keep local state:
 - `(client expr)` passes a browser value to a `server!` action.
 - `(local-state init)` creates a browser-local atom. Use `deref`, `reset!`,
   and `swap!` to read and change it. Each mount keeps its own atom across
-  renders. The initial value can use a `server` expression.
+  renders. The initial value can use a `server` expression. It is also
+  computed for the first paint, so browser-only code in it needs `host`:
+  `(local-state (host :cljs (js/Date.)))` starts as nil on the first paint.
 
 Use `reply` inside `server!` to return a value to the browser. Supply a Ring
 response map as the second argument to set a cookie or other response headers:

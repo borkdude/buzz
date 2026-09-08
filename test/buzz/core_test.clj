@@ -442,3 +442,30 @@
   (testing "an init read from a server value"
     (let [inst (seeded)]
       (is (= [5] (apply (:init-ssr inst) ((:slots inst))))))))
+
+(defui clock []
+  (let [now (local-state (host :cljs (js/Date.)))]
+    [:p (str @now)]))
+
+(deftest browser-only-code-outside-a-handler-is-refused-by-name
+  (testing "a local-state initial value"
+    (is (re-find #"js/Date\. in \(local-state \.\.\.\) runs on the first paint too"
+                 (refusal '(buzz.core/defui c1 []
+                             (let [t (buzz.core/local-state (js/Date.))] [:p @t]))))))
+
+  (testing "a component body"
+    (is (re-find #"js/alert in c2 runs on the first paint"
+                 (refusal '(buzz.core/defui c2 [] [:p (js/alert "x")])))))
+
+  (testing "a function body"
+    (is (re-find #"js/alert in c3 runs on the first paint"
+                 (refusal '(buzz.core/defn c3 [] (js/alert "x"))))))
+
+  (testing "a handler is not first-paint code"
+    (is (var? (eval '(buzz.core/defui c4 []
+                       [:button {:on-click (fn [_] (js/alert "x"))}])))))
+
+  (testing "a host form makes the initial value nil on the first paint"
+    (let [inst (clock)]
+      (is (= [nil] ((:init-ssr inst))))
+      (is (str/includes? (:init inst) "new Date()")))))

@@ -63,10 +63,9 @@ Use `(buzz/request)` in a handler to access connection-scoped state:
 
 ## Browser and server branches
 
-A `buzz/defn` body runs on both sides, so it must compile on the JVM and as
-Squint. Use `host` where the two sides need different code. The browser runs
-the `:cljs` branch and the first paint runs the `:clj` branch. A missing branch
-is `:default`, or nil:
+Use `host` where the browser and the server need different code. The browser
+runs the `:cljs` branch. Server calls, including the first paint, run the
+`:clj` branch. A missing branch uses `:default`, or nil:
 
 ```clojure
 (buzz/defn parse-number [s]
@@ -85,12 +84,14 @@ A `:cljs` branch on its own makes a browser-only function:
 ```
 
 `host` is valid in `defui` and `buzz/defn` bodies, including event handlers.
-It is refused inside `server` and `server!`. Outside those forms it returns
-the `:clj` branch.
+It is refused inside `server` and `server!`. Outside `defui` and `buzz/defn`,
+it uses the `:clj` branch, with the same fallback.
 
-`host` does not move work to the server. Both branches compute the same value
-for the same render. Read server state with `server` and run server actions
-with `server!`.
+A `local-state` initial value in `defui` is computed for the first paint as
+well, so the same rule holds there.
+
+Read server state with `server` and run server actions with `server!`.
+Use `host` to select code for each runtime.
 
 ## Editing in the REPL
 

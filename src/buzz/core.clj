@@ -434,6 +434,23 @@
     (set? form)    (into #{} (mapv #(conv % scope lambda? comp-id acc) form))
     :else form))
 
+(defn- js-symbol
+  "The first `js/` symbol in `form` outside a quote, if any."
+  [form]
+  (cond
+    (and (seq? form) (= 'quote (first form))) nil
+    (coll? form) (some js-symbol form)
+    (and (symbol? form) (= "js" (namespace form))) form
+    :else nil))
+
+(defn- refuse-js
+  "Throws when code the JVM compiles for the first paint refers to `js/`."
+  [forms where]
+  (when-let [s (some js-symbol forms)]
+    (throw (ex-info (str s " in " where " runs on the first paint too. "
+                         "Wrap browser-only code in (host :cljs ...)")
+                    {:symbol s :forms (vec forms)}))))
+
 (defn- ssr-form
   "The same form, but renderable here. Reagami's ssr drops `:key`, `:on-render`
   and every `on*` attribute by name whatever the value, so blanking a handler
@@ -525,7 +542,8 @@
                       {:part qualified})))
     {:js        (to-js (browser-forms (apply list 'fn argv forms)))
      ;; Restore part vars for server rendering.
-     :ssr-forms (mapv ssr-form (walk/postwalk-replace part-syms forms))
+     :ssr-forms (doto (mapv ssr-form (walk/postwalk-replace part-syms forms))
+                  (refuse-js nm))
      :handlers  handlers
      :req-sym   (:req-sym @acc)
      :parts     parts}))
@@ -559,9 +577,11 @@
      ;; server sent rather than only from a literal
      :init-js    (to-js (browser-forms (list 'fn (mapv :sym slots) inits)))
      :init-syms  (mapv :sym slots)
-     :init-ssr   (mapv ssr-form (walk/postwalk-replace part-syms inits))
+     :init-ssr   (doto (mapv ssr-form (walk/postwalk-replace part-syms inits))
+                   (refuse-js "(local-state ...)"))
      :locals     (count locals)
-     :ssr-forms  (mapv ssr-form (walk/postwalk-replace part-syms forms))
+     :ssr-forms  (doto (mapv ssr-form (walk/postwalk-replace part-syms forms))
+                   (refuse-js comp-id))
      :slot-exprs (mapv :expr slots)
      :handlers   handlers
      :req-sym    req-sym
