@@ -7,16 +7,19 @@
 
 (def counter-source (buzz/atom-source clicks))
 
-(defn add! [_req {:keys [step]}]
-  (swap! clicks + step))
+(defn add! [_req _args]
+  (swap! clicks inc))
 
+;; The count is server state: a fragment that renders again when it changes.
+;; The help text is browser state: a signal that never leaves the tab.
 (defn page [_req]
-  [:div (ds/signals {:step 1})
+  [:div
    (ds/fragment :count
      (fn [] [:p "clicked " (buzz/observe counter-source []) " times"]))
-   [:button {:data-on:click (ds/action #'add! {:step (ds/signal :step)})} "add"]
-   [:button {:data-on:click "$step = $step + 1"} "step "
-    [:span {:data-text "$step"}]]])
+   [:button {:data-on:click (ds/action #'add!)} "add"]
+   [:div (ds/signals {:open false})
+    [:button {:data-on:click "$open = !$open"} "help"]
+    [:p {:data-show "$open"} "Every click on add is shared with every open tab."]]])
 
 (def ui (ds/handler {:title "counter" :render page}))
 
