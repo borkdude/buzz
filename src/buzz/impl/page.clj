@@ -21,12 +21,12 @@
 (def ^:private token-re
   (re-pattern (str "(?:^|;\\s*)" token-cookie "=([^;]+)")))
 
-(defn- browser-token [req]
+(defn browser-token [req]
   (some->> (get-in req [:headers "cookie"])
            (re-find token-re)
            second))
 
-(defn- token-headers
+(defn token-headers
   [token]
   {"Set-Cookie" (str token-cookie "=" token "; Path=/; HttpOnly; SameSite=Lax")})
 
@@ -88,7 +88,7 @@
   ;; Prevent writes during a render from waiting on another render thread.
   false)
 
-(defn- new-lane []
+(defn new-lane []
   {:sem (java.util.concurrent.Semaphore. 0)
    :jobs (atom []) :dirty (atom #{}) :waits (atom []) :open (atom true)})
 
@@ -105,10 +105,10 @@
     (when-not (identical? ::gone old)
       (run! #(deliver % :done) old))))
 
-(defn- signal! [lane]
+(defn signal! [lane]
   (.release ^java.util.concurrent.Semaphore (:sem lane)))
 
-(defn- lane-loop [{:keys [registry] :as entry} session lane interval on-done]
+(defn- lane-loop [session lane interval on-done render!]
   (try
     (loop []
       (.acquire ^java.util.concurrent.Semaphore (:sem lane))
@@ -123,8 +123,7 @@
                (catch Throwable e
                  (println "buzz: render failed for" session "-" (ex-message e)))))
         (when (seq topics)
-          (when-let [conn (get @registry session)]
-            (render-session! entry session conn patch!)))
+          (render! topics))
         ;; after the render, failed or not, or an interval-0 writer hangs
         (run! #(deliver % :done) waits))
       (when (and @(:open lane) (pos? ^long interval))
@@ -137,17 +136,19 @@
              (println "buzz: closing" session "failed -" (ex-message e)))
            (finally (close-waits! lane))))))
 
-(defn- start-lane! [entry session lane interval on-done]
+(defn start-lane!
+  "Runs `render!` with the dirty topics on a virtual thread per connection."
+  [session lane interval on-done render!]
   (Thread/startVirtualThread
-   (fn [] (binding [*in-lane* true] (lane-loop entry session lane interval on-done))))
+   (fn [] (binding [*in-lane* true] (lane-loop session lane interval on-done render!))))
   (signal! lane))
 
-(defn- close-lane! [lane]
+(defn close-lane! [lane]
   (reset! (:open lane) false)
   (signal! lane))
 
 ;; Wake affected connections and wait for rendering when the interval is zero.
-(defn- mark! [{:keys [registry index]} ^long interval topics]
+(defn mark! [{:keys [registry index]} ^long interval topics]
   (let [conns @registry
         lanes (into [] (keep #(:lane (get conns %)))
                     (hub/sessions-for index topics))]
@@ -177,11 +178,14 @@
            (fn []
              (event! ch ["session" session])
              (render-session! entry session conn mount!)))
-    (start-lane! entry session lane interval
+    (start-lane! session lane interval
                  (fn []
                    (swap! registry dissoc session)
                    (hub/drop-session! index session)
-                   (when on-close (on-close req))))))
+                   (when on-close (on-close req)))
+                 (fn [_]
+                   (when-let [conn (get @registry session)]
+                     (render-session! entry session conn patch!))))))
 
 (defn- events [{:keys [registry] :as entry} adapter req mounts on-close interval]
   (let [session (str (random-uuid))
@@ -255,7 +259,7 @@
         (signal! lane)))))
 
 ;; Keep idle EventSource connections open through proxies.
-(defonce ^:private heartbeat
+(defonce heartbeat
   (delay
     (future
       (loop []
