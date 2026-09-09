@@ -64,7 +64,7 @@
 
 (defn- send-fragment! [{:keys [ch] :as r} id]
   (let [{:keys [f el]} (get @(:frags r) id)]
-    (binding [*render* r]
+    (binding [*render* r *path* (:path r)]
       (stream/send! ch (patch-elements (html [:div {:id el} (track r id f)]))))))
 
 ;; ---------------------------------------------------------------------------
