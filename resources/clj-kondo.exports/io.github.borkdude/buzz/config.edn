@@ -2,4 +2,6 @@
 ;; defui, defn and defpart bind their arguments.
 {:lint-as {buzz.core/defui clojure.core/defn
            buzz.core/defn clojure.core/defn
-           buzz.core/defpart clojure.core/defn}}
+           buzz.core/defpart clojure.core/defn}
+ ;; Signals inside a Datastar expression are names, not vars.
+ :linters {:unresolved-symbol {:exclude [(buzz.datastar/expr)]}}}

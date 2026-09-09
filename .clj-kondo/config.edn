@@ -3,4 +3,5 @@
 {:lint-as {buzz.core/defui clojure.core/defn
            buzz.core/defn clojure.core/defn
            buzz.core/defpart clojure.core/defn}
- :linters {:unresolved-namespace {:exclude [reagami js]}}}
+ :linters {:unresolved-namespace {:exclude [reagami js]}
+           :unresolved-symbol {:exclude [(buzz.datastar/expr)]}}}

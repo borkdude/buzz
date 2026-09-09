@@ -323,7 +323,7 @@
         locals (mapv atom (apply (:init-ssr inst) vals))]
     (ssr/render (into [(:ssr inst)] (concat vals locals)))))
 
-(def ^:private squint-core "https://esm.sh/squint-cljs@0.14.208/core.js")
+(def squint-core "https://esm.sh/squint-cljs@0.14.208/core.js")
 
 (defn- scripts [nonce path]
   (str "<script type=\"importmap\" nonce=\"" nonce "\">\n"

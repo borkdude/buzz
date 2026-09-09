@@ -11,7 +11,9 @@
             [buzz.stream :as stream]
             [cheshire.core :as json]
             [clojure.string :as str]
-            [reagami.ssr :as ssr])
+            [clojure.walk :as walk]
+            [reagami.ssr :as ssr]
+            [squint.compiler :as squint])
   (:import (java.net URLEncoder)))
 
 (def datastar
@@ -104,6 +106,111 @@
   "Returns the connection ID in `req`."
   page/connection)
 
+;; ---------------------------------------------------------------------------
+;; Expressions
+
+(defn- signal-sym [s]
+  (symbol (str "$" (name s))))
+
+(defn- rewrite-signals
+  "Signals read and write like atoms. `@open` is the signal `$open`, `reset!`
+  assigns it and `swap!` assigns the result of the function."
+  [form]
+  (walk/postwalk
+   (fn [x]
+     (if (and (seq? x) (symbol? (first x)) (simple-symbol? (second x)))
+       (let [[h s & more] x]
+         (case h
+           (deref clojure.core/deref) (signal-sym s)
+           (reset! clojure.core/reset!) (list 'set! (signal-sym s) (first more))
+           (swap! clojure.core/swap!) (list 'set! (signal-sym s)
+                                            (list* (first more) (signal-sym s) (rest more)))
+           x))
+       x))
+   form))
+
+(defn- action-form? [x]
+  (and (seq? x) (symbol? (first x))
+       (= #'action (try (resolve (first x)) (catch Exception _ nil)))))
+
+(defn- lift
+  "Replaces every `(action ...)`, every local of the surrounding scope and
+  every keyword call with a placeholder. Returns the form and the pairs of
+  placeholder and Clojure expression to splice at render time."
+  [form locals]
+  (let [found (atom [])
+        place (fn [x kind]
+                (let [p (symbol (str "buzz_" kind "_" (count @found)))]
+                  (swap! found conj [p x kind])
+                  p))]
+    [(walk/prewalk (fn [x]
+                     (cond
+                       (action-form? x) (place x "action")
+                       (and (seq? x) (keyword? (first x))) (place x "value")
+                       (and (simple-symbol? x) (contains? locals x)) (place x "value")
+                       :else x))
+                   form)
+     @found]))
+
+;; Datastar evaluates an expression with `Function`, so control flow and
+;; comparison compile to bare operators rather than calls into Squint's core.
+(defn- template [op n]
+  (str/join op (repeat n "(~{})")))
+
+(defn- js-op [js & args]
+  (with-meta (list* 'js* js args) {:tag 'boolean}))
+
+(def ^:private expr-macros
+  {'expr {'and      (fn [_ _ & xs] (case (count xs) 0 true 1 (first xs)
+                                     (apply js-op (template " && " (count xs)) xs)))
+          'or       (fn [_ _ & xs] (case (count xs) 0 nil 1 (first xs)
+                                     (apply js-op (template " || " (count xs)) xs)))
+          'not      (fn [_ _ x] (js-op "(!(~{}))" x))
+          '=        (fn [_ _ x y] (js-op "(~{}) === (~{})" x y))
+          'not=     (fn [_ _ x y] (js-op "(~{}) !== (~{})" x y))
+          'str      (fn [_ _ & xs] (list* 'js* (str/join " + " (cons "''" (repeat (count xs) "(~{})"))) xs))
+          'do       (fn [_ _ & xs] (case (count xs) 0 nil 1 (first xs)
+                                     (list* 'js* (template ", " (count xs)) xs)))
+          'if       (fn [_ _ test then & [else]] (list 'if (js-op "(~{})" test) then else))
+          'when     (fn [_ _ test & body] (list 'if (js-op "(~{})" test) (cons 'expr/do body)))
+          'when-not (fn [_ _ test & body] (list 'if (js-op "(!(~{}))" test) (cons 'expr/do body)))}})
+
+(def ^:private expr-heads
+  '{and expr/and, or expr/or, not expr/not, = expr/=, not= expr/not=, str expr/str,
+    do expr/do, if expr/if, when expr/when, when-not expr/when-not})
+
+(defn- to-js [form]
+  (let [form (walk/prewalk (fn [x]
+                             (if (and (seq? x) (contains? expr-heads (first x)))
+                               (cons (expr-heads (first x)) (rest x))
+                               x))
+                           form)]
+    (-> (:body (squint/compile* [form] {:context :expr :core-alias "SQ" :elide-imports true
+                                        :macros expr-macros}))
+        (str/replace #"\n" " ")
+        str/trim)))
+
+(defmacro expr
+  "Compiles `body` to a Datastar expression with Squint. Signals read and
+  write like atoms, `evt` and `el` are Datastar's, and an `action` inside
+  fires when the expression reaches it.
+
+    {:data-on:click (expr (swap! open not))}
+    {:data-show (expr @open)}
+    {:data-on:keydown (expr (when (= evt.key \"Enter\") (action #'save! {:q (signal :q)})))}"
+  [& body]
+  (let [locals        (set (keys &env))
+        [form pairs]  (lift (rewrite-signals (if (= 1 (count body)) (first body) (cons 'do body)))
+                            locals)
+        js            (to-js form)]
+    (if (seq pairs)
+      `(-> ~js ~@(map (fn [[p x kind]]
+                        `(str/replace ~(str p) ~(if (= "action" kind)
+                                                  x
+                                                  `(json/generate-string ~x))))
+                      pairs))
+      js)))
+
 (defn- query-params [req]
   (into {} (for [kv (str/split (or (:query-string req) "") #"&")
                  :let [[k v] (str/split kv #"=" 2)]
@@ -188,6 +295,9 @@
               (merge (page/token-headers (str (random-uuid)))))
    :body (str "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n"
               "<title>" (escape (or title "buzz")) "</title>\n"
+              "<script type=\"importmap\">{\"imports\": {\"squint-cljs/core.js\": \""
+              page/squint-core "\"}}</script>\n"
+              "<script type=\"module\">import * as SQ from \"squint-cljs/core.js\"; globalThis.SQ = SQ;</script>\n"
               "<script type=\"module\" src=\"" datastar "\"></script>\n"
               (or head "")
               "</head>\n<body data-init=\"@get('" path "/events')\">\n"

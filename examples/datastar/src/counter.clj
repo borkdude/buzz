@@ -1,6 +1,6 @@
 (ns counter
   (:require [buzz.core :as buzz]
-            [buzz.datastar :as ds]
+            [buzz.datastar :as ds :refer [expr]]
             [org.httpkit.server :as http]))
 
 (defonce clicks (atom 0))
@@ -18,8 +18,8 @@
      (fn [] [:p "clicked " (buzz/observe counter-source []) " times"]))
    [:button {:data-on:click (ds/action #'add!)} "add"]
    [:div (ds/signals {:open false})
-    [:button {:data-on:click "$open = !$open"} "help"]
-    [:p {:data-show "$open"} "Every click on add is shared with every open tab."]]])
+    [:button {:data-on:click (expr (swap! open not))} "help"]
+    [:p {:data-show (expr @open)} "Every click on add is shared with every open tab."]]])
 
 (def ui (ds/handler {:title "counter" :render page}))
 
