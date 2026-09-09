@@ -311,9 +311,13 @@
                                (cons (expr-heads (first x)) (rest x))
                                x))
                            form)]
+    ;; Not top level: Squint drops a leading string literal there as a directive.
     (-> (:body (squint/compile* [form] {:context :expr :core-alias "SQ" :elide-imports true
-                                        :macros expr-macros}))
+                                        :top-level false :macros expr-macros}))
         (str/replace #"\n" " ")
+        ;; Datastar splits a value expression on `;` to add its return, so a
+        ;; function body ends without one.
+        (str/replace #";\s*\}" " }")
         str/trim)))
 
 (defmacro expr
