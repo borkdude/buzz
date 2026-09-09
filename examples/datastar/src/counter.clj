@@ -12,14 +12,15 @@
 
 ;; The count is server state: a fragment that renders again when it changes.
 ;; The help text is browser state: a signal that never leaves the tab.
+(def open (ds/signal :open false))
+
 (defn page [_req]
   [:div
    (ds/fragment :count
      (fn [] [:p "clicked " (buzz/observe counter-source []) " times"]))
    [:button {:data-on:click (ds/action #'add!)} "add"]
-   [:div (ds/signals {:open false})
-    [:button {:data-on:click (expr (swap! open not))} "help"]
-    [:p {:data-show (expr @open)} "Every click on add is shared with every open tab."]]])
+   [:button {:data-on:click (expr (swap! open not))} "help"]
+   [:p {:data-show (expr @open)} "Every click on add is shared with every open tab."]])
 
 (def ui (ds/handler {:title "counter" :render #'page}))
 

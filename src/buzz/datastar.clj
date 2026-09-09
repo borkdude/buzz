@@ -33,6 +33,10 @@
   "The fragment being rendered, so a nested one knows its ancestor."
   nil)
 
+(def ^:private ^:dynamic *signals*
+  "Signals used while a fragment renders, declared on its element."
+  nil)
+
 (defn- element-id [id]
   (str "bz-" (str/replace (subs (str id) (if (keyword? id) 1 0)) #"[^A-Za-z0-9_-]" "-")))
 
@@ -52,23 +56,38 @@
   [{:keys [session index frags]} id f]
   (swap! frags (fn [m] (into {} (remove (fn [[k _]] (descendant? m k id))) m)))
   (let [reads (atom #{})
+        ;; Hiccup built with `for` is lazy. Realize it here, so reads and
+        ;; signals inside are seen while this fragment is the context.
         out   (binding [hub/*tracking* {:reads reads :index index :session session}
                         *parent* id]
-                (f))]
+                (walk/prewalk identity (f)))]
     (swap! frags assoc-in [id :reads] @reads)
     (hub/set-topics! index session (reduce into #{} (map :reads (vals @frags))))
     out))
 
+(defn- fragment-div
+  "The element of a fragment: its body, and the signals used inside declared
+  on it."
+  [r id f el]
+  (let [used (atom {})
+        body (binding [*signals* used]
+               (if r
+                 (track r id f)
+                 (walk/prewalk identity (f))))]
+    [:div (cond-> {:id el}
+            (seq @used) (assoc :data-signals__ifmissing (json/generate-string @used)))
+     body]))
+
 (defn fragment
   "Renders `(f)` inside a `div` with an id derived from `id`, and makes it the
   unit of re-rendering: a change to a topic read in `f` sends this element
-  again. `id` must be unique within the page."
+  again. The signals used inside are declared on the element. `id` must be
+  unique within the page."
   [id f]
-  (let [el (element-id id)]
-    (if-let [r *render*]
-      (do (swap! (:frags r) update id assoc :f f :el el :parent *parent*)
-          [:div {:id el} (track r id f)])
-      [:div {:id el} (f)])))
+  (let [el (element-id id)
+        r  *render*]
+    (when r (swap! (:frags r) update id assoc :f f :el el :parent *parent*))
+    (fragment-div r id f el)))
 
 (defn- patch-elements [h]
   (str "event: datastar-patch-elements\n"
@@ -81,7 +100,7 @@
 (defn- send-fragment! [{:keys [ch] :as r} id]
   (let [{:keys [f el]} (get @(:frags r) id)]
     (binding [*render* r *path* (:path r)]
-      (stream/send! ch (patch-elements (html [:div {:id el} (track r id f)]))))))
+      (stream/send! ch (patch-elements (html (fragment-div r id f el)))))))
 
 (defn- send-fragments!
   "Sends the fragments in `ids`, skipping one whose ancestor is sent too."
@@ -103,17 +122,49 @@
 ;; ---------------------------------------------------------------------------
 ;; Signals and actions
 
-(defrecord Signal [name])
+(defrecord Signal [name init])
 
 (defn signal
-  "A reference to the Datastar signal `k`, for an `action` argument."
-  [k]
-  (->Signal (name k)))
+  "Browser state: a Datastar signal named `k` with initial value `init`. Bind
+  it with `def` or `let`, read and write it inside `expr` like an atom, and
+  pass it as an `action` argument to read it when the action fires."
+  ([k] (->Signal (name k) nil))
+  ([k init] (->Signal (name k) init)))
+
+(defn signal? [x] (instance? Signal x))
+
+(def evt
+  "Datastar's event inside an `expr`, for interop forms such as `(.-key evt)`."
+  ::evt)
+
+(def el
+  "Datastar's element inside an `expr`."
+  ::el)
+
+(defn- use! [sig]
+  (when *signals* (swap! *signals* assoc (:name sig) (:init sig)))
+  sig)
+
+(defn ref-js
+  "The Datastar reference for a signal. Public because `expr` expands into
+  calls to it."
+  [sig]
+  (if (signal? sig)
+    (str "$" (:name (use! sig)))
+    (throw (ex-info "reset!, swap! and deref in an expression take a signal"
+                    {:value sig}))))
+
+(defn bind
+  "The name of `sig`, for a `data-bind` attribute."
+  [sig]
+  (:name (use! sig)))
 
 (defn signals
-  "Attributes declaring Datastar signals with their initial values."
-  [m]
-  {:data-signals (json/generate-string m)})
+  "Attributes declaring `sigs` with their initial values. Fragments declare
+  the signals they use on their own, so this is for a signal only ever read
+  by Datastar itself."
+  [& sigs]
+  {:data-signals (json/generate-string (into {} (map (juxt :name :init)) sigs))})
 
 (defonce ^:private actions (atom {}))
 
@@ -121,13 +172,13 @@
 
 (defn action
   "A Datastar expression that posts to `v`, a var holding `(fn [req args])`.
-  Values in `args` cross as data. A `signal` value is read from the browser
-  when the action fires."
+  Values in `args` cross as data. A signal is read from the browser when the
+  action fires."
   ([v] (action v {}))
   ([v args]
    (let [id     (str (symbol v))
-         server (into {} (remove (fn [[_ x]] (instance? Signal x))) args)
-         sigs   (into {} (keep (fn [[k x]] (when (instance? Signal x) [(name k) (:name x)]))) args)]
+         server (into {} (remove (fn [[_ x]] (signal? x))) args)
+         sigs   (into {} (keep (fn [[k x]] (when (signal? x) [(name k) (:name (use! x))]))) args)]
      (swap! actions assoc id v)
      (str "@post('" *path* "/action?id=" (encode id)
           "&a=" (encode (json/generate-string server))
@@ -137,51 +188,95 @@
   "Returns the connection ID in `req`."
   page/connection)
 
+(defn- query-params [req]
+  (into {} (for [kv (str/split (or (:query-string req) "") #"&")
+                 :let [[k v] (str/split kv #"=" 2)]
+                 :when (seq k)]
+             [k (java.net.URLDecoder/decode (or v "") "UTF-8")])))
+
+(defn- run-action [{:keys [registry]} req]
+  (let [q       (query-params req)
+        signals (json/parse-string (slurp (:body req)))
+        session (get signals "buzzSession")
+        conn    (get @registry session)
+        v       (get @actions (get q "id"))]
+    (if (and conn v (= (:owner conn) (page/browser-token req)))
+      (try
+        (let [args (merge (json/parse-string (get q "a") true)
+                          (into {} (map (fn [[k s]] [(keyword k) (get signals s)]))
+                                (json/parse-string (get q "s"))))]
+          (v (assoc req :buzz.core/connection session) args)
+          {:status 204})
+        (catch Exception e
+          (println "buzz:" (get q "id") "failed -" (ex-message e))
+          {:status 500 :headers {"Content-Type" "application/json"}
+           :body (json/generate-string {:error "action failed"})}))
+      {:status 404 :headers {"Content-Type" "application/json"}
+       :body (json/generate-string {:error "no such action"})})))
+
 ;; ---------------------------------------------------------------------------
 ;; Expressions
 
-(defn- signal-sym [s]
-  (symbol (str "$" (name s))))
-
-(defn- rewrite-signals
-  "Signals read and write like atoms. `@open` is the signal `$open`, `reset!`
-  assigns it and `swap!` assigns the result of the function."
-  [form]
-  (walk/postwalk
-   (fn [x]
-     (if (and (seq? x) (symbol? (first x)) (simple-symbol? (second x)))
-       (let [[h s & more] x]
-         (case h
-           (deref clojure.core/deref) (signal-sym s)
-           (reset! clojure.core/reset!) (list 'set! (signal-sym s) (first more))
-           (swap! clojure.core/swap!) (list 'set! (signal-sym s)
-                                            (list* (first more) (signal-sym s) (rest more)))
-           x))
-       x))
-   form))
+(defn- signal-var
+  "The signal a symbol names through a var, at expansion time."
+  [sym]
+  (when (symbol? sym)
+    (when-let [v (try (resolve sym) (catch Exception _ nil))]
+      (when (and (var? v) (bound? v) (signal? @v))
+        @v))))
 
 (defn- action-form? [x]
   (and (seq? x) (symbol? (first x))
        (= #'action (try (resolve (first x)) (catch Exception _ nil)))))
 
 (defn- lift
-  "Replaces every `(action ...)`, every local of the surrounding scope and
-  every keyword call with a placeholder. Returns the form and the pairs of
-  placeholder and Clojure expression to splice at render time."
+  "Rewrites `form` for Squint. Signals read and write like atoms: a signal
+  held by a var becomes its reference now, one held by a local at render
+  time. Locals and keyword calls splice as literals, actions as raw
+  JavaScript. Returns the form and the placeholder pairs to splice."
   [form locals]
   (let [found (atom [])
         place (fn [x kind]
-                (let [p (symbol (str "buzz_" kind "_" (count @found)))]
+                (let [p (symbol (str "buzz_" kind "_" (count @found) "_"))]
                   (swap! found conj [p x kind])
-                  p))]
-    [(walk/prewalk (fn [x]
-                     (cond
-                       (action-form? x) (place x "action")
-                       (and (seq? x) (keyword? (first x))) (place x "value")
-                       (and (simple-symbol? x) (contains? locals x)) (place x "value")
-                       :else x))
-                   form)
-     @found]))
+                  p))
+        sig   (fn [x]
+                (if (or (signal-var x)
+                        (and (simple-symbol? x) (contains? locals x)))
+                  (place x "signal")
+                  (throw (ex-info (str x " is not a signal in this expression")
+                                  {:symbol x}))))
+        path  (fn [ref k] (symbol (str ref "." (name k))))
+        walk  (fn walk [x]
+                (cond
+                  (action-form? x) (place x "action")
+
+                  (and (seq? x) (symbol? (first x)))
+                  (let [[h & args] x]
+                    (case h
+                      (deref clojure.core/deref) (sig (first args))
+                      (reset! clojure.core/reset!) (list 'set! (sig (first args)) (walk (second args)))
+                      (swap! clojure.core/swap!)
+                      (let [[s f & more] args
+                            ref (sig s)]
+                        (if (= 'assoc f)
+                          (cons 'expr/do (mapv (fn [[k v]] (list 'set! (path ref k) (walk v)))
+                                               (partition 2 more)))
+                          (list 'set! ref (list* f ref (mapv walk more)))))
+                      (apply list (map walk x))))
+
+                  (and (seq? x) (keyword? (first x)) (= 2 (count x)))
+                  (let [inner (walk (second x))]
+                    (if (and (symbol? inner) (str/starts-with? (str inner) "buzz_signal_"))
+                      (path inner (first x))
+                      (place x "value")))
+
+                  (seq? x) (apply list (map walk x))
+                  (vector? x) (mapv walk x)
+                  (map? x) (into {} (map (fn [[k v]] [(walk k) (walk v)])) x)
+                  (and (simple-symbol? x) (contains? locals x)) (place x "value")
+                  :else x))]
+    [(walk form) @found]))
 
 ;; Datastar evaluates an expression with `Function`, so control flow and
 ;; comparison compile to bare operators rather than calls into Squint's core.
@@ -222,51 +317,26 @@
         str/trim)))
 
 (defmacro expr
-  "Compiles `body` to a Datastar expression with Squint. Signals read and
-  write like atoms, `evt` and `el` are Datastar's, and an `action` inside
-  fires when the expression reaches it.
+  "Compiles `body` to a Datastar expression with Squint. A signal reads and
+  writes like an atom, `(:k @sig)` and `(swap! sig assoc :k v)` reach into a
+  map signal, `evt` and `el` are Datastar's, locals splice as literals, and
+  an `action` fires when the expression reaches it.
 
     {:data-on:click (expr (swap! open not))}
     {:data-show (expr @open)}
-    {:data-on:keydown (expr (when (= evt.key \"Enter\") (action #'save! {:q (signal :q)})))}"
+    {:data-on:keydown (expr (when (= evt.key \"Enter\") (action #'save! {:q q})))}"
   [& body]
-  (let [locals        (set (keys &env))
-        [form pairs]  (lift (rewrite-signals (if (= 1 (count body)) (first body) (cons 'do body)))
-                            locals)
-        js            (to-js form)]
+  (let [locals       (set (keys &env))
+        [form pairs] (lift (if (= 1 (count body)) (first body) (cons 'do body)) locals)
+        js           (to-js form)]
     (if (seq pairs)
       `(-> ~js ~@(map (fn [[p x kind]]
-                        `(str/replace ~(str p) ~(if (= "action" kind)
-                                                  x
-                                                  `(json/generate-string ~x))))
+                        `(str/replace ~(str p) ~(case kind
+                                                  "action" x
+                                                  "signal" `(ref-js ~x)
+                                                  "value" `(json/generate-string ~x))))
                       pairs))
       js)))
-
-(defn- query-params [req]
-  (into {} (for [kv (str/split (or (:query-string req) "") #"&")
-                 :let [[k v] (str/split kv #"=" 2)]
-                 :when (seq k)]
-             [k (java.net.URLDecoder/decode (or v "") "UTF-8")])))
-
-(defn- run-action [{:keys [registry]} req]
-  (let [q       (query-params req)
-        signals (json/parse-string (slurp (:body req)))
-        session (get signals "buzzSession")
-        conn    (get @registry session)
-        v       (get @actions (get q "id"))]
-    (if (and conn v (= (:owner conn) (page/browser-token req)))
-      (try
-        (let [args (merge (json/parse-string (get q "a") true)
-                          (into {} (map (fn [[k s]] [(keyword k) (get signals s)]))
-                                (json/parse-string (get q "s"))))]
-          (v (assoc req :buzz.core/connection session) args)
-          {:status 204})
-        (catch Exception e
-          (println "buzz:" (get q "id") "failed -" (ex-message e))
-          {:status 500 :headers {"Content-Type" "application/json"}
-           :body (json/generate-string {:error "action failed"})}))
-      {:status 404 :headers {"Content-Type" "application/json"}
-       :body (json/generate-string {:error "no such action"})})))
 
 ;; ---------------------------------------------------------------------------
 ;; The stream
