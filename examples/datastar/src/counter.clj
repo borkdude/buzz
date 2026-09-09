@@ -21,7 +21,7 @@
     [:button {:data-on:click (expr (swap! open not))} "help"]
     [:p {:data-show (expr @open)} "Every click on add is shared with every open tab."]]])
 
-(def ui (ds/handler {:title "counter" :render page}))
+(def ui (ds/handler {:title "counter" :render #'page}))
 
 (defn -main [& _]
   (http/run-server (fn [req] (or (ui req) {:status 404 :body "not found"}))

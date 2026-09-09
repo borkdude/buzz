@@ -29,16 +29,31 @@
 
 (def ^:private ^:dynamic *path* "")
 
+(def ^:private ^:dynamic *parent*
+  "The fragment being rendered, so a nested one knows its ancestor."
+  nil)
+
 (defn- element-id [id]
   (str "bz-" (str/replace (subs (str id) (if (keyword? id) 1 0)) #"[^A-Za-z0-9_-]" "-")))
 
 (defn- html [hiccup] (ssr/render hiccup))
 
+(defn- descendant?
+  "Whether fragment `id` sits inside fragment `of`, by the parent chain."
+  [frags id of]
+  (loop [p (get-in frags [id :parent])]
+    (cond (nil? p) false
+          (= p of) true
+          :else (recur (get-in frags [p :parent])))))
+
 (defn- track
-  "Renders `f` for fragment `id`, recording the topics it reads."
+  "Renders `f` for fragment `id`, recording the topics it reads. Fragments
+  nested in it are dropped first, so only the ones rendered again remain."
   [{:keys [session index frags]} id f]
+  (swap! frags (fn [m] (into {} (remove (fn [[k _]] (descendant? m k id))) m)))
   (let [reads (atom #{})
-        out   (binding [hub/*tracking* {:reads reads :index index :session session}]
+        out   (binding [hub/*tracking* {:reads reads :index index :session session}
+                        *parent* id]
                 (f))]
     (swap! frags assoc-in [id :reads] @reads)
     (hub/set-topics! index session (reduce into #{} (map :reads (vals @frags))))
@@ -51,8 +66,7 @@
   [id f]
   (let [el (element-id id)]
     (if-let [r *render*]
-      (do (swap! (:frags r) assoc-in [id :f] f)
-          (swap! (:frags r) assoc-in [id :el] el)
+      (do (swap! (:frags r) update id assoc :f f :el el :parent *parent*)
           [:div {:id el} (track r id f)])
       [:div {:id el} (f)])))
 
@@ -68,6 +82,23 @@
   (let [{:keys [f el]} (get @(:frags r) id)]
     (binding [*render* r *path* (:path r)]
       (stream/send! ch (patch-elements (html [:div {:id el} (track r id f)]))))))
+
+(defn- send-fragments!
+  "Sends the fragments in `ids`, skipping one whose ancestor is sent too."
+  [r ids]
+  (let [frags @(:frags r)
+        ids   (set ids)]
+    (doseq [id ids
+            :when (not (some #(and (not= % id) (descendant? frags id %)) ids))]
+      (send-fragment! r id))))
+
+(defn- render-page!
+  "Renders the page for a connection from scratch and sends every fragment."
+  [{:keys [frags req render path] :as r}]
+  (reset! frags {})
+  (binding [*render* r *path* path]
+    (html (fragment ::page #(render req))))
+  (send-fragments! r (keys @frags)))
 
 ;; ---------------------------------------------------------------------------
 ;; Signals and actions
@@ -243,16 +274,14 @@
 (defn- open-stream [{:keys [registry index]} session ch req render token interval
                     on-close path]
   (let [frags (atom {})
-        r     {:session session :index index :frags frags :ch ch :path path}
-        lane  (page/new-lane)]
-    (swap! registry assoc session {:ch ch :owner token :req req :lane lane :frags frags})
+        lane  (page/new-lane)
+        r     {:session session :index index :frags frags :ch ch :path path
+               :req req :render render :lane lane}]
+    (swap! registry assoc session (assoc r :owner token))
     (swap! (:jobs lane) conj
            (fn []
              (stream/send! ch (patch-signals {:buzzSession session}))
-             (binding [*render* r *path* path]
-               (html (render req)))
-             (doseq [id (keys @frags)]
-               (send-fragment! r id))))
+             (render-page! r)))
     (page/start-lane! session lane interval
                       (fn []
                         (swap! registry dissoc session)
@@ -260,12 +289,42 @@
                         (when on-close (on-close req)))
                       (fn [topics]
                         (when (get @registry session)
-                          (doseq [[id {:keys [reads]}] @frags
-                                  :when (some topics reads)]
-                            (try (send-fragment! r id)
-                                 (catch Throwable e
-                                   (println "buzz: render failed for" session "-"
-                                            (ex-message e))))))))))
+                          (try (send-fragments! r (for [[id {:keys [reads]}] @frags
+                                                        :when (some topics reads)]
+                                                    id))
+                               (catch Throwable e
+                                 (println "buzz: render failed for" session "-"
+                                          (ex-message e)))))))))
+
+;; ---------------------------------------------------------------------------
+;; The REPL
+
+(defonce ^:private entries (atom #{}))
+
+(defn refresh!
+  "Renders every open page again and sends it. Called when a var in the
+  render function's namespace is re-evaluated."
+  []
+  (doseq [{:keys [registry]} @entries
+          [_ conn] @registry
+          :let [lane (:lane conn)]]
+    (swap! (:jobs lane) conj #(render-page! conn))
+    (page/signal! lane))
+  nil)
+
+(defonce ^:private refresh-pending (atom false))
+
+(defn- schedule-refresh!
+  "One refresh for a burst of re-evaluations, such as loading a file."
+  []
+  (when (compare-and-set! refresh-pending false true)
+    (hub/schedule! 50 (fn [] (reset! refresh-pending false) (refresh!)))))
+
+(defn- watch-namespace!
+  "Refreshes open pages when any var in the namespace of `v` changes."
+  [v]
+  (doseq [var (vals (ns-interns (:ns (meta v))))]
+    (add-watch var ::refresh (fn [_ _ _ _] (schedule-refresh!)))))
 
 (defn- events [{:keys [registry] :as entry} adapter req render on-close interval path]
   (let [session (str (random-uuid))
@@ -301,13 +360,14 @@
               "<script type=\"module\" src=\"" datastar "\"></script>\n"
               (or head "")
               "</head>\n<body data-init=\"@get('" path "/events')\">\n"
-              (binding [*path* path] (html (render req)))
+              (binding [*path* path] (html (fragment ::page #(render req))))
               "\n</body>\n</html>\n")})
 
 (defn handler
   "Returns a Ring handler for one page. `:render` is `(fn [req] hiccup)`.
-  `:path` prefixes the page routes. `:adapter` provides the event stream and
-  defaults to http-kit. Unknown routes return nil."
+  Pass it as a var to refresh open pages when a var in its namespace is
+  re-evaluated. `:path` prefixes the page routes. `:adapter` provides the
+  event stream and defaults to http-kit. Unknown routes return nil."
   [{:keys [render path adapter on-close] :as spec}]
   @page/heartbeat
   (let [adapter  (or adapter @(requiring-resolve 'buzz.httpkit/adapter))
@@ -317,6 +377,8 @@
         base     {:registry registry :index index :spec spec}
         entry    (hub/register-handler!
                   (assoc base :mark! (fn [topics] (page/mark! base interval topics))))
+        _        (swap! entries conj entry)
+        _        (when (var? render) (watch-namespace! render))
         path     (or path "")
         routes   (cond-> {(str path "/")       :page
                           (str path "/events") :events
