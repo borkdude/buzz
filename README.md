@@ -1,23 +1,25 @@
 # Buzz
 
-> ⚠️ **WARNING**: This project is highly experimental and the API will surely change. Use only for non-serious projects.
+> **Warning:** Buzz is experimental. Expect API changes. Use it for experiments, not production applications.
 
-Use Buzz to write an interactive web UI and its server code in one Clojure
-definition. Write Hiccup and event handlers as browser code, with `server`
-expressions for server values and `server!` calls for server actions. Local
-interactions run in the browser, while changes to observed server state push
-new values into the same component. The browser renders the UI from those
-values and its own local state.
+Use Buzz to build interactive web applications in Clojure. Define a component's
+HTML, browser interactions, and server calls together. Read server values with
+`server` and change them with `server!`. Pages update automatically when the
+server state they observe changes.
 
-[Squint](https://github.com/squint-cljs/squint) compiles the browser half and
-[Reagami](https://github.com/borkdude/reagami) renders it.
+[Squint](https://github.com/squint-cljs/squint) compiles your browser code to
+JavaScript. [Reagami](https://github.com/borkdude/reagami) renders your Hiccup.
 
 Run Buzz with Babashka or Java 21 or later. You do not need a ClojureScript
 build or Node.js.
 
 Try the demo from this repository:
 
-    bb serve    # a demo on http://localhost:1341
+```shell
+bb serve
+```
+
+Open http://localhost:1341.
 
 Two applications written with Buzz:
 [tube-pod](https://github.com/borkdude/tube-pod), a panel that turns videos
@@ -36,7 +38,7 @@ Buzz commit SHA:
         {:git/sha "<latest>"}}}
 ```
 
-`src/counter.clj`:
+Create `src/counter.clj`:
 
 ```clojure
 (ns counter
@@ -66,28 +68,38 @@ Buzz commit SHA:
   @(promise))
 ```
 
-Then run it:
+Run the application:
 
-    clojure -M -m counter
+```shell
+clojure -M -m counter
+```
 
 Open http://localhost:1350 in two tabs. Click **add** to update the count in
 both tabs. Click **step** to change how much the current tab adds.
 
 ## Server calls and local state
 
-Write the body of `defui` as browser code. Use these forms to read server
-values, call server actions, and keep local state:
+Use `defui` to define a component with Hiccup and browser event handlers.
+Use these forms inside it:
 
 - `(server expr)` reads a server value. Buzz evaluates the expression again
   when observed state changes and sends the result to the browser.
 - `(server! expr)` runs a server action, such as saving a form. Call it from
   an event handler. It returns a JavaScript promise.
 - `(client expr)` passes a browser value to a `server!` action.
-- `(local-state init)` creates a browser-local atom. Use `deref`, `reset!`,
-  and `swap!` to read and change it. Each mount keeps its own atom across
-  renders. The initial value can use a `server` expression. It is also
-  computed for the first paint, so browser-only code in it needs `host`:
-  `(local-state (host :cljs (js/Date.)))` starts as nil on the first paint.
+- `(local-state init)` keeps state for one instance of a component in the
+  browser. Use `deref`, `reset!`, and `swap!` to read and change the atom.
+  Its value persists when the component updates.
+
+Use a `server` expression to initialize local state from a server value.
+For an initial value that requires browser code, use `host`:
+
+```clojure
+(local-state (host :cljs (js/Date.)))
+```
+
+This starts as `nil` in the HTML served by the server, then uses the current
+date when the component starts in the browser.
 
 Use `reply` inside `server!` to return a value to the browser. Supply a Ring
 response map as the second argument to set a cookie or other response headers:
@@ -96,7 +108,7 @@ response map as the second argument to set a cookie or other response headers:
 (server! (reply :ok {:headers {"Set-Cookie" "session=abc; HttpOnly; Path=/"}}))
 ```
 
-## Functions
+## Reuse component code
 
 Use `buzz/defn` to define a function for the browser and the server:
 
@@ -111,7 +123,7 @@ call themselves recursively and use `server!` for actions. Define `server` and
 where the browser and the server need different code. See
 [doc/defn.md](doc/defn.md).
 
-## Mounting
+## Serve components
 
 Use `buzz/handler` to serve a page and its components. Add it to your Ring
 application with `or`. It returns `nil` for routes it does not handle:
@@ -132,12 +144,11 @@ open pages:
 Use the default http-kit adapter, or supply `:adapter` for another Ring
 server. See [buzz.stream](src/buzz/stream.clj) for the adapter contract.
 
-Set `:render-interval-ms` to control how often server values update, in
-milliseconds (default 20). Updates run asynchronously for each open page.
-The first change triggers an update immediately. Changes within the interval
-are combined into one update with the latest state, so a counter can step
-from 3 to 7. Set the interval to 0 to wait for affected pages' server values
-to be sent before a write returns.
+Set `:render-interval-ms` to control the time between server updates. The
+default is 20 milliseconds. The first change triggers an immediate update.
+Further changes within the interval are combined, so pages receive the latest
+state and may skip intermediate values. Set the interval to 0 if a write
+should wait until updates have been sent to affected pages.
 
 Set `:path` to serve a page at another URL. Its event stream and JavaScript
 modules use the same prefix:
@@ -149,11 +160,11 @@ modules use the same prefix:
 (defn app [req] (or (admin req) (home req) {:status 404 :body "not found"}))
 ```
 
-## Sources
+## Update pages when data changes
 
-Use `buzz/atom-source` to create a source and `buzz/observe` inside
-`server` to read a path from it. Changes to that path update the pages
-that read it.
+Wrap an atom with `buzz/atom-source` to let pages subscribe to its changes.
+Use `buzz/observe` inside `server` to read a value at a path. Changes at that
+path update the pages that read it.
 
 ```clojure
 (defonce todos (atom {"alice" [] "bob" []}))
@@ -165,9 +176,8 @@ that read it.
          [:li t])])
 ```
 
-Adding a todo for alice updates alice's open pages. Bob's pages
-keep their current values. Each affected page runs all its server
-expressions again.
+Adding a todo for Alice updates Alice's open pages. Bob's pages keep their
+current values. Each affected page runs all its `server` expressions again.
 
 Use `[]` to observe the whole atom:
 
@@ -177,8 +187,9 @@ Use `[]` to observe the whole atom:
 
 Changes to any user's todos now update every page reading the map.
 
-Use `observe` for state changes that should trigger a render. A direct read,
-such as `@todos`, refreshes only when another change triggers a render.
+Use `observe` when changes should update the page. Reading `@todos` directly
+does not subscribe to changes. That value refreshes only when another change
+causes the page to update.
 
 Implement [buzz.source/Source](src/buzz/source.clj) to observe other data
 sources. Return a dereferenceable handle from `-subscribe` and release it
@@ -188,17 +199,17 @@ database source.
 See [examples/observe](examples/observe) for two counters that update
 independently.
 
-## Request
+## Access requests and keep user state
 
 Use `(buzz/request)` inside `(server ...)` and `(server! ...)` to read the
 current Ring request. During the initial HTML render, this is the page
 request. Later `server` evaluations use the request that opened the event
 stream. A `server!` action uses the request that called it.
 
-Keep state in application atoms. Use `(buzz/token (buzz/request))` as a key for
-browser-scoped state and `(buzz/connection (buzz/request))` for
-connection-scoped state. See [examples/auth](examples/auth) for per-user state
-and authentication.
+Keep state in application atoms. Use `(buzz/token (buzz/request))` as a key
+to store state for a browser. Use `(buzz/connection (buzz/request))` to keep
+state for one connection, as in the search field below. See
+[examples/auth](examples/auth) for user authentication and state.
 
 ```clojure
 (defonce queries (atom {}))   ; connection id -> search text
@@ -216,19 +227,19 @@ and authentication.
      ...]))
 ```
 
-A reconnect gets a new connection ID. Use `:on-close` to remove
-connection-scoped state. Buzz passes it the request that opened the connection:
+A reconnect gets a new connection ID. Use `:on-close` to remove state when
+a connection closes. The callback receives the request that opened it:
 
 ```clojure
 (buzz/handler {:on-close (fn [req] (swap! queries dissoc (buzz/connection req))) ...})
 ```
 
 
-## The page
+## Customize the page
 
 Set `:title` to name the page and `:head` to add HTML such as stylesheet
-links. Buzz creates the page with an element for each mount, its initial
-content, and the scripts needed to run it.
+links. Buzz creates the HTML for your components and includes the scripts
+needed to run them.
 
 Set `:index` to use your own HTML file:
 
@@ -236,10 +247,10 @@ Set `:index` to use your own HTML file:
 (buzz/handler {:index "public/index.html" :mounts [{:el "app" :ui #'todo-app}]})
 ```
 
-Add the mount element and scripts shown below. Put `<!--app-->` inside the
-element to include its initial content in the HTML response. Use `NONCE` on
-the inline script so Buzz can authorize it under the page's content security
-policy:
+Add an element with the ID from `:mounts` and the scripts shown below. Put
+`<!--app-->` inside the element to show the component before the browser
+connects. Keep the `NONCE` attribute so the inline script can run under the
+page's content security policy:
 
 ```html
 <div id="app"><!--app--></div>
@@ -265,7 +276,12 @@ Omit `<!--app-->` to render that component only after the browser connects.
 
 ## Development
 
-    bb dev    # the demo, plus an nrepl on 1667
+Run the demo with an nREPL server on port 1667:
 
-Re-evaluate a `defui` or `buzz/defn` to update open pages. Local state survives
-updates and reconnects when the number of `local-state` forms stays the same.
+```shell
+bb dev
+```
+
+Re-evaluate a `defui` or `buzz/defn` in your REPL to update open pages.
+Components keep their local state across code updates and reconnects when
+the number of `local-state` forms stays the same.

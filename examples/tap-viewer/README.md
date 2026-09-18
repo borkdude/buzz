@@ -1,14 +1,19 @@
 # Tap viewer
 
-View any `tap>` value as a live, expandable tree. Every open browser updates,
-and large or infinite values stay bounded.
+Inspect values sent with `tap>` in your browser. Expand collections, select
+values, and evaluate Clojure expressions on them. New values appear in every
+open viewer.
+
+## Start the viewer
+
+Run from `examples/tap-viewer`:
 
 ```shell
 bb dev
 ```
 
-Open http://localhost:1370 and press a sample button, or connect to the nREPL
-on port 1670:
+Open http://localhost:1370 and click a sample button to try the viewer.
+To send your own values, connect your editor to nREPL on port 1670 and run:
 
 ```clojure
 (tap> {:user "alice" :roles #{:admin} :seen (range)})
@@ -17,41 +22,49 @@ on port 1670:
 If port 1370 is in use, the viewer chooses an available port and prints it.
 If port 1670 is in use, it skips nREPL startup.
 
-Long values split into range buckets like the devtools console. Click a
-clipped range to fetch it, for this browser only.
+## Inspect values
 
-Click `select` on an entry or on any row to put that value in
-`@buzz.tap-viewer/selected`. The selected value also appears as a new entry
-at the top. Click the copy icon beside it to copy the value as EDN. For
-datafied values the clipboard gets the data, and `selected` gets the
-original object.
-
-Selected values are highlighted in every viewer.
-
-Enter an expression such as `(count %)` and press Enter to evaluate it.
-Use `%` for the selected value, or the newest tap when the selection is nil.
-Results appear as new entries unless identical to the newest entry.
-
-Qualify names from other namespaces. Expressions run on the server in
-`buzz.tap-viewer`.
-
-## Datafy
-
-Use `clojure.core.protocols/Datafiable` or
-`:clojure.core.protocols/datafy` metadata to customize how values appear.
-Classes show reflection maps, exceptions show `Throwable->map` data, and
-refs show their values.
-
-Click a datafied value to expand its children. The viewer calls `datafy` on
-each redraw and `nav` when it renders children. Click an object unchanged
-by `datafy` to inspect its bean properties.
+Expand an entry to browse its contents. Long collections appear in smaller
+ranges. Click a range to see more values. You can also browse infinite
+sequences a portion at a time. Expanding a value affects only your browser.
 
 Click `table` to view a collection of maps as a table. Exceptions show their
-type, message and stack frames. Click `data` to view the exception map.
+type, message and stack frames. Click `data` to view the exception as a map.
 
-## In a running REPL
+## Select and copy
 
-Clojure 1.12 or later:
+Click `select` on an entry or row to use that value in expressions. Read it
+from your REPL with `@buzz.tap-viewer/selected`. The selected value also
+appears as a new entry at the top and is highlighted in every viewer.
+
+Click the copy icon to copy a value as EDN. For objects displayed as data,
+this copies the data. Selecting an object keeps the original object.
+
+## Evaluate expressions
+
+Enter an expression such as `(count %)` and press Enter to evaluate it.
+Use `%` for the selected value. If the selection is `nil`, `%` refers to the
+newest entry. Results appear at the top. Returning the same object as the
+newest entry does not add a duplicate.
+
+Expressions run in the Clojure process that hosts the viewer, in the
+`buzz.tap-viewer` namespace. Use fully qualified names for functions from
+other namespaces.
+
+## Customize object display
+
+Expand objects to inspect them as data. Classes show reflection information,
+exceptions show `Throwable->map` data, and refs show their current values.
+Other objects expose their bean properties when expanded.
+
+Implement `clojure.core.protocols/Datafiable` for your types, or add
+`:clojure.core.protocols/datafy` metadata to a value, to customize its display.
+
+## Use an existing REPL
+
+Replace `<sha>` with a Buzz commit SHA in the examples below.
+
+For Clojure 1.12 or later, run:
 
 ```clojure
 (require '[clojure.repl.deps :refer [add-libs]])
@@ -63,9 +76,10 @@ Clojure 1.12 or later:
 (viewer/serve! {})
 ```
 
-The `serve!` function takes an optional map, whose values default `{:port 1370 :host "127.0.0.1"}`.
+Pass `:port` and `:host` to `serve!` to change the address. The defaults are
+`{:port 1370 :host "127.0.0.1"}`. Open the URL printed in your REPL.
 
-Babashka:
+For Babashka, run:
 
 ```clojure
 (require '[babashka.deps :as deps])
