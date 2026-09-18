@@ -73,3 +73,10 @@
 (def stream
   (doto (js/EventSource. "/events")
     (.addEventListener "message" (fn [e] (handle (js/JSON.parse (.-data e)))))))
+
+;; A page in the back/forward cache holds its connection open.
+(.addEventListener js/window "pagehide" (fn [_] (.close stream)))
+
+;; A closed EventSource does not reopen.
+(.addEventListener js/window "pageshow"
+                   (fn [e] (when (.-persisted e) (.reload js/location))))
