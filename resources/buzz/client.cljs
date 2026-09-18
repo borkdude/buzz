@@ -74,13 +74,9 @@
   (doto (js/EventSource. "/events")
     (.addEventListener "message" (fn [e] (handle (js/JSON.parse (.-data e)))))))
 
-;; A page the browser keeps in its back/forward cache is not unloaded, so its
-;; stream stays open and holds one of the handful of connections a browser
-;; allows per origin. An application whose pages are separate URLs runs out of
-;; them within a few navigations, and then even the next document does not
-;; load. Close the stream when the page is hidden, and reload when it comes
-;; back from that cache, since a closed EventSource does not reopen.
+;; A page in the back/forward cache holds its connection open.
 (.addEventListener js/window "pagehide" (fn [_] (.close stream)))
 
+;; A closed EventSource does not reopen.
 (.addEventListener js/window "pageshow"
                    (fn [e] (when (.-persisted e) (.reload js/location))))
