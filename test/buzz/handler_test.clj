@@ -230,7 +230,8 @@
 
 (def ^:private page-spec
   {:title "a title"
-   :head "<link rel=\"stylesheet\" href=\"/style.css\">"
+   :head (str "<link rel=\"stylesheet\" href=\"/style.css\" nonce=\"NONCE\">"
+              "<style nonce=\"NONCE\">p {color: red}</style>")
    :mounts [{:el "app" :ui #'greeting}]})
 
 (defn- nonce-of [csp]
@@ -251,6 +252,10 @@
       (is (str/includes? body "/style.css"))
       (testing "with a div per mount holding its first render"
         (is (str/includes? body "<div id=\"app\"><p>hello</p></div>"))))
+
+    (testing "NONCE in :head becomes the nonce the policy names"
+      (is (str/includes? body (str "<style nonce=\"" nonce "\">")))
+      (is (not (str/includes? body "NONCE"))))
 
     (testing "every script the page carries is named by the policy"
       (is (some? nonce))
