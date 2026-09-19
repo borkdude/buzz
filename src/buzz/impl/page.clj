@@ -301,11 +301,12 @@
                                insts))
                 "\n};\n")}))
 
-;; Disallow eval. Permit esm.sh scripts and source maps.
+;; Disallow eval. Permit esm.sh scripts, source maps and style attributes.
 (defn- csp [nonce]
   (str "default-src 'none'; "
        "script-src 'self' https://esm.sh 'nonce-" nonce "'; "
        "style-src 'nonce-" nonce "'; "
+       "style-src-attr 'unsafe-inline'; "
        "connect-src 'self' https://esm.sh; "
        "media-src 'self'; "
        "img-src 'self' data:; "

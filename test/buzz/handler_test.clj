@@ -234,6 +234,9 @@
               "<style nonce=\"NONCE\">p {color: red}</style>")
    :mounts [{:el "app" :ui #'greeting}]})
 
+(defn- directive [csp name]
+  (some #(when (str/starts-with? % (str name " ")) %) (str/split csp #"; ")))
+
 (defn- nonce-of [csp]
   (second (re-find #"nonce-([^']+)'" csp)))
 
@@ -265,7 +268,11 @@
 
     (testing "no script may be built from a string"
       (is (not (str/includes? csp "unsafe-eval")))
-      (is (not (str/includes? csp "unsafe-inline"))))
+      (is (not (str/includes? (directive csp "script-src") "unsafe-inline"))))
+
+    (testing "a style attribute is allowed and a style element still needs the nonce"
+      (is (= "style-src-attr 'unsafe-inline'" (directive csp "style-src-attr")))
+      (is (= (str "style-src 'nonce-" nonce "'") (directive csp "style-src"))))
 
     (testing "a second request is named by a nonce of its own"
       (is (not= nonce (nonce-of (get-in (ui {:uri "/"}) [:headers "Content-Security-Policy"])))))
