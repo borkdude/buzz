@@ -16,8 +16,11 @@
 ;; server half, so browser state survives one.
 (defn- draw! [id]
   (let [entry (.get instances id)]
-    (reagami/render (.-node entry)
-                    (.concat #js [(.-f (component id))] (.-vals entry) (.-locals entry)))))
+    (try
+      (reagami/render (.-node entry)
+                      (.concat #js [(.-f (component id))] (.-vals entry) (.-locals entry)))
+      (catch :default e
+        (js/console.error (str "buzz: render of " id " threw") e)))))
 
 ;; `(local-state init)` becomes an atom here. Watching it is what makes setting
 ;; one redraw without asking the server anything.
