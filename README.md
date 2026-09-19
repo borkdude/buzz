@@ -249,6 +249,8 @@ Give a `<style>` or stylesheet `<link>` in `:head` the attribute
                :mounts [{:el "app" :ui #'todo-app}]})
 ```
 
+The policy allows `:style` on an element in a component.
+
 Set `:index` to use your own HTML file:
 
 ```clojure
