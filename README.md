@@ -204,7 +204,12 @@ independently.
 Use `(buzz/request)` inside `(server ...)` and `(server! ...)` to read the
 current Ring request. During the initial HTML render, this is the page
 request. Later `server` evaluations use the request that opened the event
-stream. A `server!` action uses the request that called it.
+stream. A `server!` action uses the request that called it. All three carry
+the query string of the page, so `/les?n=3` has `n=3` in each:
+
+```clojure
+(server (get-in (buzz/request) [:query-params "n"]))   ; with Ring's wrap-params
+```
 
 Keep state in application atoms. Use `(buzz/token (buzz/request))` as a key
 to store state for a browser. Use `(buzz/connection (buzz/request))` to keep

@@ -12,7 +12,7 @@
 ;; simply post. Anything but a handful of plain values asks for a preflight
 ;; first, and Buzz answers none, so the browser never sends the real one.
 (defn ^:async send! [id args]
-  (let [res (await (js/fetch "/rpc"
+  (let [res (await (js/fetch (+ "/rpc" js/location.search)
                             #js {:method "POST"
                                  :headers #js {"X-Buzz-RPC" "1"}
                                  :body (js/JSON.stringify #js [(.-session state) id args])}))]
