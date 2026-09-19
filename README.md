@@ -277,6 +277,22 @@ page's content security policy:
 
 Omit `<!--app-->` to render that component only after the browser connects.
 
+## Test a component
+
+Call the handler with a request map to test a component without a browser.
+The `:body` holds the first render of each mount:
+
+```clojure
+(defui les []
+  [:h1 "Les " (server (get-in (buzz/request) [:query-params "n"] "1"))])
+
+(def page (buzz/handler {:mounts [{:el "app" :ui #'les}]}))
+
+(deftest the-page-shows-the-lesson
+  (let [body (:body (page {:uri "/" :query-params {"n" "3"}}))]
+    (is (str/includes? body "<h1>Les 3</h1>"))))
+```
+
 ## Examples
 
 - [examples/observe](examples/observe) shows two pages that observe separate keys in one atom.
