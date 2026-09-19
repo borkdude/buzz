@@ -74,7 +74,7 @@
 
 ;; No reconnect loop: EventSource does that itself.
 (def stream
-  (doto (js/EventSource. (+ "/events" js/location.search))
+  (doto (js/EventSource. (str "/events" js/location.search))
     (.addEventListener "message" (fn [e] (handle (js/JSON.parse (.-data e)))))))
 
 ;; A page in the back/forward cache holds its connection open.
