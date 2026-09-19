@@ -241,6 +241,14 @@ Set `:title` to name the page and `:head` to add HTML such as stylesheet
 links. Buzz creates the HTML for your components and includes the scripts
 needed to run them.
 
+Give a `<style>` or stylesheet `<link>` in `:head` the attribute
+`nonce="NONCE"`. The content security policy blocks styles without it:
+
+```clojure
+(buzz/handler {:head "<style nonce=\"NONCE\">body {margin: 2rem}</style>"
+               :mounts [{:el "app" :ui #'todo-app}]})
+```
+
 Set `:index` to use your own HTML file:
 
 ```clojure

@@ -333,7 +333,7 @@
 (defn- generated-page [nonce req {:keys [title head mounts path]}]
   (str "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n"
        "<title>" (escape (or title "buzz")) "</title>\n"
-       head
+       (some-> head (str/replace "NONCE" nonce))
        "</head>\n<body>\n"
        (str/join (for [{:keys [el] :as mount} mounts]
                    (str "<div id=\"" (escape el) "\">" (first-paint mount req) "</div>\n")))
