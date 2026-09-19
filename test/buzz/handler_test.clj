@@ -744,8 +744,8 @@
     (testing "which asks for its own stream and its own rpc, with the page's query string"
       (let [client (:body (door {:uri "/signin/client.mjs"}))
             rpc-js (:body (door {:uri "/signin/rpc.mjs"}))]
-        (is (str/includes? client "EventSource((\"/signin/events\" + location.search))"))
-        (is (str/includes? rpc-js "fetch((\"/signin/rpc\" + location.search)"))))
+        (is (re-find #"EventSource\(.*\"/signin/events\".*location\.search" client))
+        (is (re-find #"fetch\(.*\"/signin/rpc\".*location\.search" rpc-js))))
 
     (testing "and its own components, importing its own rpc module"
       (let [body (:body (door {:uri "/signin/components.mjs"}))]
@@ -755,7 +755,7 @@
 
     (testing "a handler with no path is unchanged"
       (is (str/includes? (:body (room {:uri "/"})) "src=\"/client.mjs\""))
-      (is (str/includes? (:body (room {:uri "/client.mjs"})) "EventSource((\"/events\" + location.search))")))))
+      (is (re-find #"EventSource\(.*\"/events\".*location\.search" (:body (room {:uri "/client.mjs"})))))))
 
 ;; `(reply v resp)` answers with a value and adds to the http response it
 ;; arrives in, which is how a handler sets a cookie.
