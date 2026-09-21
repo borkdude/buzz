@@ -38,6 +38,12 @@
       (testing "so the next render sends the new value"
         (is (= [2] ((:slots inst))))))))
 
+(defn- alias-use
+  "A pattern for JavaScript that binds `module` to a local and has `use` after
+  it. `\\1` in `use` is the local."
+  [module use]
+  (re-pattern (str "let (\\w+) = " module ";[\\s\\S]*" use)))
+
 (defn- refusal
   "The message a defui refuses a form with. A macro error arrives wrapped on the
   JVM and bare under SCI, so this unwraps to the cause either way. The forms are
@@ -212,7 +218,8 @@
   (let [inst (fruit-list)]
 
     (testing "the component calls the part by name"
-      (is (re-find #"buzz_DOT_core_test_SLASH_fruit_row\(\"apple\"\)" (:js inst)))
+      (is (re-find (alias-use "buzz_DOT_core_test_SLASH_fruit_row" "\\1\\(\"apple\"\\)")
+                   (:js inst)))
       (is (not (str/includes? (:js inst) "swap"))))
 
     (testing "the component records the part dependency"
@@ -251,10 +258,12 @@
   (let [inst (forest)]
 
     (testing "the component passes the tree through one slot"
-      (is (re-find #"buzz_DOT_core_test_SLASH_branch\(slot__\d+\)" (:js inst))))
+      (is (re-find (alias-use "buzz_DOT_core_test_SLASH_branch" "\\1\\(slot__\\d+\\)")
+                   (:js inst))))
 
     (testing "the compiled part calls itself"
-      (is (str/includes? (:buzz/js (meta branch)) "buzz_DOT_core_test_SLASH_branch(")))
+      (is (re-find (alias-use "buzz_DOT_core_test_SLASH_branch" "\\1\\(")
+                   (:buzz/js (meta branch)))))
 
     (testing "server rendering walks the whole tree"
       (is (str/includes? (pr-str (apply (:ssr inst) ((:slots inst)))) "a1")))))
@@ -270,17 +279,80 @@
 (defui marks-line []
   [:p (marks ["b" "a"]) (map rank ["a"])])
 
+(b/defn rank-dotimes [n] (dotimes [rank n] (inc rank)))
+(b/defn rank-as [n] (as-> n rank (inc rank)))
+(b/defn rank-catch [n] (try (inc n) (catch Exception rank (str rank))))
+(b/defn rank-case [n] (case n rank 1 2))
+
+(b/defn rank-letfn [n] (letfn [(rank [x] (inc x))] (rank n)))
+(b/defn rank-member [s] (.rank s))
+
+(b/defn depth [xs] (if (seq xs) (map depth xs) 1))
+
+(b/defn rank-in-browser [xs] (host :clj 1 :cljs (map rank xs)))
+
+(b/defn exists? [x] (some? x))
+(b/defn known [x] (exists? x))
+
+(b/defn qualified-rank [xs] (map buzz.core-test/rank xs))
+
+(defui rank-button []
+  [:button {:on-click (fn [e] (map rank [e]))} "x"])
+
 (deftest a-part-named-as-a-value-is-a-dependency
   (testing "a part records the part it passes on"
     (is (= ['buzz.core-test/rank] (:buzz/parts (meta marks))))
-    (is (str/includes? (:buzz/js (meta marks)) "sort_by(buzz_DOT_core_test_SLASH_rank,")))
+    (is (re-find (alias-use "buzz_DOT_core_test_SLASH_rank" "sort_by\\(\\1,")
+                 (:buzz/js (meta marks)))))
 
   (testing "a component records it too"
     (is (= #{'buzz.core-test/marks 'buzz.core-test/rank} (set (:parts (marks-line)))))
-    (is (str/includes? (:js (marks-line)) "map(buzz_DOT_core_test_SLASH_rank,")))
+    (is (re-find (alias-use "buzz_DOT_core_test_SLASH_rank" "map\\(\\1,")
+                 (:js (marks-line)))))
 
   (testing "a local of the same name stays a local"
-    (is (= [] (:buzz/parts (meta shadowed-rank)))))
+    (is (= [] (:buzz/parts (meta shadowed-rank))))
+    (is (= [] (:buzz/parts (meta rank-dotimes))))
+    (is (= [] (:buzz/parts (meta rank-as))))
+    (is (= 2 (rank-as 1)))
+    (is (= [] (:buzz/parts (meta rank-catch))))
+    (is (= 2 (rank-catch 1)))
+    (is (= [] (:buzz/parts (meta rank-letfn))))
+    (is (= 2 (rank-letfn 1))))
+
+  (testing "a method named `rank` records no part"
+    (is (= [] (:buzz/parts (meta rank-member)))))
+
+  (testing "a case test of the same name is a constant"
+    (is (= [] (:buzz/parts (meta rank-case))))
+    (is (= 1 (rank-case 'rank))))
+
+  (testing "a part can pass itself on"
+    (is (= ['buzz.core-test/depth] (:buzz/parts (meta depth))))
+    (is (= [1 1] (depth [[] []]))))
+
+  (testing "a part named only in a :cljs branch is a dependency"
+    (is (= ['buzz.core-test/rank] (:buzz/parts (meta rank-in-browser))))
+    (is (re-find (alias-use "buzz_DOT_core_test_SLASH_rank" "map\\(\\1,")
+                 (:buzz/js (meta rank-in-browser)))))
+
+  (testing "a call to a part named `exists?` calls the part"
+    (is (re-find (alias-use "buzz_DOT_core_test_SLASH_exists_QMARK_" "return \\1\\(x\\)")
+                 (:buzz/js (meta known)))))
+
+  (testing "a qualified name is the module binding"
+    (is (= ['buzz.core-test/rank] (:buzz/parts (meta qualified-rank))))
+    (is (str/includes? (:buzz/js (meta qualified-rank)) "map(buzz_DOT_core_test_SLASH_rank,")))
+
+  (testing "a form that Clojure cannot expand is walked as a call"
+    (is (= {'rank 'buzz.core-test/rank}
+           (binding [*ns* (the-ns 'buzz.core-test)]
+             (#'b/part-aliases '[(if-let [a 1 b 2] (rank a))] [])))))
+
+  (testing "a handler can pass a part on"
+    (is (= ['buzz.core-test/rank] (:parts (rank-button))))
+    (is (re-find (alias-use "buzz_DOT_core_test_SLASH_rank" "map\\(\\1,")
+                 (:js (rank-button)))))
 
   (testing "server rendering calls the part"
     (is (= "ab" (marks ["b" "a"])))
@@ -323,7 +395,8 @@
 
 (deftest a-part-may-be-named-after-a-reserved-word
   (let [inst (trash-list)]
-    (is (re-find #"buzz_DOT_core_test_SLASH_delete\(\"old\"\)" (:js inst)))
+    (is (re-find (alias-use "buzz_DOT_core_test_SLASH_delete" "\\1\\(\"old\"\\)")
+                 (:js inst)))
     (is (str/includes? (pr-str ((:ssr inst))) "old"))))
 
 ;; The sixth mark. Inside a slot it is the request that opened the stream,

@@ -490,6 +490,35 @@
   {:title "stepped"
    :mounts [{:el "app" :ui #'stepped-panel}]})
 
+(handler/defn nest [xs] (if (seq xs) (mapv nest xs) 1))
+
+(handler/defn pong [xs] xs)
+(handler/defn ping [xs] (mapv pong xs))
+#_{:clj-kondo/ignore [:redefined-var]}
+(handler/defn pong [xs] (if (seq xs) (mapv ping xs) 0))
+
+(defui nested-panel []
+  [:p (str (nest [[] []])) (str (ping [[[]]]))])
+
+(deftest a-part-reads-another-part-when-it-is-called
+  (let [body (:body ((handler/handler {:mounts [{:el "app" :ui #'nested-panel}]})
+                     {:uri "/components.mjs"}))
+        reads-inside (fn [part other]
+                       (re-find (re-pattern (str "const buzz_DOT_handler_test_SLASH_" part
+                                                 " = \\(function \\(\\w*\\) \\{\n"
+                                                 "(let \\w+ = \\w+;\n)*"
+                                                 "let \\w+ = buzz_DOT_handler_test_SLASH_" other ";"))
+                                body))]
+    (testing "a part that passes itself on"
+      (is (reads-inside "nest" "nest")))
+    (testing "two parts that name each other"
+      (is (reads-inside "ping" "pong"))
+      (is (reads-inside "pong" "ping")))
+    (testing "the first paint calls them"
+      (is (str/includes? (:body ((handler/handler {:mounts [{:el "app" :ui #'nested-panel}]})
+                                 {:uri "/"}))
+                         "<p>[1 1][[[]]]</p>")))))
+
 (deftest a-function-part-serves-and-answers-through-its-component
   (reset! steps 0)
   (with-connection stepped-spec
@@ -500,7 +529,8 @@
       (testing "the module defines the part the component calls"
         (let [body (:body ((handler/handler stepped-spec) {:uri "/components.mjs"}))]
           (is (str/includes? body "const buzz_DOT_handler_test_SLASH_step_button = "))
-          (is (str/includes? body "buzz_DOT_handler_test_SLASH_step_button("))))
+          (is (re-find #"let (\w+) = buzz_DOT_handler_test_SLASH_step_button;[\s\S]*\1\(\"go\"\)"
+                       body))))
 
       (testing "the mount dispatches to the part handler"
         (is (= 204 (first (rpc conn "buzz.handler-test/step-button/0" []))))

@@ -340,22 +340,132 @@
   (swap! acc update :part-syms assoc (js-part-sym qualified) qualified)
   (js-part-sym qualified))
 
-(defn- part-name
-  "Returns the qualified name of the part `sym` names, if it names one."
+(defn- part-info
+  "Returns the name and arity of the part `sym` names, if it names one."
   [sym scope]
+  ;; Resolve self-reference before the part var exists.
   (if (and *self* (= sym (:name *self*)) (not (scope sym)))
-    (:qualified *self*)
+    {:qualified (:qualified *self*) :arity (:arity *self*) :simple (:name *self*)}
     (when-let [v (part-var sym scope)]
       (when (parts/fn-part? @v)
-        (:buzz/name (meta @v))))))
+        (let [m (meta @v)]
+          {:qualified (:buzz/name m) :arity (:buzz/arity m)
+           :simple (symbol (name (:buzz/name m)))})))))
 
-(defn- fn-part-call
-  [{:keys [qualified arity simple]} args scope lambda? comp-id acc]
+(defn- check-arity!
+  [{:keys [qualified arity simple]} args]
   (when-not (= arity (count args))
     (throw (ex-info (str simple " expects " arity
                          (if (= 1 arity) " argument" " arguments")
                          ", received " (count args))
-                    {:part qualified :args (vec args)})))
+                    {:part qualified :args (vec args)}))))
+
+(declare ^:private free-parts)
+
+(defn- free-parts-in [forms locals found]
+  (doseq [form forms]
+    (free-parts form locals found)))
+
+(defn- free-parts-bindings
+  "Walks the inits of a `let*` or `loop*` vector and returns the locals after it."
+  [bindings locals found]
+  (reduce (fn [locals [sym init]]
+            (free-parts init locals found)
+            (conj locals sym))
+          locals
+          (partition 2 bindings)))
+
+(defn- free-parts-fn* [[_ & more] locals found]
+  (let [fname   (when (symbol? (first more)) (first more))
+        more    (if fname (rest more) more)
+        locals  (cond-> locals fname (conj fname))
+        arities (if (vector? (first more)) [more] more)]
+    (doseq [[params & body] arities]
+      (free-parts-in body (into locals (remove #{'&} params)) found))))
+
+(defn- free-parts-try [[_ & forms] locals found]
+  (doseq [form forms]
+    (if (and (seq? form) (= 'catch (first form)))
+      (let [[_ _ sym & body] form]
+        (free-parts-in body (conj locals sym) found))
+      (free-parts form locals found))))
+
+(defn- expand-1
+  "Expands `form` once. A form that only Squint understands is a call."
+  [form]
+  (try (macroexpand-1 form)
+       (catch Throwable _ form)))
+
+(def ^:private special-heads
+  '#{quote var let* loop* fn* letfn* try case* . new def})
+
+(defn- free-parts
+  "Records in `found` each part that `form` refers to outside a local of the
+  same name. Expands a copy of `form`, so every macro is reduced to the special
+  forms that bind names."
+  [form locals found]
+  (cond
+    (simple-symbol? form)
+    (when-let [part (part-info form locals)]
+      (swap! found assoc form (:qualified part)))
+
+    (and (seq? form) (seq form))
+    (let [head (first form)
+          expanded (if (and (symbol? head)
+                            (not (locals head))
+                            (not (special-heads head)))
+                     (expand-1 form)
+                     form)]
+      (if (not= expanded form)
+        (recur expanded locals found)
+        (case (when-not (and (symbol? head) (locals head)) head)
+          (quote var) nil
+          (let* loop*) (let [[_ bindings & body] form]
+                         (free-parts-in body (free-parts-bindings bindings locals found) found))
+          fn*    (free-parts-fn* form locals found)
+          letfn* (let [[_ bindings & body] form
+                       locals (into locals (take-nth 2 bindings))]
+                   (free-parts-in (take-nth 2 (rest bindings)) locals found)
+                   (free-parts-in body locals found))
+          try    (free-parts-try form locals found)
+          ;; A test is a constant.
+          case*  (let [[_ expr _ _ default clauses] form]
+                   (free-parts-in (list* expr default (map second (vals clauses)))
+                                  locals found))
+          ;; The member is a name.
+          .      (let [[_ target member & args] form]
+                   (free-parts target locals found)
+                   (free-parts-in (if (seq? member) (rest member) args) locals found))
+          new    (free-parts-in (drop 2 form) locals found)
+          def    (free-parts-in (drop 2 form) locals found)
+          (do (when-let [part (and (simple-symbol? head) (part-info head locals))]
+                (check-arity! part (rest form)))
+              (free-parts-in form locals found)))))
+
+    (map? form)  (free-parts-in (mapcat identity form) locals found)
+    (coll? form) (free-parts-in form locals found)))
+
+(defn- part-aliases
+  "Returns a map of simple symbol to qualified part for the parts `forms`
+  refer to. `locals` are the parameters of the function the forms go in."
+  [forms locals]
+  (let [found (atom (sorted-map))]
+    (free-parts-in forms (set locals) found)
+    @found))
+
+(defn- with-aliases
+  "Binds each alias to its module binding around `forms`. The binding sits
+  inside the emitted function, so the module is read on each call."
+  [aliases forms]
+  (if (seq aliases)
+    [(apply list 'let
+            (vec (mapcat (fn [[sym qualified]] [sym (js-part-sym qualified)]) aliases))
+            forms)]
+    forms))
+
+(defn- fn-part-call
+  [{:keys [qualified] :as part} args scope lambda? comp-id acc]
+  (check-arity! part args)
   (apply list (part-ref! qualified acc)
          (mapv #(conv % scope lambda? comp-id acc) args)))
 
@@ -422,30 +532,20 @@
         (let-heads head)    (conv-let form scope lambda? comp-id acc)
         (seq-heads head)    (conv-let form scope lambda? comp-id acc)
         :else
-        (let [v     (part-var head scope)
-              value (when v @v)]
-          (cond
-            ;; Resolve self-recursion before the part var exists.
-            (and *self* (= head (:name *self*)) (not (scope head)))
-            (fn-part-call {:qualified (:qualified *self*) :arity (:arity *self*)
-                           :simple (:name *self*)}
-                          args scope lambda? comp-id acc)
-
-            (parts/fn-part? value)
-            (let [m (meta value)]
-              (fn-part-call {:qualified (:buzz/name m) :arity (:buzz/arity m)
-                             :simple (symbol (name (:buzz/name m)))}
-                            args scope lambda? comp-id acc))
-
-            :else
-            (apply list (mapv #(conv % scope lambda? comp-id acc) form))))))
+        ;; A qualified name cannot be a local. A simple one is left as written
+        ;; and bound by `with-aliases`.
+        (if-let [part (and (qualified-symbol? head) (part-info head scope))]
+          (fn-part-call part args scope lambda? comp-id acc)
+          (apply list (mapv #(conv % scope lambda? comp-id acc) form)))))
 
     (vector? form) (mapv #(conv % scope lambda? comp-id acc) form)
     (map? form)    (into {} (mapv (fn [[k v]] [(conv k scope lambda? comp-id acc)
                                                (conv v scope lambda? comp-id acc)])
                                   form))
     (set? form)    (into #{} (mapv #(conv % scope lambda? comp-id acc) form))
-    (symbol? form) (if-let [q (part-name form scope)] (part-ref! q acc) form)
+    (qualified-symbol? form) (if-let [part (part-info form scope)]
+                               (part-ref! (:qualified part) acc)
+                               form)
     :else form))
 
 (defn- js-symbol
@@ -573,7 +673,9 @@
                      :req-sym (gensym "req__")})
         forms (mapv #(conv % (binder-syms argv) false (str qualified) acc) body)
         {:keys [slots handlers locals parts part-syms]} @acc
-        nm    (name qualified)]
+        nm    (name qualified)
+        browser (browser-forms forms)
+        aliases (part-aliases browser (binder-syms argv))]
     (when (seq slots)
       (throw (ex-info (str "(server ...) in " nm " must be passed from defui: "
                            "(" nm " (server ...))")
@@ -582,13 +684,13 @@
       (throw (ex-info (str "(local-state ...) in " nm
                            " must be created in defui and passed as an argument")
                       {:part qualified})))
-    {:js        (to-js (browser-forms (apply list 'fn argv forms)))
+    {:js        (to-js (apply list 'fn argv (with-aliases aliases browser)))
      ;; Restore part vars for server rendering.
      :ssr-forms (doto (mapv ssr-form (walk/postwalk-replace part-syms forms))
                   (refuse-js nm))
      :handlers  handlers
      :req-sym   (:req-sym @acc)
-     :parts     parts}))
+     :parts     (into parts (vals aliases))}))
 
 (clojure.core/defn touch!
   "Increments the revision without recompiling components."
@@ -613,11 +715,16 @@
         forms (mapv #(conv % #{} false comp-id acc) body)
         {:keys [slots handlers locals parts part-syms req-sym slot-request?]} @acc
         params (into (mapv :sym slots) (mapv :sym locals))
-        inits  (mapv :init locals)]
-    {:js         (to-js (browser-forms (apply list 'fn params forms)))
+        inits  (mapv :init locals)
+        browser (browser-forms forms)
+        browser-inits (browser-forms inits)
+        aliases (part-aliases browser params)
+        init-aliases (part-aliases browser-inits (mapv :sym slots))]
+    {:js         (to-js (apply list 'fn params (with-aliases aliases browser)))
      ;; the initial values take the slots, so a local can start from what the
      ;; server sent rather than only from a literal
-     :init-js    (to-js (browser-forms (list 'fn (mapv :sym slots) inits)))
+     :init-js    (to-js (apply list 'fn (mapv :sym slots)
+                               (with-aliases init-aliases [browser-inits])))
      :init-syms  (mapv :sym slots)
      :init-ssr   (doto (mapv ssr-form (walk/postwalk-replace part-syms inits))
                    (refuse-js "(local-state ...)"))
@@ -628,7 +735,7 @@
      :handlers   handlers
      :req-sym    req-sym
      :request?   slot-request?
-     :parts      parts
+     :parts      (-> parts (into (vals aliases)) (into (vals init-aliases)))
      :slot-syms  params}))
 
 (defmacro defui
