@@ -2,8 +2,7 @@
 ;; them on the classpath, so they are listed here.
 {:paths ["src" "resources"]
  :deps {io.github.borkdude/reagami {:git/sha "d7d526d8a4472b94ba01ee82fbfc44bb6a12ab8d"}
-        io.github.squint-cljs/squint {:git/tag "v0.14.208"
-                                      :git/sha "e83befd03153b842d45cd25a77fefb915f120eb7"}
+        io.github.squint-cljs/squint {:git/sha "90d7c723f9593acf8e9f7f3a886e7ee392818d2f"}
         babashka/fs {:mvn/version "0.5.26"}
         cheshire/cheshire {:mvn/version "6.1.0"}
         ;; 2.7.0 to 2.8.1 do not notice a client that went away, so a browser
