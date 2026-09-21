@@ -333,6 +333,22 @@
   [qualified]
   (symbol (js-name qualified)))
 
+(defn- part-ref!
+  "Records a dependency on a part and returns its module binding."
+  [qualified acc]
+  (swap! acc update :parts conj qualified)
+  (swap! acc update :part-syms assoc (js-part-sym qualified) qualified)
+  (js-part-sym qualified))
+
+(defn- part-name
+  "Returns the qualified name of the part `sym` names, if it names one."
+  [sym scope]
+  (if (and *self* (= sym (:name *self*)) (not (scope sym)))
+    (:qualified *self*)
+    (when-let [v (part-var sym scope)]
+      (when (parts/fn-part? @v)
+        (:buzz/name (meta @v))))))
+
 (defn- fn-part-call
   [{:keys [qualified arity simple]} args scope lambda? comp-id acc]
   (when-not (= arity (count args))
@@ -340,9 +356,7 @@
                          (if (= 1 arity) " argument" " arguments")
                          ", received " (count args))
                     {:part qualified :args (vec args)})))
-  (swap! acc update :parts conj qualified)
-  (swap! acc update :part-syms assoc (js-part-sym qualified) qualified)
-  (apply list (js-part-sym qualified)
+  (apply list (part-ref! qualified acc)
          (mapv #(conv % scope lambda? comp-id acc) args)))
 
 (defn- conv
@@ -431,6 +445,7 @@
                                                (conv v scope lambda? comp-id acc)])
                                   form))
     (set? form)    (into #{} (mapv #(conv % scope lambda? comp-id acc) form))
+    (symbol? form) (if-let [q (part-name form scope)] (part-ref! q acc) form)
     :else form))
 
 (defn- js-symbol

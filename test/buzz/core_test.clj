@@ -259,6 +259,33 @@
     (testing "server rendering walks the whole tree"
       (is (str/includes? (pr-str (apply (:ssr inst) ((:slots inst)))) "a1")))))
 
+(b/defn rank [c] (if (= "a" c) 0 1))
+
+(b/defn marks [s]
+  (reduce str "" (sort-by rank s)))
+
+(b/defn shadowed-rank [s]
+  (let [rank count] (rank s)))
+
+(defui marks-line []
+  [:p (marks ["b" "a"]) (map rank ["a"])])
+
+(deftest a-part-named-as-a-value-is-a-dependency
+  (testing "a part records the part it passes on"
+    (is (= ['buzz.core-test/rank] (:buzz/parts (meta marks))))
+    (is (str/includes? (:buzz/js (meta marks)) "sort_by(buzz_DOT_core_test_SLASH_rank,")))
+
+  (testing "a component records it too"
+    (is (= #{'buzz.core-test/marks 'buzz.core-test/rank} (set (:parts (marks-line)))))
+    (is (str/includes? (:js (marks-line)) "map(buzz_DOT_core_test_SLASH_rank,")))
+
+  (testing "a local of the same name stays a local"
+    (is (= [] (:buzz/parts (meta shadowed-rank)))))
+
+  (testing "server rendering calls the part"
+    (is (= "ab" (marks ["b" "a"])))
+    (is (str/includes? (pr-str ((:ssr (marks-line)))) "ab"))))
+
 (defpart tally-button []
   [:button {:on-click (fn [_] (server! (swap! clicks inc)))} "+"])
 
