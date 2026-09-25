@@ -6,6 +6,7 @@
             [buzz.source :as source]
             [buzz.stream :as stream]
             [cheshire.core :as json]
+            [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [org.httpkit.server :as http]))
@@ -296,10 +297,15 @@
             (index-spec (str "<!DOCTYPE html>\n<html>\n<body>\n"
                              "<h1>mine</h1>\n"
                              "<div id=\"app\"><!--app--></div>\n"
-                             "<script type=\"importmap\" nonce=\"NONCE\">{}</script>\n"
+                             "<script type=\"importmap\" nonce=\"NONCE\">"
+                             "{\"imports\": {\"squint-cljs/core.js\": \"SQUINT_CORE\"}}</script>\n"
                              "</body>\n</html>\n")))
         {:keys [status headers body]} (ui {:uri "/"})
         nonce (nonce-of (get headers "Content-Security-Policy"))]
+
+    (testing "SQUINT_CORE becomes the versioned URL of the squint runtime"
+      (is (re-find #"\"squint-cljs/core.js\": \"/_buzz/squint-core\.js\?v=[0-9a-f]{12}\"" body))
+      (is (not (str/includes? body "SQUINT_CORE"))))
 
     (testing "the comment becomes the first render of that mount"
       (is (= 200 status))
@@ -611,6 +617,32 @@
             (is (= "no-store" (get headers "Cache-Control")) uri))
           (is (pos? (count body)) uri))))
 
+    (testing "the browser libraries come from the classpath"
+      (let [page    (:body (ui {:uri "/"}))
+            client  (:body (ui {:uri "/client.mjs"}))
+            squint  (second (re-find #"\"squint-cljs/core.js\": \"(/_buzz/squint-core\.js\?v=[0-9a-f]{12})\"" page))
+            reagami (second (re-find #"from '(/_buzz/reagami\.mjs\?v=[0-9a-f]{12})'" client))]
+        (is (some? squint))
+        (is (some? reagami))
+        (is (not (str/includes? page "esm.sh")))
+        (is (not (str/includes? client "esm.sh")))
+        (let [[uri query] (str/split squint #"\?")
+              {:keys [status headers body]} (ui {:uri uri :query-string query})]
+          (is (= 200 status))
+          (is (= "text/javascript" (get headers "Content-Type")))
+          (is (= (slurp (io/resource "squint/core.js")) body))
+          (testing "and kept for a year with the version in the URL"
+            (is (= "public, max-age=31536000, immutable" (get headers "Cache-Control"))))
+          (testing "and revalidated without the version"
+            (is (= "no-cache" (get-in (ui {:uri uri}) [:headers "Cache-Control"])))
+            (is (= 304 (:status (ui {:uri uri :headers {"if-none-match" (get headers "ETag")}}))))))
+        (let [[uri query] (str/split reagami #"\?")
+              {:keys [status headers body]} (ui {:uri uri :query-string query})]
+          (is (= 200 status))
+          (is (= "public, max-age=31536000, immutable" (get headers "Cache-Control")))
+          (is (str/includes? body "from 'squint-cljs/core.js'"))
+          (is (str/includes? body "render")))))
+
     (testing "the components module imports what it needs"
       (let [body (:body (ui {:uri "/components.mjs"}))]
         (is (str/includes? body "import * as SQ from \"squint-cljs/core.js\""))
@@ -746,6 +778,12 @@
             rpc-js (:body (door {:uri "/signin/rpc.mjs"}))]
         (is (re-find #"EventSource\(.*\"/signin/events\".*location\.search" client))
         (is (re-find #"fetch\(.*\"/signin/rpc\".*location\.search" rpc-js))))
+
+    (testing "and the same URL for the browser libraries as any other handler"
+      (is (re-find #"\"/_buzz/squint-core\.js\?v=" (:body (door {:uri "/signin"}))))
+      (is (re-find #"from '/_buzz/reagami\.mjs\?v=" (:body (door {:uri "/signin/client.mjs"}))))
+      (is (= 200 (:status (door {:uri "/_buzz/squint-core.js"}))))
+      (is (= 200 (:status (door {:uri "/_buzz/reagami.mjs"})))))
 
     (testing "and its own components, importing its own rpc module"
       (let [body (:body (door {:uri "/signin/components.mjs"}))]

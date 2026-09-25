@@ -8,7 +8,7 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [reagami.ssr :as ssr]
-            [squint.compiler :as squint]))
+            [squint.compiler :as squint])  (:import [java.security MessageDigest]))
 
 ;; Each handler registers {:registry :index :spec :mark!} with the hub.
 
@@ -270,6 +270,45 @@
    ;; compiled per request, so never let a stale copy survive an edit
    "Cache-Control" "no-store"})
 
+;; The browser libraries come from the classpath, so a page works offline and
+;; runs the squint its components were compiled with. Every handler serves them
+;; at the same URL, with a hash of the content, so the browser keeps one copy.
+(defn- library [src]
+  (let [digest (.digest (MessageDigest/getInstance "SHA-256") (.getBytes ^String src "UTF-8"))]
+    {:body src :version (apply str (map #(format "%02x" %) (take 6 digest)))}))
+
+(def ^:private squint-core
+  (delay (library (slurp (io/resource "squint/core.js")))))
+
+(def ^:private reagami-module
+  (delay (library (squint/compile-string (slurp (io/resource "reagami/core.cljc"))))))
+
+(def ^:private squint-core-route "/_buzz/squint-core.js")
+
+(def ^:private reagami-route "/_buzz/reagami.mjs")
+
+(defn- squint-core-url [] (str squint-core-route "?v=" (:version @squint-core)))
+
+(defn- reagami-url [] (str reagami-route "?v=" (:version @reagami-module)))
+
+(defn- query-version [req]
+  (some->> (:query-string req) (re-find #"(?:^|&)v=([^&]+)") second))
+
+;; With the current version in the URL the file never changes, so the browser
+;; keeps it for a year. Without one it revalidates.
+(defn- library-module [req lib]
+  (let [{:keys [body version]} @lib
+        tag (str "\"" version "\"")]
+    (if (= tag (get-in req [:headers "if-none-match"]))
+      {:status 304 :headers {"ETag" tag}}
+      {:status 200
+       :headers {"Content-Type"  "text/javascript"
+                 "Cache-Control" (if (= version (query-version req))
+                                   "public, max-age=31536000, immutable"
+                                   "no-cache")
+                 "ETag"          tag}
+       :body body})))
+
 ;; Rewrite runtime routes for a handler path. Match longer paths first.
 (defn- at-path [src path]
   (if (str/blank? path)
@@ -281,7 +320,10 @@
 (defn- runtime-module [n path]
   {:status 200
    :headers js-headers
-   :body (squint/compile-string (at-path (slurp (io/resource (str "buzz/" n))) path))})
+   :body (squint/compile-string
+          (-> (slurp (io/resource (str "buzz/" n)))
+              (at-path path)
+              (str/replace (str \" reagami-route \") (str \" (reagami-url) \"))))})
 
 (defn- components-module [mounts path]
   (let [insts (map #((::instance %)) mounts)
@@ -320,11 +362,9 @@
         locals (mapv atom (apply (:init-ssr inst) vals))]
     (ssr/render (into [(:ssr inst)] (concat vals locals)))))
 
-(def ^:private squint-core "https://esm.sh/squint-cljs@0.14.208/core.js")
-
 (defn- scripts [nonce path]
   (str "<script type=\"importmap\" nonce=\"" nonce "\">\n"
-       "{\"imports\": {\"squint-cljs/core.js\": \"" squint-core "\"}}\n"
+       "{\"imports\": {\"squint-cljs/core.js\": \"" (squint-core-url) "\"}}\n"
        "</script>\n"
        "<script type=\"module\" src=\"" path "/client.mjs\"></script>\n"))
 
@@ -334,7 +374,7 @@
 (defn- generated-page [nonce req {:keys [title head mounts path]}]
   (str "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n"
        "<title>" (escape (or title "buzz")) "</title>\n"
-       (some-> head (str/replace "NONCE" nonce))
+       (some-> head (str/replace "NONCE" nonce) (str/replace "SQUINT_CORE" (squint-core-url)))
        "</head>\n<body>\n"
        (str/join (for [{:keys [el] :as mount} mounts]
                    (str "<div id=\"" (escape el) "\">" (first-paint mount req) "</div>\n")))
@@ -346,7 +386,8 @@
                 (str/replace html (str "<!--" el "-->") (first-paint mount req)))
               (slurp (fs/file index))
               mounts)
-      (str/replace "NONCE" nonce)))
+      (str/replace "NONCE" nonce)
+      (str/replace "SQUINT_CORE" (squint-core-url))))
 
 ;; Set the browser token before concurrent tabs open their streams.
 (defn- index-page [req spec]
@@ -388,6 +429,8 @@
         path   (or path "")
         routes (cond-> {(str path "/")               :page
                         (str path "/client.mjs")     :client
+                        squint-core-route            :squint-core
+                        reagami-route                :reagami
                         (str path "/rpc.mjs")        :rpc-module
                         (str path "/components.mjs") :components
                         (str path "/events")         :events
@@ -398,8 +441,10 @@
       (fn [req]
         (case (routes (:uri req))
           :page       (index-page req spec)
-          :client     (runtime-module "client.cljs" path)
-          :rpc-module (runtime-module "rpc.cljs" path)
+          :client      (runtime-module "client.cljs" path)
+          :squint-core (library-module req squint-core)
+          :reagami     (library-module req reagami-module)
+          :rpc-module  (runtime-module "rpc.cljs" path)
           :components (components-module mounts path)
           :events     (events entry adapter req mounts (:on-close spec) interval)
           :rpc        (rpc entry req)
