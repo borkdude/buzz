@@ -276,12 +276,30 @@
     src
     (reduce (fn [s u] (str/replace s (str \" u) (str \" path u)))
             src
-            ["/components.mjs" "/rpc.mjs" "/events" "/rpc"])))
+            ["/reagami.mjs" "/components.mjs" "/rpc.mjs" "/events" "/rpc"])))
 
 (defn- runtime-module [n path]
   {:status 200
    :headers js-headers
    :body (squint/compile-string (at-path (slurp (io/resource (str "buzz/" n))) path))})
+
+;; The browser libraries come from the classpath, so a page works offline and
+;; runs the squint its components were compiled with.
+(def ^:private squint-core
+  (delay (slurp (io/resource "squint/core.js"))))
+
+(def ^:private reagami-module
+  (delay (squint/compile-string (slurp (io/resource "reagami/core.cljc")))))
+
+;; These change only with a dependency bump, so the browser keeps them and
+;; revalidates.
+(defn- library-module [req module]
+  (let [tag (str "\"" (Integer/toHexString (hash @module)) "\"")]
+    (if (= tag (get-in req [:headers "if-none-match"]))
+      {:status 304 :headers {"ETag" tag}}
+      {:status 200
+       :headers {"Content-Type" "text/javascript" "Cache-Control" "no-cache" "ETag" tag}
+       :body @module})))
 
 (defn- components-module [mounts path]
   (let [insts (map #((::instance %)) mounts)
@@ -320,11 +338,9 @@
         locals (mapv atom (apply (:init-ssr inst) vals))]
     (ssr/render (into [(:ssr inst)] (concat vals locals)))))
 
-(def ^:private squint-core "https://esm.sh/squint-cljs@0.14.208/core.js")
-
 (defn- scripts [nonce path]
   (str "<script type=\"importmap\" nonce=\"" nonce "\">\n"
-       "{\"imports\": {\"squint-cljs/core.js\": \"" squint-core "\"}}\n"
+       "{\"imports\": {\"squint-cljs/core.js\": \"" path "/squint-core.js\"}}\n"
        "</script>\n"
        "<script type=\"module\" src=\"" path "/client.mjs\"></script>\n"))
 
@@ -388,6 +404,8 @@
         path   (or path "")
         routes (cond-> {(str path "/")               :page
                         (str path "/client.mjs")     :client
+                        (str path "/squint-core.js") :squint-core
+                        (str path "/reagami.mjs")    :reagami
                         (str path "/rpc.mjs")        :rpc-module
                         (str path "/components.mjs") :components
                         (str path "/events")         :events
@@ -398,8 +416,10 @@
       (fn [req]
         (case (routes (:uri req))
           :page       (index-page req spec)
-          :client     (runtime-module "client.cljs" path)
-          :rpc-module (runtime-module "rpc.cljs" path)
+          :client      (runtime-module "client.cljs" path)
+          :squint-core (library-module req squint-core)
+          :reagami     (library-module req reagami-module)
+          :rpc-module  (runtime-module "rpc.cljs" path)
           :components (components-module mounts path)
           :events     (events entry adapter req mounts (:on-close spec) interval)
           :rpc        (rpc entry req)

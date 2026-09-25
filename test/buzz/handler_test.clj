@@ -6,6 +6,7 @@
             [buzz.source :as source]
             [buzz.stream :as stream]
             [cheshire.core :as json]
+            [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [org.httpkit.server :as http]))
@@ -611,6 +612,25 @@
             (is (= "no-store" (get headers "Cache-Control")) uri))
           (is (pos? (count body)) uri))))
 
+    (testing "the browser libraries come from the classpath"
+      (let [page (:body (ui {:uri "/"}))]
+        (is (str/includes? page "\"squint-cljs/core.js\": \"/squint-core.js\""))
+        (is (not (str/includes? page "esm.sh"))))
+      (is (not (str/includes? (:body (ui {:uri "/client.mjs"})) "esm.sh")))
+      (is (str/includes? (:body (ui {:uri "/client.mjs"})) "/reagami.mjs"))
+      (let [{:keys [status headers body]} (ui {:uri "/squint-core.js"})]
+        (is (= 200 status))
+        (is (= "text/javascript" (get headers "Content-Type")))
+        (is (= (slurp (io/resource "squint/core.js")) body))
+        (testing "and revalidated with the ETag"
+          (is (= "no-cache" (get headers "Cache-Control")))
+          (is (= 304 (:status (ui {:uri "/squint-core.js"
+                                   :headers {"if-none-match" (get headers "ETag")}}))))))
+      (let [{:keys [status body]} (ui {:uri "/reagami.mjs"})]
+        (is (= 200 status))
+        (is (str/includes? body "from 'squint-cljs/core.js'"))
+        (is (str/includes? body "render"))))
+
     (testing "the components module imports what it needs"
       (let [body (:body (ui {:uri "/components.mjs"}))]
         (is (str/includes? body "import * as SQ from \"squint-cljs/core.js\""))
@@ -745,7 +765,13 @@
       (let [client (:body (door {:uri "/signin/client.mjs"}))
             rpc-js (:body (door {:uri "/signin/rpc.mjs"}))]
         (is (re-find #"EventSource\(.*\"/signin/events\".*location\.search" client))
-        (is (re-find #"fetch\(.*\"/signin/rpc\".*location\.search" rpc-js))))
+        (is (re-find #"fetch\(.*\"/signin/rpc\".*location\.search" rpc-js))
+        (is (str/includes? client "from '/signin/reagami.mjs'"))))
+
+    (testing "and its own copy of the browser libraries"
+      (is (str/includes? (:body (door {:uri "/signin"})) "\"/signin/squint-core.js\""))
+      (is (= 200 (:status (door {:uri "/signin/squint-core.js"}))))
+      (is (= 200 (:status (door {:uri "/signin/reagami.mjs"})))))
 
     (testing "and its own components, importing its own rpc module"
       (let [body (:body (door {:uri "/signin/components.mjs"}))]

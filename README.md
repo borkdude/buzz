@@ -270,7 +270,7 @@ page's content security policy:
 ```html
 <div id="app"><!--app--></div>
 <script type="importmap" nonce="NONCE">
-  {"imports": {"squint-cljs/core.js": "https://esm.sh/squint-cljs@0.14.208/core.js"}}
+  {"imports": {"squint-cljs/core.js": "/squint-core.js"}}
 </script>
 <script type="module" src="/client.mjs"></script>
 ```
