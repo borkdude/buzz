@@ -265,12 +265,13 @@ Set `:index` to use your own HTML file:
 Add an element with the ID from `:mounts` and the scripts shown below. Put
 `<!--app-->` inside the element to show the component before the browser
 connects. Keep the `NONCE` attribute so the inline script can run under the
-page's content security policy:
+page's content security policy. Buzz replaces `SQUINT_CORE` with the URL of the
+squint runtime it serves, which carries a version so the browser keeps it:
 
 ```html
 <div id="app"><!--app--></div>
 <script type="importmap" nonce="NONCE">
-  {"imports": {"squint-cljs/core.js": "/squint-core.js"}}
+  {"imports": {"squint-cljs/core.js": "SQUINT_CORE"}}
 </script>
 <script type="module" src="/client.mjs"></script>
 ```

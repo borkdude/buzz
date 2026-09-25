@@ -3,7 +3,7 @@
 ;; imports, so the page never evaluates anything it was handed at runtime.
 
 (ns client
-  (:require ["/reagami.mjs" :as reagami]
+  (:require ["/_buzz/reagami.mjs" :as reagami]
             ["/components.mjs" :as components]
             ["/rpc.mjs" :as rpc]))
 
