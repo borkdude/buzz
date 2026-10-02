@@ -239,6 +239,21 @@ a connection closes. The callback receives the request that opened it:
 (buzz/handler {:on-close (fn [req] (swap! queries dissoc (buzz/connection req))) ...})
 ```
 
+Use Ring middleware to pass a database or other dependency to your code. Add
+it to the request and read it with `(buzz/request)`, also in a `server!`
+action inside `buzz/defn`:
+
+```clojure
+(defn wrap-db [handler db]
+  (fn [req] (handler (assoc req :db db))))
+
+(def app (wrap-db ui datasource))
+
+(buzz/defn delete-button [id]
+  [:button {:on-click (fn [_] (server! (db/delete! (:db (buzz/request)) (client id))))}
+   "delete"])
+```
+
 
 ## Customize the page
 
