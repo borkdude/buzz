@@ -1498,3 +1498,44 @@
   (let [ui (handler/handler {:title "notepad" :mounts [{:el "app" :ui #'notepad}]})
         body (:body (ui {:uri "/"}))]
     (is (str/includes? body "<p>first words</p>"))))
+
+(defui shaken-list []
+  (let [open (local-state false)]
+    [:ul {:on-click (fn [_] (swap! open not))}
+     (for [x (server [1 2])] [:li (inc x)])]))
+
+(defn- served [ui url]
+  (let [[uri query] (str/split url #"\?")]
+    (:body (ui {:uri uri :query-string query}))))
+
+(defn- exports [js]
+  (set (for [e (str/split (second (re-find #"export\s*\{([^}]*)\}" js)) #",")]
+         (last (str/split (str/trim e) #"\s+as\s+")))))
+
+(defn- core-calls [js alias]
+  (set (map second (re-seq (re-pattern (str "\\b" alias "\\.([\\w$]+)")) js))))
+
+(deftest tree-shake-serves-only-the-called-squint-core-functions
+  (let [ui     (handler/handler {:mounts [{:el "app" :ui #'shaken-list}] :tree-shake true})
+        page   (:body (ui {:uri "/"}))
+        url    (second (re-find #"\"squint-cljs/core.js\": \"([^\"]+)\"" page))
+        core   (served ui url)
+        names  (exports core)
+        client (:body (ui {:uri "/client.mjs"}))]
+
+    (testing "the build is smaller than squint core"
+      (is (< (count core) (count (slurp (io/resource "squint/core.js"))))))
+
+    (testing "the build exports the core functions of every served module"
+      (is (every? names (core-calls (:body (ui {:uri "/components.mjs"})) "SQ")))
+      (is (every? names (core-calls client "squint_core")))
+      (is (every? names (core-calls (:body (ui {:uri "/rpc.mjs"})) "squint_core")))
+      (let [reagami (second (re-find #"from '(/_buzz/reagami\.mjs\?v=[0-9a-f]{12})'" client))]
+        (is (every? names (core-calls (served ui reagami) "squint_core")))))
+
+    (testing "the build omits juxt"
+      (is (not (contains? names "juxt"))))
+
+    (testing "components.mjs exports the build version of the import map"
+      (is (str/includes? (:body (ui {:uri "/components.mjs"}))
+                         (str "export const core = \"" (second (str/split url #"v=")) "\""))))))

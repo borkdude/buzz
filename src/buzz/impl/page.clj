@@ -280,14 +280,38 @@
 (def ^:private squint-core
   (delay (library (slurp (io/resource "squint/core.js")))))
 
+(def ^:private reagami-source
+  (delay (squint/compile* (slurp (io/resource "reagami/core.cljc")))))
+
 (def ^:private reagami-module
-  (delay (library (squint/compile-string (slurp (io/resource "reagami/core.cljc"))))))
+  (delay (library (:javascript @reagami-source))))
+
+;; The squint core functions that the runtime modules call.
+(def ^:private runtime-core-vars
+  (delay (into (:used-core-vars @reagami-source)
+               (mapcat #(:used-core-vars (squint/compile* (slurp (io/resource (str "buzz/" %))))))
+               ["client.cljs" "rpc.cljs"])))
+
+;; Tree-shaken squint core builds, keyed by the set of function names.
+(defonce ^:private shaken (atom {}))
+
+(defn- shaken-core [vars]
+  (or (get @shaken vars)
+      (locking shaken
+        (or (get @shaken vars)
+            (let [core-js @(requiring-resolve 'buzz.impl.bundle/core-js)
+                  lib     (library (core-js vars))]
+              (swap! shaken assoc vars lib)
+              lib)))))
+
+(defn- shaken-version [v]
+  (some #(when (= v (:version %)) %) (vals @shaken)))
 
 (def ^:private squint-core-route "/_buzz/squint-core.js")
 
 (def ^:private reagami-route "/_buzz/reagami.mjs")
 
-(defn- squint-core-url [] (str squint-core-route "?v=" (:version @squint-core)))
+(defn- squint-core-url [lib] (str squint-core-route "?v=" (:version lib)))
 
 (defn- reagami-url [] (str reagami-route "?v=" (:version @reagami-module)))
 
@@ -297,7 +321,7 @@
 ;; With the current version in the URL the file never changes, so the browser
 ;; keeps it for a year. Without one it revalidates.
 (defn- library-module [req lib]
-  (let [{:keys [body version]} @lib
+  (let [{:keys [body version]} lib
         tag (str "\"" version "\"")]
     (if (= tag (get-in req [:headers "if-none-match"]))
       {:status 304 :headers {"ETag" tag}}
@@ -325,14 +349,30 @@
               (at-path path)
               (str/replace (str \" reagami-route \") (str \" (reagami-url) \"))))})
 
-(defn- components-module [mounts path]
-  (let [insts (map #((::instance %)) mounts)
-        ;; Resolve parts per request so edits do not require recompiling callers.
-        parts (parts/parts-closure (mapcat :parts insts))]
+(defn- page-code
+  "Returns the component instances of mounts and the parts they reach."
+  [mounts]
+  (let [insts (mapv #((::instance %)) mounts)]
+    ;; Resolve parts per request so edits do not require recompiling callers.
+    {:insts insts :parts (parts/parts-closure (mapcat :parts insts))}))
+
+(defn- page-core
+  "Returns the squint core library for the page of spec."
+  [{:keys [mounts tree-shake]}]
+  (if tree-shake
+    (let [{:keys [insts parts]} (page-code mounts)]
+      (shaken-core (-> @runtime-core-vars
+                       (into (mapcat :core-vars) insts)
+                       (into (mapcat :buzz/core-vars) (vals parts)))))
+    @squint-core))
+
+(defn- components-module [spec path]
+  (let [{:keys [insts parts]} (page-code (:mounts spec))]
     {:status 200
      :headers js-headers
      :body (str "import * as SQ from \"squint-cljs/core.js\";\n"
                 "import { rpc_BANG_ } from \"" path "/rpc.mjs\";\n"
+                "export const core = \"" (:version (page-core spec)) "\";\n"
                 (str/join (for [[sym m] parts]
                             (str "const " (parts/js-name sym) " = " (:buzz/js m) ";\n")))
                 "export const registry = {\n"
@@ -362,42 +402,45 @@
         locals (mapv atom (apply (:init-ssr inst) vals))]
     (ssr/render (into [(:ssr inst)] (concat vals locals)))))
 
-(defn- scripts [nonce path]
+(defn- scripts [nonce path core-url]
   (str "<script type=\"importmap\" nonce=\"" nonce "\">\n"
-       "{\"imports\": {\"squint-cljs/core.js\": \"" (squint-core-url) "\"}}\n"
+       "{\"imports\": {\"squint-cljs/core.js\": \"" core-url "\"}}\n"
        "</script>\n"
        "<script type=\"module\" src=\"" path "/client.mjs\"></script>\n"))
 
 (defn- escape [s]
   (str/escape (str s) {\& "&amp;" \< "&lt;" \> "&gt;" \" "&quot;"}))
 
-(defn- generated-page [nonce req {:keys [title head mounts path]}]
+(defn- generated-page [nonce req {:keys [title head mounts path]} core-url]
   (str "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n"
        "<title>" (escape (or title "buzz")) "</title>\n"
-       (some-> head (str/replace "NONCE" nonce) (str/replace "SQUINT_CORE" (squint-core-url)))
+       (some-> head (str/replace "NONCE" nonce) (str/replace "SQUINT_CORE" core-url))
        "</head>\n<body>\n"
        (str/join (for [{:keys [el] :as mount} mounts]
                    (str "<div id=\"" (escape el) "\">" (first-paint mount req) "</div>\n")))
-       (scripts nonce (or path ""))
+       (scripts nonce (or path "") core-url)
        "</body>\n</html>\n"))
 
-(defn- rendered-page [nonce req {:keys [index mounts]}]
+(defn- rendered-page [nonce req {:keys [index mounts]} core-url]
   (-> (reduce (fn [html {:keys [el] :as mount}]
                 (str/replace html (str "<!--" el "-->") (first-paint mount req)))
               (slurp (fs/file index))
               mounts)
       (str/replace "NONCE" nonce)
-      (str/replace "SQUINT_CORE" (squint-core-url))))
+      (str/replace "SQUINT_CORE" core-url)))
 
 ;; Set the browser token before concurrent tabs open their streams.
 (defn- index-page [req spec]
-  (let [nonce (str (random-uuid))]
+  (let [nonce    (str (random-uuid))
+        core-url (squint-core-url (page-core spec))]
     {:status 200
      :headers (cond-> {"Content-Type" "text/html"
                        "Content-Security-Policy" (csp nonce)}
                 (nil? (browser-token req))
                 (merge (token-headers (str (random-uuid)))))
-     :body (if (:index spec) (rendered-page nonce req spec) (generated-page nonce req spec))}))
+     :body (if (:index spec)
+             (rendered-page nonce req spec core-url)
+             (generated-page nonce req spec core-url))}))
 
 (defn handler
   "Returns a Ring handler for one page. Unknown routes return nil. `:path`
@@ -411,6 +454,11 @@
                       {:mount (select-keys m [:el])})))
     (when-not (:ui m)
       (throw (ex-info "Mount requires :ui with a component var or thunk." {:mount m}))))
+  (when (:tree-shake spec)
+    (try (requiring-resolve 'buzz.impl.bundle/core-js)
+         (catch Exception e
+           (throw (ex-info ":tree-shake needs org.babashka/esbuild on the classpath"
+                           {} e)))))
   @heartbeat
   (let [adapter  (or (:adapter spec)
                      ;; Load the default adapter only when needed.
@@ -442,10 +490,11 @@
         (case (routes (:uri req))
           :page       (index-page req spec)
           :client      (runtime-module "client.cljs" path)
-          :squint-core (library-module req squint-core)
-          :reagami     (library-module req reagami-module)
+          :squint-core (library-module req (or (shaken-version (query-version req))
+                                               @squint-core))
+          :reagami     (library-module req @reagami-module)
           :rpc-module  (runtime-module "rpc.cljs" path)
-          :components (components-module mounts path)
+          :components (components-module spec path)
           :events     (events entry adapter req mounts (:on-close spec) interval)
           :rpc        (rpc entry req)
           nil))

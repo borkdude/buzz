@@ -153,7 +153,8 @@
                         (parts/fn-part-meta
                          {:buzz/name '~qualified
                           :buzz/arity ~(count argv)
-                          :buzz/js ~js
+                          :buzz/js ~(:body js)
+                          :buzz/core-vars ~(:used-core-vars js)
                           :buzz/parts '~(vec parts)
                           :buzz/handlers ~(handlers-form handlers req-sym)})))
              ;; Recompile callers only when the argument count changes.
@@ -530,7 +531,9 @@
   (swap! revision inc))
 
 (defn- to-js
-  "Compiles the browser form to a self-contained JavaScript expression. `SQ` and
+  "Compiles the browser form to a self-contained JavaScript expression.
+  Returns `{:body js :used-core-vars names}`, where names are the squint core
+  functions the expression calls. `SQ` and
   `rpc_BANG_` are left free, so the browser supplies both as arguments rather
   than through globals. Squint runs here, at macro expansion, so the result is a
   string constant like any other.
@@ -538,8 +541,9 @@
   The form goes to `compile*` as data rather than through `compile-string`.
   Printing it would drop metadata, and squint reads `^:async` from there."
   [form]
-  (:body (squint/compile* [form]
-                          {:context :expr :core-alias "SQ" :elide-imports true})))
+  (select-keys (squint/compile* [form]
+                                {:context :expr :core-alias "SQ" :elide-imports true})
+               [:body :used-core-vars]))
 
 (defn- handlers-form
   [handlers req-sym]
@@ -598,11 +602,14 @@
         forms (mapv #(conv % #{} false comp-id acc) body)
         {:keys [slots handlers locals parts part-syms req-sym slot-request?]} @acc
         params (into (mapv :sym slots) (mapv :sym locals))
-        inits  (mapv :init locals)]
-    {:js         (to-js (browser-forms (apply list 'fn params forms)))
-     ;; the initial values take the slots, so a local can start from what the
-     ;; server sent rather than only from a literal
-     :init-js    (to-js (browser-forms (list 'fn (mapv :sym slots) inits)))
+        inits  (mapv :init locals)
+        js     (to-js (browser-forms (apply list 'fn params forms)))
+        ;; the initial values take the slots, so a local can start from what the
+        ;; server sent rather than only from a literal
+        init   (to-js (browser-forms (list 'fn (mapv :sym slots) inits)))]
+    {:js         (:body js)
+     :init-js    (:body init)
+     :core-vars  (into (:used-core-vars js) (:used-core-vars init))
      :init-syms  (mapv :sym slots)
      :init-ssr   (doto (mapv ssr-form (walk/postwalk-replace part-syms inits))
                    (refuse-js "(local-state ...)"))
@@ -624,17 +631,19 @@
      :ssr      the same function, compiled here, for the first paint
      :init     the initial local values as JavaScript, a function of the slots
      :init-ssr the same function, compiled here, for the first paint
+     :core-vars the squint core functions :js and :init call
      :slots    thunk returning the current values for that function
      :handlers id -> fn, called when the browser sends an :rpc}"
   [nm argv & body]
   (let [comp-id (str nm)
-        {:keys [js init-js init-syms init-ssr locals ssr-forms slot-exprs slot-syms
-                handlers parts req-sym request?]} (split-body body comp-id)]
+        {:keys [js init-js core-vars init-syms init-ssr locals ssr-forms slot-exprs
+                slot-syms handlers parts req-sym request?]} (split-body body comp-id)]
     `(do
        (clojure.core/defn ~nm ~argv
          {:id       ~comp-id
           :js       ~js
           :init     ~init-js
+          :core-vars ~core-vars
           :init-ssr (fn ~init-syms ~init-ssr)
           :locals   ~locals
           :parts    '~(vec parts)

@@ -10,7 +10,7 @@ server state they observe changes.
 [Squint](https://github.com/squint-cljs/squint) compiles your browser code to
 JavaScript. [Reagami](https://github.com/borkdude/reagami) renders your Hiccup.
 
-Run Buzz with Babashka or Java 21 or later. You do not need a ClojureScript
+Run Buzz with Babashka or Java 25 or later. You do not need a ClojureScript
 build or Node.js.
 
 Try the demo from this repository:
@@ -292,6 +292,16 @@ squint runtime it serves, which carries a version so the browser keeps it:
 ```
 
 Omit `<!--app-->` to render that component only after the browser connects.
+
+Set `:tree-shake true` to tree-shake the squint core. Buzz then serves only
+the functions that your components and Buzz call. Add esbuild to your
+dependencies and `--enable-native-access=ALL-UNNAMED` to your JVM options:
+
+```clojure
+org.babashka/esbuild {:mvn/version "0.1.1"}
+```
+
+A live edit that calls other squint core functions loads the page again.
 
 ## Test a component
 

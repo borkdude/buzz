@@ -53,16 +53,19 @@
     (draw! id)))
 
 ;; Live reload. The query string is what makes the browser fetch the module
-;; again instead of handing back the one it already has.
+;; again instead of handing back the one it already has. A new squint core
+;; build needs a new import map, so the page loads again.
 (defn- reload! [rev id vals]
   (-> (js/import (str "/components.mjs?v=" rev))
       (.then (fn [m]
-               (set! (.-v registry) (.-registry m))
-               (let [entry  (.get instances id)
-                     locals (locals-for id entry vals)]
-                 (set! (.-locals entry) locals)
-                 (watch-locals! id locals)
-                 (patch! id vals))))))
+               (if (not= (.-core m) (.-core components))
+                 (.reload js/location)
+                 (do (set! (.-v registry) (.-registry m))
+                     (let [entry  (.get instances id)
+                           locals (locals-for id entry vals)]
+                       (set! (.-locals entry) locals)
+                       (watch-locals! id locals)
+                       (patch! id vals))))))))
 
 (defn- handle [[op a b c]]
   (case op

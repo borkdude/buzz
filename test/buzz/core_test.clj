@@ -540,3 +540,13 @@
                  (refusal '(buzz.core/defn n2 []
                              (buzz.core/host :clj (buzz.core/host :clj js/NaN :cljs 1)
                                              :cljs 2)))))))
+
+(defpart head-item [xs]
+  [:li (first xs)])
+
+(defui mapped []
+  [:ul (map str [1 2])])
+
+(deftest compiled-code-records-its-squint-core-calls
+  (is (contains? (:buzz/core-vars (meta head-item)) "first"))
+  (is (contains? (:core-vars (mapped)) "map")))
