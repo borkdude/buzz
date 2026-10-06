@@ -923,7 +923,7 @@
 
         (testing "a disconnected client is removed while writes continue"
           (.close sock)
-          ;; Allow the 256-slot queue to fill and time out after disconnect.
+          ;; Allow the queue to fill and time out after disconnect.
           (is (until 10000 #(do (swap! shared inc)
                                (empty? (registry-of ui)))))))
       (finally (.close server)))))
@@ -1001,6 +1001,37 @@
 
 ;; A slot that throws must not kill the scheduler: the failed render is
 ;; reported and the next write renders normally.
+(deftest writes-during-a-blocked-send-arrive-as-one-patch
+  (reset! pulse 0)
+  (let [frames (atom [])
+        opened (atom nil)
+        gate   (atom (promise))
+        fake   (fn [_req {:keys [status on-open]}]
+                 (reset! opened on-open)
+                 {:status status :body :fake-stream})
+        ui     (handler/handler {:title "blocked"
+                                 :render-interval-ms 5
+                                 :mounts [{:el "app" :ui #'coalesced-ui}]
+                                 :adapter fake})
+        _      (ui {:uri "/events"})
+        ch     (reify stream/Channel
+                 (send! [_ s] @@gate (swap! frames conj s) true)
+                 (close! [_] nil))]
+    (deliver @gate true)
+    (@opened ch)
+    (is (until 2000 #(mounted? frames)))
+    (let [patches #(count (filter (fn [f] (str/includes? f "\"patch\"")) @frames))
+          start   (patches)]
+      (reset! gate (promise))
+      (swap! pulse inc)
+      (Thread/sleep 50)
+      (dotimes [_ 100] (swap! pulse inc) (Thread/sleep 1))
+      (deliver @gate true)
+      (testing "the last state arrives after the send unblocks"
+        (is (until 2000 #(str/includes? (str (last @frames)) "[101]"))))
+      (testing "the blocked send and the writes after it make two patches"
+        (is (= 2 (- (patches) start)))))))
+
 (defonce ^:private flaky (atom 0))
 (def ^:private flaky-src (handler/atom-source flaky))
 

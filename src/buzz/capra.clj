@@ -1,6 +1,5 @@
 (ns buzz.capra
-  "Capra adapter for `buzz.stream`. A bounded queue prevents stream writes
-  from blocking watch threads."
+  "Capra adapter for `buzz.stream`. `send!` blocks while the queue is full."
   (:require [buzz.stream :as stream]
             [ring.core.protocols :as ring-protocols])
   (:import [java.util.concurrent LinkedBlockingQueue TimeUnit]))
@@ -39,7 +38,7 @@
       (boolean
        (when @open
          ;; Close a connection that stops draining its queue.
-         (or (.offer queue s 1 TimeUnit/SECONDS)
+         (or (.offer queue s 5 TimeUnit/SECONDS)
              (do (die! open out on-close done) false)))))
     (close! [_]
       (die! open out on-close done)
@@ -52,7 +51,7 @@
    :headers headers
    :body    (reify ring-protocols/StreamableResponseBody
               (write-body-to-stream [_ _ out]
-                (let [queue (LinkedBlockingQueue. 256)
+                (let [queue (LinkedBlockingQueue. 4)
                       open  (atom true)
                       done  (promise)
                       pump  (doto (Thread. #(pump! queue out open on-close done))

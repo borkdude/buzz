@@ -254,15 +254,16 @@
                                       (event! ch ["reload" rev (:id instance) vals]))))))
         (signal! lane)))))
 
-;; Keep idle EventSource connections open through proxies.
+;; Ping through each lane to keep idle connections open through proxies.
 (defonce ^:private heartbeat
   (delay
     (future
       (loop []
         (Thread/sleep 25000)
         (doseq [{:keys [registry]} (hub/entries)
-                {:keys [ch]} (vals @registry)]
-          (stream/send! ch ": ping\n\n"))
+                {:keys [ch lane]} (vals @registry)]
+          (swap! (:jobs lane) conj #(stream/send! ch ": ping\n\n"))
+          (signal! lane))
         (recur)))))
 
 (def ^:private js-headers

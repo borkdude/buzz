@@ -1,5 +1,6 @@
 (ns buzz.httpkit
-  "http-kit adapter for `buzz.stream`."
+  "http-kit adapter for `buzz.stream`. `send!` never blocks, so http-kit buffers
+  writes for a slow client."
   (:require [buzz.stream :as stream]
             [org.httpkit.server :as http]))
 
