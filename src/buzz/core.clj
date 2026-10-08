@@ -498,6 +498,8 @@
                      :else (apply list (mapv #(ssr-walk % lambda?) form)))
     :else form))
 
+                     (and (= 'catch (first form)) (= :default (second form)))
+                     (apply list 'catch 'Exception (mapv #(ssr-walk % lambda?) (nnext form)))
 (defn- ssr-form
   "The same form, but renderable here."
   [form]
