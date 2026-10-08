@@ -8,7 +8,8 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [reagami.ssr :as ssr]
-            [squint.compiler :as squint])  (:import [java.security MessageDigest]))
+            [squint.compiler :as squint]
+            [squint.compiler.source-map :as sm])  (:import [java.security MessageDigest]))
 
 ;; Each handler registers {:registry :index :spec :mark!} with the hub.
 
@@ -325,23 +326,80 @@
               (at-path path)
               (str/replace (str \" reagami-route \") (str \" (reagami-url) \"))))})
 
-(defn- components-module [mounts path]
+(defn- source-text [path]
+  (or (some-> (io/resource path) slurp)
+      (when (fs/exists? path) (slurp path))))
+
+(defn- source-name
+  "Returns path relative to the working directory if it lies under it."
+  [path]
+  (let [cwd (fs/cwd)]
+    (if (and (fs/absolute? path) (fs/starts-with? path cwd))
+      (str (fs/relativize cwd path))
+      path)))
+
+(defn- assemble
+  "Returns {:js text :source-map json} for pieces, each a string or
+  {:js text :source-map {:segments segments :source path}}. :source-map is nil
+  if no piece has segments."
+  [pieces]
+  (loop [[p & more :as ps] pieces, out [], line 0, col 0, sources [], segs []]
+    (if (empty? ps)
+      {:js (apply str out)
+       :source-map (when (seq segs)
+                     (sm/encode segs {:file "components.mjs"
+                                      :sources (mapv source-name sources)
+                                      :sources-content (mapv source-text sources)}))}
+      (let [{:keys [js source-map]} (if (string? p) {:js p} p)
+            {:keys [segments source]} source-map
+            mapped? (and source (seq segments))
+            sources (cond-> sources (and mapped? (not (some #{source} sources))) (conj source))
+            si (when mapped? (.indexOf ^java.util.List sources source))
+            segs (cond-> segs
+                   mapped? (into (map (fn [[gl gc sl sc]]
+                                        [(+ gl line) (if (zero? gl) (+ gc col) gc) sl sc si]))
+                                 segments))
+            nl (sm/count-newlines js)
+            col (if (pos? nl) (- (count js) (inc (str/last-index-of js "\n"))) (+ col (count js)))]
+        (recur more (conj out js) (+ line nl) col sources segs)))))
+
+(defn- components-pieces [mounts path]
   (let [insts (map #((::instance %)) mounts)
         ;; Resolve parts per request so edits do not require recompiling callers.
         parts (parts/parts-closure (mapcat :parts insts))]
+    (concat ["import * as SQ from \"squint-cljs/core.js\";\n"
+             (str "import { rpc_BANG_ } from \"" path "/rpc.mjs\";\n")]
+            (mapcat (fn [[sym m]]
+                      [(str "const " (parts/js-name sym) " = ")
+                       {:js (:buzz/js m) :source-map (:buzz/source-map m)}
+                       ";\n"])
+                    parts)
+            ["export const registry = {\n"]
+            (apply concat
+                   (interpose [",\n"]
+                              (map #(vector (str "  " (pr-str (:id %)) ": {f: ")
+                                            {:js (:js %) :source-map (:js-map %)}
+                                            ", init: "
+                                            {:js (:init %) :source-map (:init-map %)}
+                                            (str ", nlocals: " (:locals % 0) "}"))
+                                   insts)))
+            ["\n};\n"])))
+
+(defn- components-module [mounts path]
+  (let [{:keys [js source-map]} (assemble (components-pieces mounts path))]
     {:status 200
      :headers js-headers
-     :body (str "import * as SQ from \"squint-cljs/core.js\";\n"
-                "import { rpc_BANG_ } from \"" path "/rpc.mjs\";\n"
-                (str/join (for [[sym m] parts]
-                            (str "const " (parts/js-name sym) " = " (:buzz/js m) ";\n")))
-                "export const registry = {\n"
-                (str/join ",\n"
-                          (map #(str "  " (pr-str (:id %)) ": {f: " (:js %)
-                                     ", init: " (:init %)
-                                     ", nlocals: " (:locals % 0) "}")
-                               insts))
-                "\n};\n")}))
+     :body (cond-> js source-map (str "//# sourceMappingURL=components.mjs.map\n"))}))
+
+(defn- components-source-map [mounts path]
+  (if-let [source-map (:source-map (assemble (components-pieces mounts path)))]
+    {:status 200
+     :headers {"Content-Type" "application/json; charset=utf-8"
+               "Cache-Control" "no-cache"}
+     :body source-map}
+    {:status 404
+     :headers {"Content-Type" "text/plain"}
+     :body "No source map"}))
 
 ;; Disallow eval. Permit esm.sh scripts, source maps and style attributes.
 (defn- csp [nonce]
@@ -433,6 +491,7 @@
                         reagami-route                :reagami
                         (str path "/rpc.mjs")        :rpc-module
                         (str path "/components.mjs") :components
+                        (str path "/components.mjs.map") :components-map
                         (str path "/events")         :events
                         (str path "/rpc")            :rpc}
                  ;; /admin and /admin/ are the same page
@@ -446,6 +505,7 @@
           :reagami     (library-module req reagami-module)
           :rpc-module  (runtime-module "rpc.cljs" path)
           :components (components-module mounts path)
+          :components-map (components-source-map mounts path)
           :events     (events entry adapter req mounts (:on-close spec) interval)
           :rpc        (rpc entry req)
           nil))

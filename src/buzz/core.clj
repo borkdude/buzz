@@ -145,7 +145,8 @@
                       {:part nm :param p})))
     (let [qualified (symbol (str *ns*) (str nm))
           nm        (cond-> nm doc (vary-meta assoc :doc doc))
-          {:keys [js ssr-forms handlers parts req-sym]}
+          {{:keys [js source-map]} :js ssr-forms :ssr-forms handlers :handlers
+           parts :parts req-sym :req-sym}
           (binding [*self* {:name nm :qualified qualified :arity (count argv)}]
             (split-part-body qualified argv body))]
       `(do (let [was# (when-let [v# (resolve '~nm)] (when (bound? v#) @v#))]
@@ -154,6 +155,7 @@
                          {:buzz/name '~qualified
                           :buzz/arity ~(count argv)
                           :buzz/js ~js
+                          :buzz/source-map ~source-map
                           :buzz/parts '~(vec parts)
                           :buzz/handlers ~(handlers-form handlers req-sym)})))
              ;; Recompile callers only when the argument count changes.
@@ -317,12 +319,13 @@
         tail  (if (vector? (first more))
                 (conv-arity (first more) (rest more) scope comp-id acc)
                 (mapv #(conv-arity (first %) (rest %) scope comp-id acc) more))]
-    (apply list (concat [head] (when fname [fname]) tail))))
+    (with-meta (apply list (concat [head] (when fname [fname]) tail)) (meta form))))
 
 (defn- conv-let [form scope lambda? comp-id acc]
   (let [[head bvec & body] form
         [scope' bvec'] (conv-bindings bvec scope lambda? comp-id acc)]
-    (apply list head bvec' (mapv #(conv % scope' lambda? comp-id acc) body))))
+    (with-meta (apply list head bvec' (mapv #(conv % scope' lambda? comp-id acc) body))
+      (meta form))))
 
 (def js-name
   "Returns a qualified part name as a JavaScript module binding."
@@ -424,7 +427,8 @@
                             args scope lambda? comp-id acc))
 
             :else
-            (apply list (mapv #(conv % scope lambda? comp-id acc) form))))))
+            (with-meta (apply list (mapv #(conv % scope lambda? comp-id acc) form))
+              (meta form))))))
 
     (vector? form) (mapv #(conv % scope lambda? comp-id acc) form)
     (map? form)    (into {} (mapv (fn [[k v]] [(conv k scope lambda? comp-id acc)
@@ -494,12 +498,12 @@
                      (host-form? form) (second form)
                      ;; Omit handlers passed as arguments from server rendering.
                      (= 'rpc! (first form)) nil
+                     (and (= 'catch (first form)) (= :default (second form)))
+                     (apply list 'catch 'Exception (mapv #(ssr-walk % lambda?) (nnext form)))
                      (lambda-form? form) (apply list (mapv #(ssr-walk % true) form))
                      :else (apply list (mapv #(ssr-walk % lambda?) form)))
     :else form))
 
-                     (and (= 'catch (first form)) (= :default (second form)))
-                     (apply list 'catch 'Exception (mapv #(ssr-walk % lambda?) (nnext form)))
 (defn- ssr-form
   "The same form, but renderable here."
   [form]
@@ -526,8 +530,9 @@
   "Expands every defui again. Called when a part's arity changes."
   []
   (binding [*recompiling* true]
-    (doseq [[_ {:keys [ns form]}] @components]
-      (binding [*ns* (the-ns ns)]
+    (doseq [[_ {:keys [ns form file]}] @components]
+      (binding [*ns* (the-ns ns)
+                *file* file]
         (eval form))))
   (swap! revision inc))
 
@@ -536,12 +541,16 @@
   `rpc_BANG_` are left free, so the browser supplies both as arguments rather
   than through globals. Squint runs here, at macro expansion, so the result is a
   string constant like any other.
+  Returns {:js expression :source-map {:segments segments :source file}}.
 
   The form goes to `compile*` as data rather than through `compile-string`.
-  Printing it would drop metadata, and squint reads `^:async` from there."
+  Printing it would drop metadata, and squint reads `^:async` and the source
+  positions from there."
   [form]
-  (:body (squint/compile* [form]
-                          {:context :expr :core-alias "SQ" :elide-imports true})))
+  (let [{:keys [body source-map-segments]}
+        (squint/compile* [form]
+                         {:context :expr :core-alias "SQ" :elide-imports true :source-map true})]
+    {:js body :source-map {:segments source-map-segments :source *file*}}))
 
 (defn- handlers-form
   [handlers req-sym]
@@ -630,13 +639,16 @@
      :handlers id -> fn, called when the browser sends an :rpc}"
   [nm argv & body]
   (let [comp-id (str nm)
-        {:keys [js init-js init-syms init-ssr locals ssr-forms slot-exprs slot-syms
+        {{js :js js-map :source-map} :js {init-js :js init-map :source-map} :init-js
+         :keys [init-syms init-ssr locals ssr-forms slot-exprs slot-syms
                 handlers parts req-sym request?]} (split-body body comp-id)]
     `(do
        (clojure.core/defn ~nm ~argv
          {:id       ~comp-id
           :js       ~js
+          :js-map   ~js-map
           :init     ~init-js
+          :init-map ~init-map
           :init-ssr (fn ~init-syms ~init-ssr)
           :locals   ~locals
           :parts    '~(vec parts)
@@ -648,7 +660,7 @@
           :handlers (merge (part-handlers '~(vec parts))
                            ~(handlers-form handlers req-sym))})
        (register! '~(symbol (str *ns*) (str nm))
-                  {:ns '~(ns-name *ns*) :form '~&form})
+                  {:ns '~(ns-name *ns*) :form '~&form :file ~*file*})
        (var ~nm))))
 
 (def handler
