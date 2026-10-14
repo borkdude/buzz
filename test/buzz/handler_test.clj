@@ -1164,6 +1164,52 @@
       (testing "unchanged values produce no patch"
         (is (silent? (:sock bob) (:rdr bob) 300))))))
 
+(defonce ^:private counter-state (atom {:n 0}))
+(def ^:private counter-source (handler/atom-source counter-state))
+(defonce ^:private counter-runs (atom 0))
+(defonce ^:private bump-at (atom nil))
+
+(defui shared-count []
+  [:p (server (let [n (observe counter-source [:n])]
+                (swap! counter-runs inc)
+                (when (compare-and-set! bump-at n nil)
+                  (swap! counter-state update :n inc))
+                n))])
+
+(defn- patch-with
+  "Reads frames from `rdr` until a patch carries `vals`. Returns that frame."
+  [rdr vals]
+  (loop []
+    (let [ev (next-event rdr)]
+      (if (or (nil? ev) (= vals (nth ev 2)))
+        ev
+        (recur)))))
+
+(deftest a-slot-without-the-request-runs-once-for-every-connection
+  (reset! counter-state {:n 0})
+  (reset! bump-at nil)
+  (with-two {:mounts [{:el "app" :ui #'shared-count}] :render-interval-ms 0}
+    (fn [{:keys [alice bob]}]
+      (reset! counter-runs 0)
+      (swap! counter-state update :n inc)
+      (is (= ["patch" "shared-count" [1]] (next-event (:rdr alice))))
+      (is (= ["patch" "shared-count" [1]] (next-event (:rdr bob))))
+      (testing "the slot ran once for two connections"
+        (is (= 1 @counter-runs))))))
+
+(deftest a-shared-result-is-not-reused-after-its-topic-changes
+  (reset! counter-state {:n 0})
+  (reset! bump-at 1)
+  (with-two {:mounts [{:el "app" :ui #'shared-count}] :render-interval-ms 0}
+    (fn [{:keys [alice bob]}]
+      (testing "a write during the first computation reaches both connections"
+        (swap! counter-state update :n inc)
+        (is (= ["patch" "shared-count" [2]] (patch-with (:rdr alice) [2])))
+        (is (= ["patch" "shared-count" [2]] (patch-with (:rdr bob) [2]))))
+      (testing "no frame arrives after the latest value"
+        (is (silent? (:sock alice) (:rdr alice) 300))
+        (is (silent? (:sock bob) (:rdr bob) 300))))))
+
 (deftest invalidating-a-topic-nobody-holds-does-nothing
   (with-two {:mounts [{:el "app" :ui #'observed-notes}] :render-interval-ms 0}
     (fn [{:keys [alice bob]}]

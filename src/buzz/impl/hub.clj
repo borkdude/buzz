@@ -186,7 +186,8 @@
 ;; Read tracking
 
 (def ^:dynamic *tracking*
-  "Render context containing `:reads`, `:index` and `:session`."
+  "Render context containing `:reads`, `:index` and `:session`, and
+  optionally `:seen`, an atom of the value each topic returned."
   nil)
 
 (defn add-topic!
@@ -197,6 +198,17 @@
                      (update-in [:by-session session] (fnil conj #{}) t)
                      (update-in [:by-topic t] (fnil conj #{}) session)))))
 
+(defn track!
+  "Subscribes the current connection to topic `t`."
+  [t]
+  (if-let [{:keys [reads index session]} *tracking*]
+    ;; Register before reading so concurrent changes trigger another render.
+    (when-not (contains? @reads t)
+      (swap! reads conj t)
+      (add-topic! index session t))
+    ;; Reads outside a render need a scheduled release.
+    (release-unheld! [t])))
+
 (defn observe
   "Reads `k` from `source` and subscribes the current connection to it. Outside
   a slot it is a plain read.
@@ -205,11 +217,13 @@
   [source k]
   (let [t (->SourceTopic source k)
         handle (sub-for t)]
-    (if-let [{:keys [reads index session]} *tracking*]
-      ;; Register before reading so concurrent changes trigger another render.
-      (when-not (contains? @reads t)
-        (swap! reads conj t)
-        (add-topic! index session t))
-      ;; Reads outside a render need a scheduled release.
-      (release-unheld! [t]))
-    @handle))
+    (track! t)
+    (let [v @handle]
+      (when-let [seen (:seen *tracking*)]
+        (swap! seen #(if (contains? % t) % (assoc % t v))))
+      v)))
+
+(defn unchanged?
+  "Returns true if every topic in `seen` still returns the identical value."
+  [seen]
+  (every? (fn [[t v]] (identical? v @(sub-for t))) seen))

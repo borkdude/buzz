@@ -40,10 +40,13 @@
   [req]
   (browser-token req))
 
+(defn- frame [msg]
+  (str "data: " (json/generate-string msg) "\n\n"))
+
 (defn- event!
   "Writes one JSON-encoded SSE frame."
   [ch msg]
-  (stream/send! ch (str "data: " (json/generate-string msg) "\n\n")))
+  (stream/send! ch (frame msg)))
 
 ;; Recompute slots after a change and suppress unchanged patches.
 (defn- slot-vals
@@ -51,11 +54,42 @@
   [{:keys [instance req]}]
   (if (:request instance) ((:slots instance) req) ((:slots instance))))
 
+(defn- fresh-vals
+  "Returns slot values for `mount` and stores them with the topic values read."
+  [{:keys [instance] :as mount}]
+  (let [seen (atom {})
+        vals (binding [hub/*tracking* (assoc hub/*tracking* :seen seen)]
+               (slot-vals mount))
+        c    {:seen @seen :vals vals
+              :frame (delay (frame ["patch" (:id instance) vals]))}]
+    (reset! (::shared instance) c)
+    c))
+
+(defn- reusable [instance]
+  (when-let [c @(::shared instance)]
+    (run! hub/track! (keys (:seen c)))
+    (when (hub/unchanged? (:seen c)) c)))
+
+;; Request-free instances share one result while the topics it read are
+;; unchanged. Lanes that miss together compute once.
+(defn- shared-vals [{:keys [instance] :as mount}]
+  (or (reusable instance)
+      (let [^java.util.concurrent.locks.ReentrantLock lock (::lock instance)]
+        (.lock lock)
+        (try
+          (or (reusable instance) (fresh-vals mount))
+          (finally (.unlock lock))))))
+
 (defn- patch! [ch {:keys [instance sent] :as mount}]
-  (let [vals (slot-vals mount)]
-    (when (not= vals @sent)
-      (reset! sent vals)
-      (event! ch ["patch" (:id instance) vals]))))
+  (if (::shared instance)
+    (let [{:keys [vals frame]} (shared-vals mount)]
+      (when (not= vals @sent)
+        (reset! sent vals)
+        (stream/send! ch @frame)))
+    (let [vals (slot-vals mount)]
+      (when (not= vals @sent)
+        (reset! sent vals)
+        (event! ch ["patch" (:id instance) vals])))))
 
 ;; Cache one component instance per revision.
 (defn- shared-instance [ui]
@@ -64,7 +98,12 @@
       (let [rev @parts/revision c @cache]
         (if (and c (= rev (:rev c)))
           (:inst c)
-          (:inst (reset! cache {:rev rev :inst (if (var? ui) ((deref ui)) (ui))})))))))
+          (let [inst (if (var? ui) ((deref ui)) (ui))
+                inst (cond-> inst
+                       (not (:request inst))
+                       (assoc ::shared (atom nil)
+                              ::lock (java.util.concurrent.locks.ReentrantLock.)))]
+            (:inst (reset! cache {:rev rev :inst inst}))))))))
 
 (defn- build [{:keys [el] :as spec} req]
   {:el el :spec spec :sent (atom ::none) :req req
@@ -162,7 +201,7 @@
             @p))))))
 
 (defn- mount! [ch {:keys [el instance sent] :as m}]
-  (let [vals (slot-vals m)]
+  (let [vals (if (::shared instance) (:vals (fresh-vals m)) (slot-vals m))]
     (reset! sent vals)
     (event! ch ["mount" (:id instance) el vals])))
 
