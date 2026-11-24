@@ -1,5 +1,8 @@
-;; Shipped with the library, so a project using it does not have to know that
-;; defui, defn and defpart bind their arguments.
-{:lint-as {buzz.core/defui clojure.core/defn
-           buzz.core/defn clojure.core/defn
-           buzz.core/defpart clojure.core/defn}}
+;; Lints a defui or buzz/defn body as ClojureScript and its server forms as Clojure.
+{:hooks {:analyze-call {buzz.core/defui hooks.buzz.core/component
+                        buzz.core/defn hooks.buzz.core/component
+                        buzz.core/defpart hooks.buzz.core/component
+                        buzz.core/server hooks.buzz.core/server
+                        buzz.core/server! hooks.buzz.core/server
+                        buzz.core/client hooks.buzz.core/client
+                        buzz.core/host hooks.buzz.core/host}}}
